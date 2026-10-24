@@ -164,12 +164,20 @@ def problem_sets() -> list[dict]:
     return sets
 
 
-def _stream(cmd: list[str], cwd: Path | None = None, env: dict | None = None, result: list | None = None) -> Iterator[str]:
+def _stream(
+    cmd: list[str],
+    cwd: Path | None = None,
+    env: dict | None = None,
+    result: list | None = None,
+    capture: list | None = None,
+) -> Iterator[str]:
     """Run a command, yielding its combined stdout/stderr as it's produced (unbuffered). If
     `result` is given, the process's exit code is appended to it once the command finishes, so a
     caller can gate later steps on whether this one actually succeeded instead of always running
     them next regardless (that gap used to let a failed `git clone` be followed straight into a
-    `git checkout` in a directory that was never a git repo).
+    `git checkout` in a directory that was never a git repo). If `capture` is given, every line is
+    also appended to it, so a caller can inspect what the command actually said (e.g. to tell a
+    private-repo auth failure apart from a network error) instead of only knowing it failed.
 
     stdin is always closed (DEVNULL), never inherited, and GIT_TERMINAL_PROMPT=0 is always set: a
     GUI server has no terminal for a subprocess to prompt against, so a `git` that would otherwise
@@ -190,6 +198,8 @@ def _stream(cmd: list[str], cwd: Path | None = None, env: dict | None = None, re
     )
     assert proc.stdout is not None
     for line in proc.stdout:
+        if capture is not None:
+            capture.append(line)
         yield line
     proc.wait()
     if result is not None:
@@ -220,8 +230,33 @@ def ensure_clone() -> Iterator[str]:
         shutil.rmtree(reliops_dir())
 
     clone_result: list[int] = []
-    yield from _stream(["git", "clone", RELIOPS_REPO_URL, str(reliops_dir())], result=clone_result)
+    clone_output: list[str] = []
+    yield from _stream(
+        ["git", "clone", RELIOPS_REPO_URL, str(reliops_dir())],
+        result=clone_result, capture=clone_output,
+    )
     if clone_result and clone_result[0] != 0:
+        joined = "".join(clone_output)
+        auth_markers = (
+            "could not read Username", "could not read Password", "Authentication failed",
+            "terminal prompts disabled", "Repository not found", "403",
+        )
+        if any(m in joined for m in auth_markers):
+            yield (
+                "\nThat's a GitHub auth failure, not a network problem — ReliOps is a private repo, "
+                "so a plain anonymous clone can't read it. Two things need to be true, once per "
+                "machine (not once per run):\n"
+                "  1. The repo owner adds you as a Collaborator: "
+                "github.com/OmarElzero/ReliOps/settings/access — a private repo won't clone for "
+                "anyone without access, even with a correct token.\n"
+                "  2. Your machine has git credentials for GitHub that don't need a terminal prompt "
+                "(this GUI can't show you one). Easiest: install the GitHub CLI and run "
+                "`gh auth login` once — it wires up git for you. Or generate a Personal Access "
+                "Token (classic, 'repo' scope) at github.com/settings/tokens, run "
+                "`git config --global credential.helper store`, then clone the repo manually one "
+                "time by hand, pasting your GitHub username and the token as the password when "
+                "asked — after that, this tool's own clone will reuse the same saved credentials.\n"
+            )
         yield "git clone failed — stopping before checkout (see the exit code above).\n"
         return
     yield from _stream(["git", "checkout", RELIOPS_BRANCH], cwd=reliops_dir())
