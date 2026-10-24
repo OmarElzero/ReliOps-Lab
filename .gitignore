@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 *.env
-service-account*.json
-firebase-key*.json
+# Any Firebase/service-account key, whatever it's named (people don't always use the suggested
+# name — e.g. "SAK.json", or the console's own default like "reliops-75ba9-firebase-adminsdk-....json"):
+*.json

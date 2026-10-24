@@ -36,9 +36,9 @@ run so you can work on the front end without the full SREGym setup.
   a bundler or a JS framework, that's a v1/v2 conversation (`docs/plan/05-platform-spec.md`), not a
   PR here.
 - **No secrets, ever.** Model API keys and Firebase service-account JSON never get committed — they
-  stay in the user's own `ReliOps/.env` or wherever the GUI's key form writes them. If you're
-  touching `backend/runner.py` or `backend/firebase_sync.py`, double-check nothing you add logs or
-  persists a raw key.
+  stay in this project's own `.env` (see `runner.lab_env_path()`; `.gitignore` already covers
+  `*.env` and `*.json`). If you're touching `backend/runner.py` or `backend/firebase_sync.py`,
+  double-check nothing you add logs or persists a raw key.
 
 ## Commit messages and branches
 

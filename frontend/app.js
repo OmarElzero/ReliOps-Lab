@@ -65,9 +65,9 @@ async function loadConfig() {
     "ReliOps clone: " + CONFIG.reliops_dir + " (created automatically on first Setup run)";
 }
 
-// Firebase has no "Connect" step any more — ReliOps/.env is the only source (see
-// firebase_sync.py). Poll its status periodically so saving a key there, or Setup creating the
-// file, is picked up on its own within a few seconds, with no page reload needed.
+// Firebase has no "Connect" step any more — this project's own .env is the only source (see
+// firebase_sync.py / runner.lab_env_path()). Poll its status periodically so saving a key there
+// is picked up on its own within a few seconds, with no page reload needed.
 let _lastFbStatus = null;
 async function pollFirebaseStatus() {
   try {
@@ -91,7 +91,7 @@ function renderKeyStatus() {
   const provider = document.getElementById("key-provider").value;
   const saved = CONFIG && CONFIG.saved_providers && CONFIG.saved_providers[provider];
   document.getElementById("key-status").textContent = saved
-    ? `${provider} already has a key saved in ReliOps/.env — Save overwrites it.`
+    ? `${provider} already has a key saved — Save overwrites it.`
     : `${provider} has no key saved yet.`;
 }
 

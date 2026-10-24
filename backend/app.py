@@ -65,15 +65,15 @@ class KeyIn(BaseModel):
 def set_key(body: KeyIn):
     try:
         runner.write_key(body.provider, body.value)
-        return {"ok": True, "message": f"saved {body.provider} to your local ReliOps/.env"}
+        return {"ok": True, "message": f"saved {body.provider} to .env in this project's own folder"}
     except OSError as e:
         return {"ok": False, "message": f"could not save {body.provider}: {e}"}
 
 
 @app.get("/api/firebase-status")
 def firebase_status():
-    """Polled by the frontend every few seconds so the status pill reflects ReliOps/.env — there
-    is no manual "Connect" step any more; .env is the only source (see firebase_sync.py)."""
+    """Polled by the frontend every few seconds so the status pill reflects this project's own
+    .env — there is no manual "Connect" step any more; .env is the only source (firebase_sync.py)."""
     return {"status": firebase_sync.status()}
 
 

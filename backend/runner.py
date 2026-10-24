@@ -81,11 +81,38 @@ def sregym_dir() -> Path:
     return reliops_dir() / "external" / "envs" / "sregym"
 
 
+def lab_dir() -> Path:
+    """This tool's own project root (reliops-lab/ — the folder with backend/, frontend/, README.md
+    in it), as opposed to reliops_dir(), the separately *cloned* copy of the main ReliOps repo this
+    tool drives. Two different folders on purpose (this one is the GUI's own code; that one is the
+    benchmark it's testing), but both used to have their own `.env`, and only the clone's was ever
+    read — so a key saved in the one .env a person actually has open in their editor (this one,
+    lab_env_path()) silently went nowhere. lab_env_path() is now the primary source precisely
+    because it's the file next to backend/ and frontend/, not a path nobody is looking at."""
+    return Path(__file__).resolve().parent.parent
+
+
+def lab_env_path() -> Path:
+    return lab_dir() / ".env"
+
+
 def default_firebase_key_path() -> Path:
-    """Where this tool suggests saving a shared Firebase service-account key — next to the ReliOps
-    clone, outside any git repo. The GUI pre-fills its Firebase field with this, so a teammate who
-    saves the file here never has to type a path by hand (README's "Shared results" section)."""
-    return DEFAULT_WORKDIR / "firebase-service-account.json"
+    """Where this tool suggests saving a shared Firebase service-account key — right next to this
+    project's own .env, so "save the file next to the folder you already have open" is the whole
+    instruction (README's "Shared results" section)."""
+    return lab_dir() / "firebase-service-account.json"
+
+
+def merged_env_vars() -> dict[str, str]:
+    """This tool's own .env (lab_env_path()) is the source of truth for every key the GUI itself
+    cares about — model keys, Firebase credentials — because it's the file a person actually opens
+    and edits (see lab_dir()'s docstring). The cloned repo's own .env (reliops_dir()/.env) is read
+    too and used for anything the lab .env doesn't set, since someone following
+    docs/MANUAL-SETUP.md by hand may have set things up there directly before ever opening this
+    GUI; the lab .env wins on any key both define."""
+    merged = read_env_file(reliops_dir() / ".env")
+    merged.update(read_env_file(lab_env_path()))
+    return merged
 
 
 def _read_problems(csv_path: Path) -> list[dict]:
@@ -240,9 +267,9 @@ def read_env_file(env_path: Path) -> dict[str, str]:
 
 
 def saved_providers() -> dict[str, bool]:
-    """Which of the known model-key providers already have a non-empty value in ReliOps/.env —
-    used by the GUI to show "already saved" instead of a blank field that looks unconfigured."""
-    env_vars = read_env_file(reliops_dir() / ".env")
+    """Which of the known model-key providers already have a non-empty value saved — used by the
+    GUI to show "already saved" instead of a blank field that looks unconfigured."""
+    env_vars = merged_env_vars()
     return {p: bool(env_vars.get(p)) for p in KNOWN_PROVIDERS}
 
 
@@ -474,11 +501,8 @@ def doctor() -> dict:
     }
 
 
-def write_key(provider: str, value: str) -> None:
-    """Save an API key into ReliOps/.env — stays on this machine, is never sent anywhere by this
-    tool (SREGym itself reads it directly as an env var when it calls the model provider)."""
-    reliops_dir().mkdir(parents=True, exist_ok=True)
-    env_path = reliops_dir() / ".env"
+def _write_key_to(env_path: Path, provider: str, value: str) -> None:
+    env_path.parent.mkdir(parents=True, exist_ok=True)
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     key_line = f'{provider}="{value}"'
     replaced = False
@@ -494,6 +518,30 @@ def write_key(provider: str, value: str) -> None:
     env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+def write_key(provider: str, value: str) -> None:
+    """Saves an API key into this tool's own .env (lab_env_path()) — the file next to backend/
+    and frontend/, stays on this machine, never sent anywhere by this tool. Also mirrors it into
+    the cloned ReliOps repo's .env, once that clone exists, because scripts/quickstart.sh reads
+    its own copy of that file directly off disk (see _sync_model_keys_to_clone's docstring) — so a
+    key saved here still works for Setup without you having to save it twice."""
+    _write_key_to(lab_env_path(), provider, value)
+    if reliops_dir().exists():
+        _write_key_to(reliops_dir() / ".env", provider, value)
+
+
+def _sync_model_keys_to_clone() -> None:
+    """Mirrors just the known model-key vars from this tool's own .env (lab_env_path()) into the
+    cloned ReliOps repo's .env. scripts/quickstart.sh checks for and reads ReliOps/.env directly
+    off disk during Setup — it has no way to know about keys saved anywhere else — so without this,
+    Setup would find no .env there, create a blank one from .env.example, and stop asking you to
+    fill in a key you'd already saved in this tool."""
+    lab_vars = read_env_file(lab_env_path())
+    for provider in KNOWN_PROVIDERS:
+        value = lab_vars.get(provider)
+        if value:
+            _write_key_to(reliops_dir() / ".env", provider, value)
+
+
 def stream_setup() -> Iterator[str]:
     yield from ensure_clone()
     quickstart = reliops_dir() / "scripts" / "quickstart.sh"
@@ -503,6 +551,7 @@ def stream_setup() -> Iterator[str]:
             "yet. Fix whatever the git step above reported and click Run setup again.\n"
         )
         return
+    _sync_model_keys_to_clone()
     yield from _stream(["bash", "scripts/quickstart.sh", "--setup-only"], cwd=reliops_dir())
 
 
@@ -585,12 +634,11 @@ def stream_campaign(
     base_env = {"AGENT_MODEL_ID": model}
     if action_space:
         base_env["REACT_V1_ACTION_SPACE"] = action_space
-    env_file = reliops_dir() / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            if "=" in line and not line.strip().startswith("#"):
-                k, _, v = line.partition("=")
-                base_env.setdefault(k.strip(), v.strip().strip('"'))
+    # merged_env_vars() (this tool's own .env, falling back to the clone's) rather than reading
+    # reliops_dir()/.env directly — these go straight into the subprocess's env via Popen, so the
+    # actual test run gets your key whether you saved it here or edited the clone's .env by hand.
+    for k, v in merged_env_vars().items():
+        base_env.setdefault(k, v)
 
     runs = [(problem, rep) for problem in problems for rep in range(1, repeat_n + 1)]
     total_runs = len(runs)

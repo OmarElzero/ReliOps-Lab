@@ -8,10 +8,19 @@
 A small local GUI around [ReliOps](https://github.com/OmarElzero/ReliOps)'s SREGym setup: pick a
 test environment, an agent, a model and a set of problems, add your own API key, click **Run**,
 and watch the log stream live, right in the browser — no terminal juggling, no remembering which
-flags `quickstart.sh` wants today. Results are saved locally and, if `ReliOps/.env` has Firebase
-credentials in it, mirrored to the same `runs` collection the full console
+flags `quickstart.sh` wants today. Results are saved locally and, if this project's own `.env` has
+Firebase credentials in it, mirrored to the same `runs` collection the full console
 (`docs/plan/05-platform-spec.md` in the main repo) will use later — this is that spec's v0, running
 on one laptop with no cloud project required.
+
+**This tool isn't a copy of ReliOps — it drives one.** ReliOps Lab is just this GUI (`backend/` +
+`frontend/`); it has none of the actual benchmark, agent or SREGym code in it. The first time you
+click **Run setup**, it clones `OmarElzero/ReliOps` for you into `~/reliops-lab-workdir/ReliOps`
+(a separate folder, not this one) and runs everything from there. So this tool can't do anything
+useful standing completely alone — it needs that clone — but you never have to set the clone up
+yourself; Setup does it. The one thing to know because of this: **this project's own `.env`**
+(next to `backend/` and `frontend/` — the one you have open) **is where your keys go**, not any
+`.env` inside that separate clone; see "Keys" below for why.
 
 ## Contents
 
@@ -32,8 +41,9 @@ on one laptop with no cloud project required.
   risk of touching real infrastructure. Good for a first look or a sponsor demo.
 - **Problem sets are discovered automatically** from any `ReliOps/experiments/*.csv` with a
   `problem_id` column — add a new set in the main repo, it just shows up here.
-- **Optional, local-only Firebase sync** — nothing leaves your machine unless `ReliOps/.env` has
-  credentials in it; the status pill at the top reflects `.env` automatically, no "Connect" step.
+- **Optional, local-only Firebase sync** — nothing leaves your machine unless this project's own
+  `.env` has credentials in it; the status pill at the top reflects `.env` automatically, no
+  "Connect" step.
 
 ## Requirements
 
@@ -62,23 +72,35 @@ at a realistic pace, clearly labelled, and never touches a real cluster.
 ## How it fits with the main repo
 
 This tool drives a clone of `OmarElzero/ReliOps` that it keeps at `~/reliops-lab-workdir/ReliOps`
-(override with `RELIOPS_LAB_WORKDIR`). It does not duplicate SREGym or the agent code — it just
+(override with `RELIOPS_LAB_WORKDIR`) — a separate folder from this project, created automatically
+the first time you click **Run setup**. It does not duplicate SREGym or the agent code — it just
 runs the same commands `ReliOps/scripts/quickstart.sh` and `ReliOps/docs/MANUAL-SETUP.md` describe,
 from a form instead of a terminal, and streams the output back.
+
+**Two folders, one `.env`.** Because of the above, there are technically two places a `.env` could
+live: this project's own root, and the separate cloned-repo folder. Only **this project's own
+`.env`** matters — it's what the "Keys & Firebase" form reads and writes, and what the status pill
+reflects. You never need to touch the clone's `.env` directly: `scripts/quickstart.sh` reads its
+own copy of that file off disk as part of how the main repo works stand-alone (see
+`ReliOps/docs/MANUAL-SETUP.md`), so this tool mirrors your saved model keys into it automatically
+whenever you save a key or run Setup — one save here is enough.
 
 **Problem sets** are read live from `ReliOps/experiments/*.csv` — any CSV with a `problem_id`
 column shows up as a selectable set automatically, so a new set the team adds there (e.g. a
 stress set from `docs/plan/04-harder-envs.md`) appears with no change to this tool.
 
-**Firebase** is entirely optional and local: nothing is sent anywhere until `ReliOps/.env` has
-real credentials in it (there's no GUI field for this on purpose — see "Shared results" below).
-Without one, every run is still written to `ReliOps/results/gui_runs.jsonl` on your machine.
+**Firebase** is entirely optional and local: nothing is sent anywhere until this project's own
+`.env` has real credentials in it (there's no GUI field for this on purpose — see "Shared results"
+below). Without one, every run is still written to `ReliOps/results/gui_runs.jsonl` on your
+machine, and shows up in the GUI's own **Results** tab either way (team-wide via Firestore when
+connected, this machine only when not).
 
 ### Shared results across the team
 
-To see everyone's runs in one place, point everyone's `ReliOps/.env` at the **same** Firebase
-project — one person creates the project and generates the key once, then shares that one JSON
-file with the team through a safe private channel (never git; it's already covered by
+To see everyone's runs in one place, point everyone's **own project `.env`** (next to `backend/`
+— not the cloned ReliOps folder, see "How it fits with the main repo" above) at the **same**
+Firebase project — one person creates the project and generates the key once, then shares that one
+JSON file with the team through a safe private channel (never git; it's already covered by
 `.gitignore`). Each run also tags itself with whatever you type into **"Your name"** in the header
 (saved in your browser only), so the team can tell whose run is whose in the `runs` collection.
 
@@ -93,11 +115,12 @@ file with the team through a safe private channel (never git; it's already cover
 4. Send that file to the team over a private channel — DM, not a public channel or git.
 
 **What every other person does, once, after receiving the file:**
-1. Save it anywhere, then add one line to your own `ReliOps/.env`:
-   `GOOGLE_APPLICATION_CREDENTIALS=/path/to/that/file.json` — or skip the file entirely and paste
-   the JSON itself into `.env` as `SERVICE_ACCOUNT_KEY={...}`. Either way, saving it at
-   `~/reliops-lab-workdir/firebase-service-account.json` needs no `.env` line at all — that's the
-   one path this tool checks automatically if nothing else is set.
+1. Save it anywhere, then add one line to **this project's own `.env`** (create the file next to
+   `backend/` and `frontend/` if it doesn't exist yet — same file the model-key Save button
+   writes to): `GOOGLE_APPLICATION_CREDENTIALS=/path/to/that/file.json` — or skip the file
+   entirely and paste the JSON itself into `.env` as `SERVICE_ACCOUNT_KEY={...}`. Either way,
+   saving it as `firebase-service-account.json` right next to this `.env` needs no `.env` line at
+   all — that's the one path this tool checks automatically if nothing else is set.
 2. Open the GUI and type your name at the top. The status pill picks up `.env` on its own within
    a few seconds — nothing else to click.
 
@@ -115,7 +138,7 @@ GUI, not a setting to flip here.
 ## What v0 does **not** do yet (see `docs/plan/05-platform-spec.md` v1/v2 in the main repo)
 
 - No multi-machine job queue — this is one browser talking to one local server on one laptop.
-- No sealed-box key encryption — your key only ever touches your own `ReliOps/.env`, so this is
+- No sealed-box key encryption — your key only ever touches your own local `.env`, so this is
   fine for a single person running their own machine, not for handing a key to a sponsor VM.
 - No campaign-level statistics (Wilson CIs, paired comparisons) — that's the results-explorer in
   v2; for now, read `ReliOps/results/gui_runs.jsonl` or SREGym's own CSVs directly.

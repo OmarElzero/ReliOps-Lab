@@ -87,7 +87,8 @@
 
   <section class="card">
     <h2>4 · Keys &amp; Firebase</h2>
-    <label>Model API key (saved only to your local ReliOps/.env)</label>
+    <label>Model API key (saved to <code>.env</code> in this project's own folder, next to
+      <code>backend/</code> — the one you already have open)</label>
     <div class="row">
       <select id="key-provider">
         <option value="GEMINI_API_KEY">GEMINI_API_KEY</option>
@@ -100,11 +101,12 @@
     <p class="hint" id="key-status"></p>
 
     <label>Firebase (shared results)</label>
-    <p class="hint">Read straight from <code>ReliOps/.env</code> — a
-      <code>GOOGLE_APPLICATION_CREDENTIALS</code> path, or the key's JSON pasted directly into
-      <code>FIREBASE_SERVICE_ACCOUNT_JSON</code> / <code>SERVICE_ACCOUNT_KEY</code>. Nothing to
-      paste or click here: put it in <code>.env</code> and the status pill at the top updates on
-      its own within a few seconds.</p>
+    <p class="hint">Read straight from this project's own <code>.env</code> (same file as the
+      model key above, <em>not</em> any <code>.env</code> inside the separately-cloned ReliOps
+      folder) — a <code>GOOGLE_APPLICATION_CREDENTIALS</code> path, or the key's JSON pasted
+      directly into <code>FIREBASE_SERVICE_ACCOUNT_JSON</code> / <code>SERVICE_ACCOUNT_KEY</code>.
+      Nothing to paste or click here: put it in <code>.env</code> and the status pill at the top
+      updates on its own within a few seconds.</p>
     <p class="hint">If the whole team points this at the same Firebase project (one shared key),
       results show up for everyone in one place. That key has full access for anyone who has it —
       "Your name" above just labels who ran what, it isn't an access control. See the README's

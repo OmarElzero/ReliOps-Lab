@@ -3,8 +3,11 @@ docs/plan/05-platform-spec.md §4 of the ReliOps repo (jobId/campaignId are left
 this GUI runs ad-hoc tests, not full campaigns yet — same collection, so results from this tool
 and from the future job-queue runner end up side by side without a migration).
 
-`ReliOps/.env` is the *only* source of credentials — there is no GUI field or "Connect" button to
-keep in sync with it, by design (an earlier version had both, and they drifted). Checked in order:
+This tool's own `.env` — next to `backend/` and `frontend/`, the file you actually have open in
+your editor (see `runner.lab_dir()`) — is the *only* source of credentials; there is no GUI field
+or "Connect" button to keep in sync with it, by design (an earlier version had both, and they
+drifted; an even earlier version read a *different* `.env` inside the separately-cloned ReliOps
+repo, which nobody was looking at — see `runner.merged_env_vars()`). Checked in order:
   1. `GOOGLE_APPLICATION_CREDENTIALS=<path>` in `.env` — a path to the downloaded JSON file. A
      Windows/WSL-style path (`\\wsl.localhost\\...`, `C:\\...`) is normalized automatically, since
      this backend runs on Linux.
@@ -33,11 +36,13 @@ APP_NAME = "reliops-lab"
 
 
 def _credential_from_env() -> tuple[Any, str] | None:
-    """Looks in ReliOps/.env for either a credentials path or inline JSON. Returns
-    (credential_arg_for_firebase_admin, human-readable source) or None if nothing usable is there."""
+    """Looks in this tool's own .env (reliops_lab/.env — see runner.lab_dir()) for either a
+    credentials path or inline JSON, falling back to the cloned ReliOps repo's .env for anything
+    the lab .env doesn't set. Returns (credential_arg_for_firebase_admin, human-readable source)
+    or None if nothing usable is there."""
     import runner  # local import to avoid a circular import at module load time
 
-    env_vars = runner.read_env_file(runner.reliops_dir() / ".env")
+    env_vars = runner.merged_env_vars()
 
     path = env_vars.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if path:
