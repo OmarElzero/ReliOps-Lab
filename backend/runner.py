@@ -199,6 +199,7 @@ def stream_campaign(
     judge_model: str,
     problems: list[str],
     force_build: bool,
+    run_by: str | None = None,
     on_result=None,
 ) -> Iterator[str]:
     """Runs one problem at a time (SREGym itself is single-run per process) and yields log lines
@@ -247,6 +248,10 @@ def stream_campaign(
             "action_space": action_space,
             "model_id": model,
             "judge_model_id": judge_model,
+            # Self-reported, not an authenticated identity — see README's "Shared results" section.
+            # Whoever ran this typed it into the "Your name" field; it's a label for the team to
+            # read, not an access-control boundary (the shared Firebase key has full access either way).
+            "run_by": run_by or "unknown",
             "row": row,  # SREGym's own metrics.md-shaped row, or None if we couldn't locate it
         }
         if on_result:

@@ -73,6 +73,25 @@ stress set from `docs/plan/04-harder-envs.md`) appears with no change to this to
 service-account file into the GUI. Without one, every run is still written to
 `ReliOps/results/gui_runs.jsonl` on your machine.
 
+### Shared results across the team
+
+To see everyone's runs in one place, point everyone's "Firebase service-account JSON path" at the
+**same** Firebase project — one person creates the project and generates the key once, then shares
+that one JSON file with the team through a safe private channel (never git; it's already covered by
+`.gitignore`). Each run also tags itself with whatever you type into **"Your name"** in the header
+(saved in your browser only), so the team can tell whose run is whose in the `runs` collection.
+
+**Read this before relying on it for anything sensitive:** a Firebase service-account key is an
+*admin* credential — it has full read/write/delete access to the whole project, for anyone who has
+the file. "Your name" is a self-reported label for convenience, not an authentication system or an
+access control: it does not restrict what anyone can do, and nothing stops a person from typing a
+different name. This is the deliberate trade-off for v0 — fine for a small team that already trusts
+each other with the same data, the same way a shared Google Sheet works. Real per-person identity
+and permissions (`members/{uid}` with admin/member/viewer roles, enforced by Firebase
+Authentication + Firestore Security Rules) are already designed in
+`docs/plan/05-platform-spec.md` for the full v1/v2 platform — that's a bigger build than this local
+GUI, not a setting to flip here.
+
 ## What v0 does **not** do yet (see `docs/plan/05-platform-spec.md` v1/v2 in the main repo)
 
 - No multi-machine job queue — this is one browser talking to one local server on one laptop.

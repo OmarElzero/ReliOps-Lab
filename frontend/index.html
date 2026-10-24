@@ -9,6 +9,10 @@
 <body>
 <header>
   <h1>ReliOps Lab <span class="tag">v0 · local</span></h1>
+  <div class="row header-name">
+    <label for="run-by" class="inline-label">Your name</label>
+    <input id="run-by" placeholder="e.g. Omar" autocomplete="off">
+  </div>
   <div id="fb-status" class="pill">Firebase: checking…</div>
 </header>
 
@@ -59,6 +63,10 @@
       <input id="fb-path" placeholder="/path/to/service-account.json">
       <button id="connect-fb">Connect</button>
     </div>
+    <p class="hint">If the whole team points this at the same Firebase project (one shared key),
+      results show up for everyone in one place. That key has full access for anyone who has it —
+      "Your name" above just labels who ran what, it isn't an access control. See the README's
+      "Shared results" section.</p>
   </section>
 
   <section class="card actions">

@@ -102,6 +102,7 @@ def run(
     problems: str,  # comma-separated problem ids
     action_space: Optional[str] = None,
     force_build: bool = False,
+    run_by: Optional[str] = None,  # self-reported name, for a shared-key team — see README
 ):
     problem_list = [p.strip() for p in problems.split(",") if p.strip()]
 
@@ -120,6 +121,7 @@ def run(
         judge_model=judge_model,
         problems=problem_list,
         force_build=force_build,
+        run_by=run_by,
         on_result=on_result,
     )
     return _sse(gen)

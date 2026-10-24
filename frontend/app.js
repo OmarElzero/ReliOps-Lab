@@ -1,5 +1,16 @@
 const logEl = document.getElementById("log");
 const fbStatusEl = document.getElementById("fb-status");
+const runByEl = document.getElementById("run-by");
+
+// "Your name" is a per-viewer convenience, not an identity: just labels Firestore rows so a
+// shared-key team can tell whose run is whose. Kept in this browser's localStorage only — never
+// sent anywhere except as the plain "run_by" field on /api/run.
+try {
+  runByEl.value = localStorage.getItem("reliops_lab_run_by") || "";
+} catch (e) { /* private window or blocked storage — just start blank */ }
+runByEl.addEventListener("change", () => {
+  try { localStorage.setItem("reliops_lab_run_by", runByEl.value.trim()); } catch (e) { /* ignore */ }
+});
 
 function appendLog(line) {
   logEl.textContent += line;
@@ -158,6 +169,8 @@ document.getElementById("run-test").addEventListener("click", () => {
     force_build: forceBuild ? "true" : "false",
   });
   if (agent.action_space) params.set("action_space", agent.action_space);
+  const runBy = runByEl.value.trim();
+  if (runBy) params.set("run_by", runBy);
   appendLog(`\n[running ${problems.length} problem(s) with ${agent.label}]\n`);
   streamFrom("/api/run?" + params.toString());
 });
