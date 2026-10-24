@@ -15,6 +15,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -472,6 +473,33 @@ def new_log_file(kind: str) -> Path:
     return log_dir / f"{stamp}_{kind}.log"
 
 
+# Set by /api/stop, read by stream_campaign — a plain module-level flag is enough because this
+# tool only ever drives one run at a time on one person's own machine (not a shared server with
+# concurrent campaigns), so there's no "whose run am I stopping" ambiguity to track.
+_stop_event = threading.Event()
+
+
+def request_stop() -> None:
+    """Asks the campaign currently in stream_campaign() to stop after whatever problem it's in the
+    middle of finishes and its result is recorded — never mid-subprocess. So "stop while problem
+    2/5 is running" means: let 2 finish, record it, then skip 3-5, not kill anything half-done."""
+    _stop_event.set()
+
+
+def _problem_log_path(problem: str, rep: int, repeat_n: int) -> Path:
+    """A dedicated log file for one (problem, repeat) run, separate from the combined per-request
+    SSE log app.py already writes — so a single run can be reopened and read on its own later
+    (what actually happened, in what order, any retries/timeouts) without scrolling through a
+    whole batch's output to find it. Stored next to the other logs, named so it's obvious which
+    run it belongs to without opening it."""
+    log_dir = reliops_dir() / "results" / "gui_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    suffix = f"_rep{rep}of{repeat_n}" if repeat_n > 1 else ""
+    safe_problem = "".join(c if (c.isalnum() or c in "-_") else "_" for c in problem)
+    return log_dir / f"{stamp}_{safe_problem}{suffix}.log"
+
+
 def _tool_version(cmd: str) -> str | None:
     """None means the command isn't on PATH at all; a string (even empty) means it is."""
     if shutil.which(cmd) is None:
@@ -641,7 +669,14 @@ def stream_demo() -> Iterator[str]:
 def _latest_result_row(problem: str, after_ts: float) -> dict | None:
     """Best-effort: find SREGym's own summary CSV written after the run started and pull out the
     row for this problem. Returns None rather than a guess if nothing matches — a run with no
-    parsed row still has its full raw log; it is never reported as pass/fail without this row."""
+    parsed row still has its full raw log; it is never reported as pass/fail without this row.
+
+    Uses csv.DictReader on the whole file, not a naive `line.split(",")` on each line (what this
+    used to do). SREGym's own row embeds the judge's full reasoning/checklist as a quoted
+    comma-and-newline-filled blob in one field — a raw split shifts every column after it out of
+    alignment, so `row.get("problem_id")` silently stops matching. That's why a run could show
+    "no row parsed" even right after SREGym itself printed that it wrote the CSV: the file was
+    there and readable, this just wasn't parsing it correctly."""
     results_root = sregym_dir() / "results"
     if not results_root.is_dir():
         return None
@@ -650,15 +685,13 @@ def _latest_result_row(problem: str, after_ts: float) -> dict | None:
         if csv_path.stat().st_mtime < after_ts - 5:
             break
         try:
-            lines = csv_path.read_text(encoding="utf-8").splitlines()
-            header = lines[0].split(",")
-            for line in reversed(lines[1:]):
-                parts = line.split(",")
-                row = dict(zip(header, parts, strict=False))
-                if row.get("problem_id") == problem or row.get("problem") == problem:
-                    return row
-        except (OSError, IndexError):
+            with csv_path.open(encoding="utf-8", newline="") as f:
+                rows = list(csv.DictReader(f))
+        except (OSError, csv.Error):
             continue
+        for row in reversed(rows):
+            if row.get("problem_id") == problem or row.get("problem") == problem:
+                return row
     return None
 
 
@@ -683,6 +716,7 @@ def stream_campaign(
         yield "SREGym clone not found — run Setup first.\n"
         return
 
+    _stop_event.clear()  # a fresh "Run test(s)" click always starts clean, even after a past stop
     repeat_n = max(1, repeat_n)
     base_env = {"AGENT_MODEL_ID": model}
     if action_space:
@@ -717,7 +751,14 @@ def stream_campaign(
         elif agent == "reliops_v1":
             env["SREGYM_AGENT_IMAGE"] = "sregym-agent-base:latest"
 
-        yield from _stream(cmd, cwd=sregym_dir(), env=env)
+        # Tee this one problem's output into its own log file as it streams, in addition to the
+        # combined per-request SSE log app.py writes — so this exact run's log can be reopened and
+        # read on its own from the Results tab later (see _problem_log_path's docstring).
+        problem_log_path = _problem_log_path(problem, rep, repeat_n)
+        with problem_log_path.open("w", encoding="utf-8") as plog:
+            for line in _stream(cmd, cwd=sregym_dir(), env=env):
+                plog.write(line)
+                yield line
 
         row = _latest_result_row(problem, started_at)
         record = {
@@ -735,9 +776,19 @@ def stream_campaign(
             # read, not an access-control boundary (the shared Firebase key has full access either way).
             "run_by": run_by or "unknown",
             "row": row,  # SREGym's own metrics.md-shaped row, or None if we couldn't locate it
+            "log_file": problem_log_path.name,  # served by GET /api/log/<name> — this run's own log
         }
         if on_result:
             on_result(record)
         found_note = "parsed row found" if row else "no row parsed — check the raw log above"
         repeat_suffix = f" (repeat {rep}/{repeat_n})" if repeat_n > 1 else ""
         yield f"----- recorded result for {problem}: {found_note}{repeat_suffix} -----\n"
+
+        if _stop_event.is_set():
+            remaining = total_runs - i
+            yield (
+                f"\n[stopped — {i}/{total_runs} run(s) done, {remaining} skipped. "
+                "Every finished run above is already recorded; click Run test(s) again to pick up "
+                "the rest later.]\n"
+            )
+            return

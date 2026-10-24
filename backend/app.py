@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 import firebase_sync
@@ -128,9 +128,32 @@ def results(limit: int = 300):
             "action_space": r.get("action_space"),
             "repeat_index": r.get("repeat_index"),
             "repeat_n": r.get("repeat_n"),
+            "log_file": r.get("log_file"),  # servable via GET /api/log/<name>, if present
             **normalized,
         })
     return {"source": source, "runs": runs}
+
+
+@app.post("/api/stop")
+def stop():
+    """Asks the batch currently streaming from /api/run to stop after the problem it's on finishes
+    and its result is recorded, instead of starting the next one — see runner.request_stop()."""
+    runner.request_stop()
+    return {"ok": True}
+
+
+@app.get("/api/log/{name}")
+def get_log(name: str):
+    """Serves one per-problem log file from results/gui_logs/ (see
+    runner.stream_campaign's per-problem log, linked from the Results tab) so a specific run can
+    be inspected after the fact without scrolling the combined Live Log for it. `name` must be a
+    bare filename — never trusted to walk outside that one directory."""
+    if "/" in name or "\\" in name or ".." in name:
+        return PlainTextResponse("invalid log file name", status_code=400)
+    log_path = runner.reliops_dir() / "results" / "gui_logs" / name
+    if not log_path.is_file():
+        return PlainTextResponse(f"no such log file: {name}", status_code=404)
+    return FileResponse(log_path, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/api/setup")

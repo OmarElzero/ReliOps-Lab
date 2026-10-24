@@ -319,6 +319,21 @@ document.getElementById("run-demo").addEventListener("click", () => {
   streamFrom("/api/demo");
 });
 
+// Set by the Stop button, read by the run-test loop below. A plain module-level flag is enough:
+// this GUI only ever drives one run at a time from one browser tab.
+let stopRequested = false;
+
+document.getElementById("stop-test").addEventListener("click", async () => {
+  stopRequested = true;
+  const stopBtn = document.getElementById("stop-test");
+  stopBtn.disabled = true;
+  stopBtn.textContent = "stopping after current problem…";
+  appendLog("\n[stop requested — letting the current problem finish and recording its result, then stopping]\n");
+  try {
+    await fetch("/api/stop", { method: "POST" });
+  } catch (e) { /* server not reachable — nothing more to do here */ }
+});
+
 document.getElementById("run-test").addEventListener("click", async () => {
   const agent = selectedAgent();
   const model = document.getElementById("model").value.trim();
@@ -336,8 +351,12 @@ document.getElementById("run-test").addEventListener("click", async () => {
 
   const batches = chunk(problems, batchSize);
   const runButton = document.getElementById("run-test");
+  const stopButton = document.getElementById("stop-test");
   runButton.disabled = true;
   runButton.textContent = "Running…";
+  stopButton.disabled = false;
+  stopButton.textContent = "Stop after current";
+  stopRequested = false;
 
   // One row per problem (not one bar for the whole run) — a problem can take 30+ minutes, and a
   // single aggregate percentage can't tell "the whole run is stuck" apart from "problem #7 is
@@ -429,14 +448,21 @@ document.getElementById("run-test").addEventListener("click", async () => {
       appendLog(`\n[running ${batch.length} problem(s) with ${agent.label}]\n`);
     }
     await streamFrom("/api/run?" + params.toString(), onLine);
+    // The backend already stopped mid-batch if asked (see runner.stream_campaign); this check is
+    // what keeps a *multi-batch* run from starting the next batch once the current one ends.
+    if (stopRequested) break;
   }
 
   clearInterval(tickInterval);
-  summaryEl.textContent = `Done: ${totalCompleted} of ${totalRuns} run(s)`;
+  summaryEl.textContent = (stopRequested ? "Stopped: " : "Done: ") + `${totalCompleted} of ${totalRuns} run(s)`;
 
   runButton.disabled = false;
   runButton.textContent = "Run test(s)";
-  if (batches.length > 1) {
+  stopButton.disabled = true;
+  stopButton.textContent = "Stop after current";
+  if (stopRequested) {
+    appendLog(`\n[stopped by user — ${totalCompleted}/${totalRuns} run(s) recorded, rest skipped]\n`);
+  } else if (batches.length > 1) {
     appendLog(`\n===== all ${batches.length} batches done (${problems.length} problem(s) total) =====\n`);
   }
   // So the Results tab doesn't show stale data if the user flips over right after a run.
@@ -492,6 +518,76 @@ function timeCell(seconds) {
   return td;
 }
 
+function logCell(logFile) {
+  const td = document.createElement("td");
+  if (logFile) {
+    const a = document.createElement("a");
+    a.href = "/api/log/" + encodeURIComponent(logFile);
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.className = "log-link";
+    a.textContent = "log";
+    td.appendChild(a);
+  } else {
+    td.textContent = "—";
+  }
+  return td;
+}
+
+// "Coverage" groups the same runs by problem+agent+model, so the team can see at a glance which
+// combos have barely been tested (or not at all) — that's what to run next — instead of having to
+// scan the full run-by-run table and count by eye. Computed client-side from the same /api/results
+// data loadResults() already fetched; no separate backend call.
+function renderCoverage(runs) {
+  const tbody = document.getElementById("coverage-tbody");
+  const emptyEl = document.getElementById("coverage-empty");
+  tbody.innerHTML = "";
+  emptyEl.hidden = runs.length > 0;
+
+  const groups = new Map();
+  runs.forEach((r) => {
+    const key = [r.problem_id || "—", r.agent_id || "—", r.model_id || "—"].join("\u0000");
+    if (!groups.has(key)) {
+      groups.set(key, {
+        problem: r.problem_id || "—", agent: r.agent_id || "—", model: r.model_id || "—",
+        total: 0,
+        diagPass: 0, diagKnown: 0,
+        mitPass: 0, mitKnown: 0,
+        e2ePass: 0, e2eKnown: 0,
+      });
+    }
+    const g = groups.get(key);
+    g.total += 1;
+    if (r.diagnosis_pass === true || r.diagnosis_pass === false) {
+      g.diagKnown += 1; if (r.diagnosis_pass) g.diagPass += 1;
+    }
+    if (r.mitigation_pass === true || r.mitigation_pass === false) {
+      g.mitKnown += 1; if (r.mitigation_pass) g.mitPass += 1;
+    }
+    if (r.e2e_pass === true || r.e2e_pass === false) {
+      g.e2eKnown += 1; if (r.e2e_pass) g.e2ePass += 1;
+    }
+  });
+
+  const rate = (pass, known) => (known ? `${pass}/${known}` : "—");
+  Array.from(groups.values())
+    .sort((a, b) => a.total - b.total || a.problem.localeCompare(b.problem))
+    .forEach((g) => {
+      const tr = document.createElement("tr");
+      [g.problem, g.agent, g.model, String(g.total)].forEach((text) => {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+      [[g.diagPass, g.diagKnown], [g.mitPass, g.mitKnown], [g.e2ePass, g.e2eKnown]].forEach(([p, k]) => {
+        const td = document.createElement("td");
+        td.textContent = rate(p, k);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+}
+
 async function loadResults() {
   const sourceEl = document.getElementById("results-source");
   const tbody = document.getElementById("results-tbody");
@@ -526,8 +622,11 @@ async function loadResults() {
     tr.appendChild(passCell(r.e2e_pass));
     tr.appendChild(timeCell(r.ttd_s));
     tr.appendChild(timeCell(r.ttm_s));
+    tr.appendChild(logCell(r.log_file));
     tbody.appendChild(tr);
   });
+
+  renderCoverage(data.runs);
 }
 document.getElementById("refresh-results").addEventListener("click", loadResults);
 

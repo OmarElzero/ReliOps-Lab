@@ -125,7 +125,11 @@
       <button id="run-setup" class="secondary">Run setup (clone + patches + cluster)</button>
       <button id="run-demo" class="secondary">Demo mode (no cluster needed)</button>
       <button id="run-test" class="primary">Run test(s)</button>
+      <button id="stop-test" class="secondary" disabled>Stop after current</button>
     </div>
+    <p class="hint">Stop finishes whichever problem is currently running, records its result, then
+      skips the rest — nothing mid-run is killed. Click Run test(s) again later to pick up where
+      you left off.</p>
     <div id="progress-wrap" class="progress-wrap" hidden>
       <p class="hint" id="progress-summary"></p>
       <div id="progress-rows" class="progress-rows"></div>
@@ -144,21 +148,43 @@
   <div id="tab-results" class="tab-panel" hidden>
     <section class="card">
       <div class="row log-head">
+        <h2>Coverage — what's been tested</h2>
+      </div>
+      <p class="hint">Grouped by problem + agent + model from the runs below — sorted fewest-runs
+        first, so the combos that need more repeats before you trust their pass rate (or haven't
+        been tried at all) are the ones at the top. This is what to test next.</p>
+      <div class="results-table-wrap">
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Problem</th><th>Agent</th><th>Model</th><th>Runs</th>
+              <th>Diagnosis</th><th>Mitigation</th><th>E2E</th>
+            </tr>
+          </thead>
+          <tbody id="coverage-tbody"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="coverage-empty" hidden>No runs recorded yet.</p>
+    </section>
+
+    <section class="card">
+      <div class="row log-head">
         <h2>All runs</h2>
         <button id="refresh-results" class="secondary small" type="button">Refresh</button>
       </div>
       <p class="hint" id="results-source"></p>
       <p class="hint">Pass/fail and timing come straight from SREGym's own result row
         (<code>Diagnosis.success</code>, <code>Mitigation.success</code>, <code>TTL</code>,
-        <code>TTM</code>) — verified against its source, not guessed, but if a column looks off
-        for a given run, the raw log for that run (under <code>results/gui_logs/</code>) is the
-        source of truth.</p>
+        <code>TTM</code>) — verified against its source, not guessed. The <strong>Log</strong>
+        column is that exact run's own raw output, saved under <code>results/gui_logs/</code>, for
+        when a number looks off and you want to see what actually happened (and whether something
+        outside the test — a flaky image pull, a slow namespace teardown — affected it).</p>
       <div class="results-table-wrap">
         <table class="results-table">
           <thead>
             <tr>
               <th>When</th><th>By</th><th>Problem</th><th>Agent</th><th>Model</th>
-              <th>Diagnosis</th><th>Mitigation</th><th>E2E</th><th>TTD</th><th>TTM</th>
+              <th>Diagnosis</th><th>Mitigation</th><th>E2E</th><th>TTD</th><th>TTM</th><th>Log</th>
             </tr>
           </thead>
           <tbody id="results-tbody"></tbody>

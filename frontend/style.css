@@ -64,6 +64,8 @@ main {
 .results-table td.r-fail { color: #e07a7a; }
 .results-table td.r-unknown { color: var(--muted); }
 .results-table td.r-problem { font-family: "SF Mono", Consolas, monospace; white-space: normal; max-width: 260px; }
+.log-link { color: var(--accent); text-decoration: none; }
+.log-link:hover { text-decoration: underline; }
 .card {
   background: var(--card);
   border: 1px solid var(--border);
