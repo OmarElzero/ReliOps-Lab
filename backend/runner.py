@@ -9,8 +9,10 @@ itself has no cloud dependency, so it works today with no Firebase project, no l
 
 from __future__ import annotations
 
+import csv
 import os
 import shlex
+import shutil
 import subprocess
 import time
 from collections.abc import Iterator
@@ -21,13 +23,42 @@ DEFAULT_WORKDIR = Path(os.environ.get("RELIOPS_LAB_WORKDIR", Path.home() / "reli
 RELIOPS_BRANCH = os.environ.get("RELIOPS_BRANCH", "claude/determined-einstein-mjmr56")
 
 AGENTS = [
-    {"id": "reliops_v1", "label": "ReliOps v1 (ours, typed)", "action_space": "typed"},
-    {"id": "reliops_v1", "label": "ReliOps v1 (ours, typed + guarded shell)", "action_space": "typed+shell"},
-    {"id": "stratus", "label": "STRATUS (multi-agent reference)", "action_space": None},
-    {"id": "mini-sre", "label": "mini-sre (raw bash ReAct)", "action_space": None},
-    {"id": "gemini", "label": "Gemini CLI (general coding agent)", "action_space": None},
-    {"id": "opencode", "label": "OpenCode (general coding agent)", "action_space": None},
-    {"id": "autosubmit", "label": "autosubmit (plumbing check only, no real intelligence)", "action_space": None},
+    {
+        "id": "reliops_v1", "label": "ReliOps v1 (ours, typed)", "action_space": "typed",
+        "desc": "Our own agent. The model can only call a fixed list of safe, typed actions "
+                "(restart, scale, roll back, patch config) — never a free shell command.",
+    },
+    {
+        "id": "reliops_v1", "label": "ReliOps v1 (ours, typed + guarded shell)", "action_space": "typed+shell",
+        "desc": "Same agent, with a guarded shell tool added — can run arbitrary kubectl commands "
+                "too, routed through SREGym's own safety runner. In the pilot this arm scored "
+                "53% end-to-end vs the typed-only arm's 33% (n=15 each).",
+    },
+    {
+        "id": "stratus", "label": "STRATUS (multi-agent reference)", "action_space": None,
+        "desc": "A published multi-agent reference system (xlab-uiuc/stratus) — the external "
+                "baseline we compare against, not something we built.",
+    },
+    {
+        "id": "mini-sre", "label": "mini-sre (raw bash ReAct)", "action_space": None,
+        "desc": "SREGym's own built-in baseline agent, not ours — raw shell access, no typed tool "
+                "list at all. A simple reference point for how much a tool catalogue matters.",
+    },
+    {
+        "id": "gemini", "label": "Gemini CLI (general coding agent)", "action_space": None,
+        "desc": "Google's general-purpose coding CLI, pointed at the same problem — not an "
+                "SRE-specific agent, another reference point.",
+    },
+    {
+        "id": "opencode", "label": "OpenCode (general coding agent)", "action_space": None,
+        "desc": "A general-purpose open-source coding agent, same idea as Gemini CLI — not "
+                "SRE-specific.",
+    },
+    {
+        "id": "autosubmit", "label": "autosubmit (plumbing check only, no real intelligence)", "action_space": None,
+        "desc": "Submits immediately with no real diagnosis. Checks that the cluster/harness "
+                "plumbing works end to end — not a real test of any agent.",
+    },
 ]
 
 MODEL_PRESETS = [
@@ -56,36 +87,51 @@ def default_firebase_key_path() -> Path:
     return DEFAULT_WORKDIR / "firebase-service-account.json"
 
 
-def _read_problem_ids(csv_path: Path) -> list[str]:
+def _read_problems(csv_path: Path) -> list[dict]:
+    """Reads a problem-set CSV into a list of {id, n, category, difficulty}. Only `problem_id` is
+    required — `n` (testing order), `type` (category) and `expected_difficulty` are used when the
+    CSV has them (e.g. experiments/first-30.csv does) and left blank otherwise, so the GUI can
+    group and number problems instead of showing one flat list."""
     try:
-        lines = csv_path.read_text(encoding="utf-8").splitlines()
-        if not lines:
-            return []
-        header = lines[0].split(",")
-        idx = header.index("problem_id")
-        ids = []
-        for line in lines[1:]:
-            parts = line.split(",")
-            if len(parts) > idx and parts[idx].strip():
-                ids.append(parts[idx].strip())
-        return ids
-    except (OSError, ValueError):
+        with csv_path.open(encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            rows = []
+            for i, row in enumerate(reader, start=1):
+                pid = (row.get("problem_id") or "").strip()
+                if not pid:
+                    continue
+                rows.append({
+                    "id": pid,
+                    "n": (row.get("n") or "").strip() or str(i),
+                    "category": (row.get("type") or "").strip() or "Uncategorized",
+                    "difficulty": (row.get("expected_difficulty") or "").strip(),
+                })
+            return rows
+    except (OSError, csv.Error):
         return []
 
 
 def problem_sets() -> list[dict]:
     """Every CSV in experiments/ with a problem_id column becomes a selectable set in the GUI —
     so a new set the team adds later (another CSV in that folder) shows up with no code change.
-    Always includes a 'custom' pseudo-set so one can still type a single problem id by hand."""
+    Each set's `problems` is a list of {id, n, category, difficulty} dicts, in file order (which
+    is testing order for experiments/first-30.csv). Always includes a 'custom' pseudo-set so one
+    can still type a single problem id by hand."""
     sets = []
     exp_dir = reliops_dir() / "experiments"
     if exp_dir.is_dir():
         for csv_path in sorted(exp_dir.glob("*.csv")):
-            ids = _read_problem_ids(csv_path)
-            if ids:
-                sets.append({"id": csv_path.stem, "label": f"{csv_path.stem} ({len(ids)} problems)", "problems": ids})
+            rows = _read_problems(csv_path)
+            if rows:
+                sets.append({"id": csv_path.stem, "label": f"{csv_path.stem} ({len(rows)} problems)", "problems": rows})
     if not sets:
-        sets.append({"id": "default", "label": f"default ({len(DEFAULT_PROBLEMS)} problems)", "problems": DEFAULT_PROBLEMS})
+        default_rows = [{"id": p, "n": str(i), "category": "Uncategorized", "difficulty": ""}
+                         for i, p in enumerate(DEFAULT_PROBLEMS, start=1)]
+        sets.append({
+            "id": "default",
+            "label": f"default ({len(default_rows)} problems — run Setup to get the real 30-problem set)",
+            "problems": default_rows,
+        })
     sets.append({"id": "custom", "label": "custom — type one problem id", "problems": []})
     return sets
 
@@ -117,6 +163,204 @@ def ensure_clone() -> Iterator[str]:
         yield from _stream(["git", "checkout", RELIOPS_BRANCH], cwd=reliops_dir())
     else:
         yield "ReliOps clone already present, skipping clone.\n"
+
+
+KNOWN_PROVIDERS = ["GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"]
+
+
+def read_env_file(env_path: Path) -> dict[str, str]:
+    """Parses a .env file into a dict. Values can be a single line or span many lines (a pasted
+    JSON blob, e.g. a Firebase service-account key) — anything from a `KEY=` line up to the next
+    `KEY=` line or end of file belongs to that key, not just the first line."""
+    if not env_path.exists():
+        return {}
+    out: dict[str, str] = {}
+    current_key: str | None = None
+    buf: list[str] = []
+
+    def _is_key(candidate: str) -> bool:
+        c = candidate.strip()
+        return bool(c) and all(ch.isalnum() or ch == "_" for ch in c) and not c[0].isdigit()
+
+    def _flush() -> None:
+        if current_key is not None:
+            out[current_key] = "\n".join(buf).strip().strip('"').strip("'")
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            if current_key is not None:
+                buf.append(line)
+            continue
+        head = line.split("=", 1)[0]
+        if "=" in line and not line.startswith((" ", "\t")) and _is_key(head):
+            _flush()
+            current_key, _, rest = line.partition("=")
+            current_key = current_key.strip()
+            buf = [rest]
+        elif current_key is not None:
+            buf.append(line)
+    _flush()
+    return out
+
+
+def saved_providers() -> dict[str, bool]:
+    """Which of the known model-key providers already have a non-empty value in ReliOps/.env —
+    used by the GUI to show "already saved" instead of a blank field that looks unconfigured."""
+    env_vars = read_env_file(reliops_dir() / ".env")
+    return {p: bool(env_vars.get(p)) for p in KNOWN_PROVIDERS}
+
+
+# The team's canonical per-run row, mirrored from experiments/run_log_template.csv in the main
+# repo so every run (GUI or terminal) lands in the same shape (CLAUDE.md: "results/ | CSV
+# summaries"). Kept as a fallback for when that template isn't in the clone yet; _run_log_header()
+# always prefers reading the real file over this copy, so a column the team adds there shows up
+# here automatically with no code change.
+_RUN_LOG_HEADER_FALLBACK = [
+    "run_id", "timestamp_utc", "git_commit", "env_id", "problem_id", "fault_class", "app",
+    "agent_id", "model_id", "flow_variant", "instruction_variant", "action_space", "noise",
+    "repeat_n", "diagnosis_d1", "diagnosis_d2", "diagnosis_d3", "diagnosis_composite",
+    "diagnosis_pass", "mitigation_pass", "e2e_pass", "ttd_s", "ttm_s", "prompt_tokens",
+    "completion_tokens", "total_tokens", "num_llm_calls", "num_tool_calls", "durability_pass",
+    "unneeded_actions", "forbidden_actions", "hallucinated_incident", "scope_note",
+    "failure_mode_tag", "notes",
+]
+
+
+def _run_log_header() -> list[str]:
+    template = reliops_dir() / "experiments" / "run_log_template.csv"
+    try:
+        first_line = template.read_text(encoding="utf-8").splitlines()[0]
+        cols = [c.strip() for c in first_line.split(",") if c.strip()]
+        if cols:
+            return cols
+    except OSError:
+        pass
+    return list(_RUN_LOG_HEADER_FALLBACK)
+
+
+def append_csv_run(record: dict) -> Path:
+    """Appends one row to results/gui_runs.csv in the team's canonical schema (same columns as
+    experiments/run_log_template.csv), alongside the fuller results/gui_runs.jsonl this tool
+    already wrote (that one keeps everything — run_by, the Firebase outcome, SREGym's raw row
+    untouched — this CSV is the trimmed, standard-shape version meant to sit next to the rest of
+    the team's results/*.csv files). A column the template expects that SREGym's own row didn't
+    return, or that this GUI doesn't know, is left blank — never guessed."""
+    header = _run_log_header()
+    row_data = dict(record.get("row") or {})  # SREGym's own metrics.md-shaped row, if present
+    # What the GUI itself knows for certain always wins over whatever (if anything) `row` has
+    # under the same name — these came straight from the form, not a derived/parsed value.
+    row_data.update({
+        "run_id": record.get("run_id", ""),
+        "timestamp_utc": record.get("timestamp_utc", ""),
+        "problem_id": record.get("problem_id", ""),
+        "agent_id": record.get("agent_id", ""),
+        "model_id": record.get("model_id", ""),
+        "action_space": record.get("action_space") or "",
+    })
+    out_row = {col: row_data.get(col, "") for col in header}
+
+    csv_path = reliops_dir() / "results" / "gui_runs.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not csv_path.exists() or csv_path.stat().st_size == 0
+    with csv_path.open("a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+        if is_new:
+            writer.writeheader()
+        writer.writerow(out_row)
+    return csv_path
+
+
+def new_log_file(kind: str) -> Path:
+    """Opens a fresh timestamped log file under results/gui_logs/ for one Setup/Demo/Run action,
+    so the full raw output survives past the browser tab closing or the log panel being cleared —
+    for debugging a problem after the fact, not just while it's on screen."""
+    log_dir = reliops_dir() / "results" / "gui_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return log_dir / f"{stamp}_{kind}.log"
+
+
+def _tool_version(cmd: str) -> str | None:
+    """None means the command isn't on PATH at all; a string (even empty) means it is."""
+    if shutil.which(cmd) is None:
+        return None
+    probe = ["version", "--client", "--short"] if cmd == "kubectl" else ["--version"]
+    try:
+        out = subprocess.run([cmd, *probe], capture_output=True, text=True, timeout=5)
+        text = (out.stdout or out.stderr or "").strip().splitlines()
+        return text[0] if text else "present"
+    except Exception:  # noqa: BLE001 — a tool that exists but errors on --version still "exists"
+        return "present"
+
+
+def doctor() -> dict:
+    """A rough "can this machine run SREGym?" check — CPU/RAM/disk, Docker, and the CLI tools
+    Setup needs. Thresholds come from CLAUDE.md's own machine notes: the cloud sandbox (4 CPU,
+    ~15 GB RAM) is the smallest machine this project has actually run a kind cluster on; this is
+    a rough comparison against that, not a hard pass/fail line."""
+    cpu = os.cpu_count()
+
+    ram_gb = None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    ram_gb = round(int(line.split()[1]) / 1024 / 1024, 1)
+                    break
+    except OSError:
+        pass  # not Linux/WSL, or /proc unavailable — leave as None, note it below
+
+    disk_free_gb = None
+    try:
+        probe_dir = DEFAULT_WORKDIR if DEFAULT_WORKDIR.exists() else DEFAULT_WORKDIR.parent
+        disk_free_gb = round(shutil.disk_usage(probe_dir).free / 1024**3, 1)
+    except OSError:
+        pass
+
+    docker_running = False
+    try:
+        docker_running = subprocess.run(
+            ["docker", "info"], capture_output=True, timeout=5
+        ).returncode == 0
+    except Exception:  # noqa: BLE001 — docker not installed, daemon down, whatever: just "not running"
+        docker_running = False
+
+    tools = {name: _tool_version(name) for name in ("kubectl", "helm", "kind", "uv")}
+    missing_tools = [name for name, v in tools.items() if v is None]
+
+    notes: list[str] = []
+    verdict = "looks fine for one SREGym kind cluster"
+    if cpu is not None and cpu < 4:
+        notes.append(f"{cpu} CPU cores detected — the smallest machine this project has actually "
+                      f"run on had 4")
+        verdict = "might struggle — few CPU cores"
+    if ram_gb is not None and ram_gb < 12:
+        notes.append(f"{ram_gb} GB RAM detected — ~15 GB is the smallest this project has "
+                      f"actually run a kind cluster on")
+        verdict = "might struggle — RAM is tight"
+    if disk_free_gb is not None and disk_free_gb < 20:
+        notes.append(f"only {disk_free_gb} GB free disk — SREGym's images and cluster data can "
+                      f"add up over a few runs")
+    if not docker_running:
+        notes.append("`docker info` failed — Docker isn't running (try `dockerd &` or start "
+                      "Docker Desktop) before clicking Run setup")
+        verdict = "blocked — Docker isn't running"
+    if missing_tools:
+        notes.append("missing from PATH: " + ", ".join(missing_tools) +
+                      " — Run setup installs `kind` for you; the rest need installing by hand, "
+                      "see ReliOps/docs/MANUAL-SETUP.md §0–2")
+        verdict = "blocked — missing tools: " + ", ".join(missing_tools)
+
+    return {
+        "cpu_cores": cpu,
+        "ram_gb": ram_gb,
+        "disk_free_gb": disk_free_gb,
+        "docker_running": docker_running,
+        "tools": tools,
+        "verdict": verdict,
+        "notes": notes,
+    }
 
 
 def write_key(provider: str, value: str) -> None:

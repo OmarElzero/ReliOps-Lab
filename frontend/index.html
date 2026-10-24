@@ -18,6 +18,18 @@
 
 <main>
   <section class="card">
+    <h2>0 · Machine check</h2>
+    <p class="hint">Rough check only — CPU, RAM, disk, Docker, and the CLI tools Setup needs. Not
+      required before Run setup, just saves a confusing failure later.</p>
+    <div class="row">
+      <button id="run-doctor" class="secondary">Check my machine</button>
+      <span id="doctor-verdict" class="pill"></span>
+    </div>
+    <div id="doctor-details" class="doctor-grid" hidden></div>
+    <ul id="doctor-notes" class="notes-list"></ul>
+  </section>
+
+  <section class="card">
     <h2>1 · Environment</h2>
     <label>Test environment</label>
     <select id="env"><option value="sregym">SREGym (live Kubernetes faults)</option></select>
@@ -28,22 +40,35 @@
     <h2>2 · Agent &amp; model</h2>
     <label>Agent</label>
     <select id="agent"></select>
+    <p class="hint" id="agent-desc"></p>
     <label>Model (agent)</label>
     <input id="model" list="model-presets" value="gemini/gemini-3.5-flash-lite">
     <datalist id="model-presets"></datalist>
     <label>Judge model</label>
     <input id="judge-model" list="model-presets" value="gemini/gemini-3.5-flash-lite">
+    <p class="hint">Grades diagnosis quality against a fixed checklist — kept the same across
+      every agent/model you try here, so results stay comparable to each other. Changing it is
+      fine to experiment with, but the number won't compare to anyone else's runs.</p>
   </section>
 
   <section class="card">
     <h2>3 · Problems</h2>
     <label>Problem set</label>
     <select id="problem-set"></select>
-    <div id="problem-checks" class="checklist"></div>
+    <div id="problem-groups"></div>
     <div id="custom-problem-wrap" style="display:none">
       <label>Problem id</label>
       <input id="custom-problem" placeholder="e.g. configmap_drift_hotel_reservation">
     </div>
+    <div class="row problem-toolbar">
+      <button id="select-all" class="secondary small" type="button">Select all</button>
+      <button id="select-none" class="secondary small" type="button">Select none</button>
+      <label class="inline-label batch-label">Run in batches of</label>
+      <input id="batch-size" type="number" min="0" value="5" title="0 = run everything as one batch">
+    </div>
+    <p class="hint">Batching runs the selected problems a few at a time instead of one long
+      sequential queue — each batch finishes and logs a summary before the next one starts, so a
+      stuck run only costs you one batch, not the whole set. 0 runs everything in one go.</p>
   </section>
 
   <section class="card">
@@ -58,11 +83,17 @@
       <input id="key-value" type="password" placeholder="paste your own key — one key per person">
       <button id="save-key">Save</button>
     </div>
+    <p class="hint" id="key-status"></p>
+
     <label>Firebase service-account JSON path (optional — connects result sync)</label>
     <div class="row">
       <input id="fb-path" placeholder="/path/to/service-account.json">
       <button id="connect-fb">Connect</button>
     </div>
+    <p class="hint">Auto-detected on startup from <code>ReliOps/.env</code> — a
+      <code>GOOGLE_APPLICATION_CREDENTIALS</code> path, or the key's JSON pasted directly into
+      <code>FIREBASE_SERVICE_ACCOUNT_JSON</code> / <code>SERVICE_ACCOUNT_KEY</code>, no path needed
+      at all. The field above and the Connect button are only for overriding that.</p>
     <p class="hint">If the whole team points this at the same Firebase project (one shared key),
       results show up for everyone in one place. That key has full access for anyone who has it —
       "Your name" above just labels who ran what, it isn't an access control. See the README's
@@ -76,6 +107,10 @@
       <button id="run-setup" class="secondary">Run setup (clone + patches + cluster)</button>
       <button id="run-demo" class="secondary">Demo mode (no cluster needed)</button>
       <button id="run-test" class="primary">Run test(s)</button>
+    </div>
+    <div id="progress-wrap" class="progress-wrap" hidden>
+      <div class="progress"><div id="progress-fill" class="progress-fill"></div></div>
+      <p class="hint" id="progress-label"></p>
     </div>
   </section>
 

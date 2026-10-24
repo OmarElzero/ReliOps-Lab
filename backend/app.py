@@ -52,6 +52,7 @@ def config():
         "firebase_status": firebase_sync.status(),
         "reliops_dir": str(runner.reliops_dir()),
         "default_firebase_key_path": str(runner.default_firebase_key_path()),
+        "saved_providers": runner.saved_providers(),
     }
 
 
@@ -62,8 +63,11 @@ class KeyIn(BaseModel):
 
 @app.post("/api/key")
 def set_key(body: KeyIn):
-    runner.write_key(body.provider, body.value)
-    return {"ok": True}
+    try:
+        runner.write_key(body.provider, body.value)
+        return {"ok": True, "message": f"saved {body.provider} to your local ReliOps/.env"}
+    except OSError as e:
+        return {"ok": False, "message": f"could not save {body.provider}: {e}"}
 
 
 class FirebaseIn(BaseModel):
@@ -76,23 +80,37 @@ def connect_firebase(body: FirebaseIn):
     return {"status": result}
 
 
-def _sse(gen) -> StreamingResponse:
+def _sse(gen, log_kind: str) -> StreamingResponse:
+    """Streams `gen`'s lines to the browser as Server-Sent Events, and tees every line into a
+    timestamped file under results/gui_logs/ at the same time — so the full output survives a
+    closed tab or a cleared log panel, for debugging after the fact."""
     def wrap():
-        for line in gen:
-            yield f"data: {json.dumps(line)}\n\n"
+        log_path = runner.new_log_file(log_kind)
+        with log_path.open("w", encoding="utf-8") as logf:
+            logf.write(f"[log file: {log_path}]\n")
+            yield f"data: {json.dumps(f'[saving full output to {log_path}]')}\n\n"
+            for line in gen:
+                logf.write(line)
+                logf.flush()
+                yield f"data: {json.dumps(line)}\n\n"
         yield "data: [[DONE]]\n\n"
 
     return StreamingResponse(wrap(), media_type="text/event-stream")
 
 
+@app.get("/api/doctor")
+def doctor():
+    return runner.doctor()
+
+
 @app.get("/api/setup")
 def setup():
-    return _sse(runner.stream_setup())
+    return _sse(runner.stream_setup(), "setup")
 
 
 @app.get("/api/demo")
 def demo():
-    return _sse(runner.stream_demo())
+    return _sse(runner.stream_demo(), "demo")
 
 
 @app.get("/api/run")
@@ -110,10 +128,14 @@ def run(
     def on_result(record: dict) -> None:
         outcome = firebase_sync.write_run(record)
         record["_firebase"] = outcome
+        # Full record, every field, nothing dropped — the raw backup.
         results_path = runner.reliops_dir() / "results" / "gui_runs.jsonl"
         results_path.parent.mkdir(parents=True, exist_ok=True)
         with results_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
+        # Same row, trimmed to the team's canonical results/*.csv schema — see
+        # runner.append_csv_run's docstring for why both files exist.
+        runner.append_csv_run(record)
 
     gen = runner.stream_campaign(
         agent=agent,
@@ -125,4 +147,4 @@ def run(
         run_by=run_by,
         on_result=on_result,
     )
-    return _sse(gen)
+    return _sse(gen, "run")

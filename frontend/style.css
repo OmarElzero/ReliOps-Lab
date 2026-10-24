@@ -76,12 +76,49 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.secondary { background: transparent; }
 button.small { padding: 4px 10px; font-size: 12px; }
 button:hover { filter: brightness(1.15); }
-.checklist { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; margin-top: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
-.checklist label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text); }
-.checklist input { width: auto; }
 .checkbox { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
 .checkbox input { width: auto; }
 .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+.hint code { background: #0a0b0e; border-radius: 4px; padding: 1px 5px; font-size: 11.5px; }
+
+button:disabled { opacity: .55; cursor: default; filter: none; }
+
+/* machine check */
+.doctor-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+.doctor-k { color: var(--muted); }
+.doctor-v { color: var(--text); font-family: "SF Mono", Consolas, monospace; }
+.notes-list { margin: 10px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--warn); }
+.notes-list:empty { display: none; }
+.notes-list li { margin-bottom: 4px; }
+
+/* problems, grouped by category */
+#problem-groups { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; max-height: 320px; overflow-y: auto; }
+.problem-group { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px 10px; margin: 0; }
+.problem-group legend { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding: 0 4px; }
+.problem-group label { display: flex; align-items: center; gap: 8px; margin: 6px 0 0; font-size: 13px; color: var(--text); }
+.problem-group input { width: auto; }
+.problem-n { font-family: "SF Mono", Consolas, monospace; font-size: 11px; color: var(--muted); min-width: 20px; }
+.problem-diff { margin-left: auto; font-size: 10.5px; text-transform: uppercase; letter-spacing: .03em; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.problem-diff.diff-easy { color: var(--ok); border-color: var(--ok); }
+.problem-diff.diff-medium { color: var(--warn); border-color: var(--warn); }
+.problem-diff.diff-hard { color: #e07a7a; border-color: #e07a7a; }
+
+.problem-toolbar { margin-top: 10px; flex-wrap: wrap; }
+.problem-toolbar .batch-label { margin: 0 0 0 auto; white-space: nowrap; }
+.problem-toolbar #batch-size { width: 64px; flex: none; }
+
+/* run progress */
+.progress-wrap { margin-top: 12px; }
+.progress { height: 8px; border-radius: 999px; background: #0a0b0e; border: 1px solid var(--border); overflow: hidden; }
+.progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .25s ease; }
+.progress-fill.done { background: var(--ok); }
+#progress-label { margin-top: 6px; }
 .actions .row { margin-top: 8px; }
 .log-card { flex: 1; }
 .log-head { justify-content: space-between; margin-bottom: 8px; }
