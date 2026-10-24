@@ -87,10 +87,29 @@ function renderAgentDesc() {
   document.getElementById("agent-desc").textContent = agent && agent.desc ? agent.desc : "";
 }
 
+function selectedProvider() {
+  const sel = document.getElementById("key-provider").value;
+  if (sel === "__custom__") {
+    return document.getElementById("key-provider-custom").value.trim().toUpperCase();
+  }
+  return sel;
+}
+
 function renderKeyStatus() {
-  const provider = document.getElementById("key-provider").value;
-  const saved = CONFIG && CONFIG.saved_providers && CONFIG.saved_providers[provider];
-  document.getElementById("key-status").textContent = saved
+  const isCustom = document.getElementById("key-provider").value === "__custom__";
+  document.getElementById("key-provider-custom").hidden = !isCustom;
+  const provider = selectedProvider();
+  const statusEl = document.getElementById("key-status");
+  const customSaved = CONFIG && CONFIG.custom_saved_keys ? CONFIG.custom_saved_keys : [];
+
+  if (isCustom && !provider) {
+    statusEl.textContent = customSaved.length
+      ? `Type the env var name this key should be saved under. Already saved: ${customSaved.join(", ")}.`
+      : "Type the env var name this key should be saved under.";
+    return;
+  }
+  const saved = (CONFIG && CONFIG.saved_providers && CONFIG.saved_providers[provider]) || customSaved.includes(provider);
+  statusEl.textContent = saved
     ? `${provider} already has a key saved — Save overwrites it.`
     : `${provider} has no key saved yet.`;
 }
@@ -203,6 +222,7 @@ function chunk(arr, size) {
 document.getElementById("problem-set").addEventListener("change", renderProblemSet);
 document.getElementById("agent").addEventListener("change", renderAgentDesc);
 document.getElementById("key-provider").addEventListener("change", renderKeyStatus);
+document.getElementById("key-provider-custom").addEventListener("input", renderKeyStatus);
 
 document.getElementById("select-all").addEventListener("click", () => {
   document.querySelectorAll("#problem-groups input[type=checkbox]").forEach((cb) => (cb.checked = true));
@@ -257,8 +277,13 @@ document.getElementById("run-doctor").addEventListener("click", async () => {
 });
 
 document.getElementById("save-key").addEventListener("click", async () => {
-  const provider = document.getElementById("key-provider").value;
+  const isCustom = document.getElementById("key-provider").value === "__custom__";
+  const provider = selectedProvider();
   const value = document.getElementById("key-value").value.trim();
+  if (!provider) {
+    appendLog("\n[pick a provider, or type a name in the Custom… field, first]\n");
+    return;
+  }
   if (!value) return;
   const res = await fetch("/api/key", {
     method: "POST",
@@ -270,8 +295,13 @@ document.getElementById("save-key").addEventListener("click", async () => {
   if (data.ok) {
     appendLog(`\n[${data.message}]\n`);
     if (CONFIG) {
-      CONFIG.saved_providers = CONFIG.saved_providers || {};
-      CONFIG.saved_providers[provider] = true;
+      if (isCustom) {
+        CONFIG.custom_saved_keys = CONFIG.custom_saved_keys || [];
+        if (!CONFIG.custom_saved_keys.includes(provider)) CONFIG.custom_saved_keys.push(provider);
+      } else {
+        CONFIG.saved_providers = CONFIG.saved_providers || {};
+        CONFIG.saved_providers[provider] = true;
+      }
       renderKeyStatus();
     }
   } else {

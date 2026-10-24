@@ -273,6 +273,24 @@ def saved_providers() -> dict[str, bool]:
     return {p: bool(env_vars.get(p)) for p in KNOWN_PROVIDERS}
 
 
+# Vars this tool reads/writes for its own reasons, not a model key a person typed into the "Model
+# API key" field — left out of custom_saved_keys() so a "Custom…" provider's status isn't lost
+# among unrelated plumbing.
+_NON_MODEL_KEY_VARS = {
+    "GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_SERVICE_ACCOUNT_JSON", "SERVICE_ACCOUNT_KEY",
+    "AGENT_MODEL_ID", "REACT_V1_ACTION_SPACE", "SREGYM_AGENT_IMAGE",
+}
+
+
+def custom_saved_keys() -> list[str]:
+    """Env var names already saved that aren't one of KNOWN_PROVIDERS — e.g. a self-hosted
+    open-weight model's own key, typed into the "Custom…" option of the Model API key field (see
+    frontend/index.html). Without this, a custom-named key you already saved would look
+    unconfigured every time you reopen the GUI, since nothing else tracks it by name."""
+    env_vars = merged_env_vars()
+    return sorted(k for k in env_vars if k not in KNOWN_PROVIDERS and k not in _NON_MODEL_KEY_VARS and env_vars.get(k))
+
+
 # The team's canonical per-run row, mirrored from experiments/run_log_template.csv in the main
 # repo so every run (GUI or terminal) lands in the same shape (CLAUDE.md: "results/ | CSV
 # summaries"). Kept as a fallback for when that template isn't in the clone yet; _run_log_header()

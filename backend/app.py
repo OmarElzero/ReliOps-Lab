@@ -53,6 +53,7 @@ def config():
         "reliops_dir": str(runner.reliops_dir()),
         "default_firebase_key_path": str(runner.default_firebase_key_path()),
         "saved_providers": runner.saved_providers(),
+        "custom_saved_keys": runner.custom_saved_keys(),
     }
 
 

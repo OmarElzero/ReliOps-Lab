@@ -94,10 +94,15 @@
         <option value="GEMINI_API_KEY">GEMINI_API_KEY</option>
         <option value="GROQ_API_KEY">GROQ_API_KEY</option>
         <option value="OPENROUTER_API_KEY">OPENROUTER_API_KEY</option>
+        <option value="__custom__">Custom…</option>
       </select>
       <input id="key-value" type="password" placeholder="paste your own key — one key per person">
       <button id="save-key">Save</button>
     </div>
+    <input id="key-provider-custom" hidden placeholder="env var name, e.g. VLLM_API_KEY or OPENWEIGHT_ENDPOINT_KEY" style="margin-top:8px">
+    <p class="hint">"Custom…" is for anything not in the list — e.g. a self-hosted open-weight
+      model's own key or endpoint token. Type whatever env var name SREGym/the agent expects to
+      read.</p>
     <p class="hint" id="key-status"></p>
 
     <label>Firebase (shared results)</label>
