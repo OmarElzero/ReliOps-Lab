@@ -51,6 +51,7 @@ def config():
         "problem_sets": runner.problem_sets(),
         "firebase_status": firebase_sync.status(),
         "reliops_dir": str(runner.reliops_dir()),
+        "default_firebase_key_path": str(runner.default_firebase_key_path()),
     }
 
 

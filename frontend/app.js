@@ -58,6 +58,16 @@ async function loadConfig() {
   setFbStatus(CONFIG.firebase_status);
   document.getElementById("reliops-dir-hint").textContent =
     "ReliOps clone: " + CONFIG.reliops_dir + " (created automatically on first Setup run)";
+
+  // Pre-fill with the suggested shared-key location (README's "Shared results" section) so saving
+  // the downloaded file there is all that's needed — nothing to type. A path already typed or
+  // remembered from last time (localStorage) wins over this default.
+  const fbPathEl = document.getElementById("fb-path");
+  if (!fbPathEl.value) {
+    let saved = "";
+    try { saved = localStorage.getItem("reliops_lab_fb_path") || ""; } catch (e) { /* ignore */ }
+    fbPathEl.value = saved || CONFIG.default_firebase_key_path;
+  }
 }
 
 function renderProblemSet() {
@@ -132,6 +142,7 @@ document.getElementById("save-key").addEventListener("click", async () => {
 document.getElementById("connect-fb").addEventListener("click", async () => {
   const service_account_path = document.getElementById("fb-path").value.trim();
   if (!service_account_path) return;
+  try { localStorage.setItem("reliops_lab_fb_path", service_account_path); } catch (e) { /* ignore */ }
   const res = await fetch("/api/firebase", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

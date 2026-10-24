@@ -81,6 +81,24 @@ that one JSON file with the team through a safe private channel (never git; it's
 `.gitignore`). Each run also tags itself with whatever you type into **"Your name"** in the header
 (saved in your browser only), so the team can tell whose run is whose in the `runs` collection.
 
+**What that one person does, once:**
+1. [console.firebase.google.com](https://console.firebase.google.com) → **Add project** (the free
+   Spark plan is enough — this is a few hundred small document writes, not production traffic).
+2. In that project: **Build → Firestore Database → Create database** — pick **Native mode** and any
+   region. (This step is easy to miss: the project existing is not enough, Firestore itself has to
+   be created inside it or every write from this tool will fail.)
+3. **Project settings (⚙) → Service accounts → Generate new private key.** This downloads one JSON
+   file — that's the file everyone shares.
+4. Send that file to the team over a private channel — DM, not a public channel or git.
+
+**What every other person does, once, after receiving the file:**
+1. Save it at **`~/reliops-lab-workdir/firebase-service-account.json`** — that's the same folder
+   this tool already keeps its ReliOps clone in (`~/reliops-lab-workdir/`, see below), it's outside
+   any git repo, and it's the path the GUI's Firebase field is pre-filled with, so there's nothing
+   to figure out or type by hand.
+2. Open the GUI, click **Connect** next to that pre-filled path (change it only if you saved the
+   file somewhere else), type your name at the top, done.
+
 **Read this before relying on it for anything sensitive:** a Firebase service-account key is an
 *admin* credential — it has full read/write/delete access to the whole project, for anyone who has
 the file. "Your name" is a self-reported label for convenience, not an authentication system or an

@@ -49,6 +49,13 @@ def sregym_dir() -> Path:
     return reliops_dir() / "external" / "envs" / "sregym"
 
 
+def default_firebase_key_path() -> Path:
+    """Where this tool suggests saving a shared Firebase service-account key — next to the ReliOps
+    clone, outside any git repo. The GUI pre-fills its Firebase field with this, so a teammate who
+    saves the file here never has to type a path by hand (README's "Shared results" section)."""
+    return DEFAULT_WORKDIR / "firebase-service-account.json"
+
+
 def _read_problem_ids(csv_path: Path) -> list[str]:
     try:
         lines = csv_path.read_text(encoding="utf-8").splitlines()
