@@ -154,6 +154,17 @@ GUI, not a setting to flip here.
   fine for a single person running their own machine, not for handing a key to a sponsor VM.
 - No campaign-level statistics (Wilson CIs, paired comparisons) — that's the results-explorer in
   v2; for now, read `ReliOps/results/gui_runs.jsonl` or SREGym's own CSVs directly.
+- **One test environment only (SREGym), hardcoded.** `runner.stream_campaign()` shells out straight
+  to SREGym's own CLI (`uv run main.py --agent … --problem …`) — there's no abstraction between
+  "this tool" and "SREGym specifically" yet. "Any agent" currently only means any agent SREGym's own
+  `agents.yaml` already knows how to launch (reliops_v1/v2, STRATUS, mini-sre, Gemini CLI, OpenCode,
+  autosubmit) — not a truly pluggable agent either. Adding a second environment (AIOpsLab is next,
+  per `docs/envs/which-to-use.md`) means pulling the SREGym-specific bits out behind the
+  `EnvAdapter`/`AgentAdapter` contract **already specced** in `docs/plan/05-platform-spec.md` §3.3
+  (`setup` / `list_problems` / `run` / `parse`) — reuse that contract instead of inventing a second
+  one, so this local tool and the eventual Firebase platform (`05-platform-spec.md` v0–v3) share one
+  adapter model instead of diverging. Scoped as a future stage, not started — see that doc for the
+  interface to implement against.
 
 ## Project structure
 
