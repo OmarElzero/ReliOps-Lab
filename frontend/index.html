@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReliOps Lab</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>ReliOps Lab <span class="tag">v0 · local</span></h1>
+  <div id="fb-status" class="pill">Firebase: checking…</div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>1 · Environment</h2>
+    <label>Test environment</label>
+    <select id="env"><option value="sregym">SREGym (live Kubernetes faults)</option></select>
+    <p class="hint" id="reliops-dir-hint"></p>
+  </section>
+
+  <section class="card">
+    <h2>2 · Agent &amp; model</h2>
+    <label>Agent</label>
+    <select id="agent"></select>
+    <label>Model (agent)</label>
+    <input id="model" list="model-presets" value="gemini/gemini-3.5-flash-lite">
+    <datalist id="model-presets"></datalist>
+    <label>Judge model</label>
+    <input id="judge-model" list="model-presets" value="gemini/gemini-3.5-flash-lite">
+  </section>
+
+  <section class="card">
+    <h2>3 · Problems</h2>
+    <label>Problem set</label>
+    <select id="problem-set"></select>
+    <div id="problem-checks" class="checklist"></div>
+    <div id="custom-problem-wrap" style="display:none">
+      <label>Problem id</label>
+      <input id="custom-problem" placeholder="e.g. configmap_drift_hotel_reservation">
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>4 · Keys &amp; Firebase</h2>
+    <label>Model API key (saved only to your local ReliOps/.env)</label>
+    <div class="row">
+      <select id="key-provider">
+        <option value="GEMINI_API_KEY">GEMINI_API_KEY</option>
+        <option value="GROQ_API_KEY">GROQ_API_KEY</option>
+        <option value="OPENROUTER_API_KEY">OPENROUTER_API_KEY</option>
+      </select>
+      <input id="key-value" type="password" placeholder="paste your own key — one key per person">
+      <button id="save-key">Save</button>
+    </div>
+    <label>Firebase service-account JSON path (optional — connects result sync)</label>
+    <div class="row">
+      <input id="fb-path" placeholder="/path/to/service-account.json">
+      <button id="connect-fb">Connect</button>
+    </div>
+  </section>
+
+  <section class="card actions">
+    <h2>Run</h2>
+    <label class="checkbox"><input type="checkbox" id="force-build"> force-build (first run of this agent on this machine)</label>
+    <div class="row">
+      <button id="run-setup" class="secondary">Run setup (clone + patches + cluster)</button>
+      <button id="run-demo" class="secondary">Demo mode (no cluster needed)</button>
+      <button id="run-test" class="primary">Run test(s)</button>
+    </div>
+  </section>
+
+  <section class="card log-card">
+    <div class="row log-head">
+      <h2>Live log</h2>
+      <button id="clear-log" class="secondary small">Clear</button>
+    </div>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
