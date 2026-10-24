@@ -70,14 +70,11 @@ def set_key(body: KeyIn):
         return {"ok": False, "message": f"could not save {body.provider}: {e}"}
 
 
-class FirebaseIn(BaseModel):
-    service_account_path: str
-
-
-@app.post("/api/firebase")
-def connect_firebase(body: FirebaseIn):
-    result = firebase_sync.configure(body.service_account_path)
-    return {"status": result}
+@app.get("/api/firebase-status")
+def firebase_status():
+    """Polled by the frontend every few seconds so the status pill reflects ReliOps/.env — there
+    is no manual "Connect" step any more; .env is the only source (see firebase_sync.py)."""
+    return {"status": firebase_sync.status()}
 
 
 def _sse(gen, log_kind: str) -> StreamingResponse:
@@ -103,6 +100,38 @@ def doctor():
     return runner.doctor()
 
 
+@app.get("/api/results")
+def results(limit: int = 300):
+    """Backs the Results tab/dashboard: every recorded run, newest first, and who ran it.
+    Firestore (the whole team's runs) wins when connected; this machine's own
+    results/gui_runs.jsonl is the fallback when it isn't — either way the caller is told which
+    one it got, since "no runs yet" and "not seeing the team's runs" are different problems."""
+    firestore_runs = firebase_sync.list_runs(limit)
+    if firestore_runs is not None:
+        source = "firestore"
+        raw_runs = firestore_runs
+    else:
+        source = "local"
+        raw_runs = runner.list_local_runs(limit)
+
+    runs = []
+    for r in raw_runs:
+        normalized = runner.normalize_sregym_row(r.get("row"))
+        runs.append({
+            "run_id": r.get("run_id"),
+            "timestamp_utc": r.get("timestamp_utc"),
+            "run_by": r.get("run_by") or "unknown",
+            "problem_id": r.get("problem_id"),
+            "agent_id": r.get("agent_id"),
+            "model_id": r.get("model_id"),
+            "action_space": r.get("action_space"),
+            "repeat_index": r.get("repeat_index"),
+            "repeat_n": r.get("repeat_n"),
+            **normalized,
+        })
+    return {"source": source, "runs": runs}
+
+
 @app.get("/api/setup")
 def setup():
     return _sse(runner.stream_setup(), "setup")
@@ -121,6 +150,7 @@ def run(
     problems: str,  # comma-separated problem ids
     action_space: Optional[str] = None,
     force_build: bool = False,
+    repeat_n: int = 1,  # run each problem this many times in a row — see runner.stream_campaign
     run_by: Optional[str] = None,  # self-reported name, for a shared-key team — see README
 ):
     problem_list = [p.strip() for p in problems.split(",") if p.strip()]
@@ -143,6 +173,7 @@ def run(
         model=model,
         judge_model=judge_model,
         problems=problem_list,
+        repeat_n=repeat_n,
         force_build=force_build,
         run_by=run_by,
         on_result=on_result,

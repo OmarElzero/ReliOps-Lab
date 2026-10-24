@@ -60,19 +60,27 @@ async function loadConfig() {
 
   setFbStatus(CONFIG.firebase_status);
   appendLog(`\n[Firebase: ${CONFIG.firebase_status}]\n`);
+  _lastFbStatus = CONFIG.firebase_status;
   document.getElementById("reliops-dir-hint").textContent =
     "ReliOps clone: " + CONFIG.reliops_dir + " (created automatically on first Setup run)";
-
-  // Pre-fill with the suggested shared-key location (README's "Shared results" section) so saving
-  // the downloaded file there is all that's needed — nothing to type. A path already typed or
-  // remembered from last time (localStorage) wins over this default.
-  const fbPathEl = document.getElementById("fb-path");
-  if (!fbPathEl.value) {
-    let saved = "";
-    try { saved = localStorage.getItem("reliops_lab_fb_path") || ""; } catch (e) { /* ignore */ }
-    fbPathEl.value = saved || CONFIG.default_firebase_key_path;
-  }
 }
+
+// Firebase has no "Connect" step any more — ReliOps/.env is the only source (see
+// firebase_sync.py). Poll its status periodically so saving a key there, or Setup creating the
+// file, is picked up on its own within a few seconds, with no page reload needed.
+let _lastFbStatus = null;
+async function pollFirebaseStatus() {
+  try {
+    const res = await fetch("/api/firebase-status");
+    const data = await res.json();
+    setFbStatus(data.status);
+    if (data.status !== _lastFbStatus) {
+      appendLog(`\n[Firebase: ${data.status}]\n`);
+      _lastFbStatus = data.status;
+    }
+  } catch (e) { /* server not up yet, or a blip — next poll will retry */ }
+}
+setInterval(pollFirebaseStatus, 10000);
 
 function renderAgentDesc() {
   const agent = selectedAgent();
@@ -178,6 +186,13 @@ function streamFrom(url, onLine) {
   });
 }
 
+function fmtElapsed(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 function chunk(arr, size) {
   if (!size || size <= 0 || size >= arr.length) return [arr];
   const out = [];
@@ -264,21 +279,6 @@ document.getElementById("save-key").addEventListener("click", async () => {
   }
 });
 
-document.getElementById("connect-fb").addEventListener("click", async () => {
-  const service_account_path = document.getElementById("fb-path").value.trim();
-  if (!service_account_path) return;
-  try { localStorage.setItem("reliops_lab_fb_path", service_account_path); } catch (e) { /* ignore */ }
-  appendLog(`\n[connecting to Firebase using ${service_account_path} ...]\n`);
-  const res = await fetch("/api/firebase", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ service_account_path }),
-  });
-  const data = await res.json();
-  setFbStatus(data.status);
-  appendLog(`\n[Firebase: ${data.status}]\n`);
-});
-
 document.getElementById("run-setup").addEventListener("click", () => {
   appendLog("\n[starting setup — clone + patches + cluster build; first run can take ~10 min]\n");
   streamFrom("/api/setup");
@@ -297,6 +297,7 @@ document.getElementById("run-test").addEventListener("click", async () => {
   const forceBuild = document.getElementById("force-build").checked;
   const runBy = runByEl.value.trim();
   const batchSize = Number(document.getElementById("batch-size").value) || 0;
+  const repeatN = Math.max(1, Number(document.getElementById("repeat-n").value) || 1);
 
   if (!problems.length) {
     appendLog("\n[pick at least one problem first]\n");
@@ -308,33 +309,74 @@ document.getElementById("run-test").addEventListener("click", async () => {
   runButton.disabled = true;
   runButton.textContent = "Running…";
 
-  // Progress bar: SREGym runs one problem per process, so runner.stream_campaign() yields a
-  // "===== [i/N] problem=... =====" banner when a problem starts and a "recorded result for
-  // ..." line when it finishes. Both lines carry the batch's own local index, not a global one,
-  // so track overall progress ourselves by counting "recorded result" lines across every batch.
-  const total = problems.length;
-  let completed = 0;
+  // One row per problem (not one bar for the whole run) — a problem can take 30+ minutes, and a
+  // single aggregate percentage can't tell "the whole run is stuck" apart from "problem #7 is
+  // just slow". Each row tracks its own repeat count via runner.stream_campaign()'s per-run
+  // "===== [i/N] problem=... repeat=r/R =====" banner and "recorded result for ..." line.
   const progressWrap = document.getElementById("progress-wrap");
-  const progressFill = document.getElementById("progress-fill");
-  const progressLabel = document.getElementById("progress-label");
+  const summaryEl = document.getElementById("progress-summary");
+  const rowsEl = document.getElementById("progress-rows");
   progressWrap.hidden = false;
-  progressFill.className = "progress-fill";
-  progressFill.style.width = "0%";
-  progressLabel.textContent = `Starting — 0 of ${total}`;
+  rowsEl.innerHTML = "";
+  const rows = new Map();
+  problems.forEach((p) => {
+    const row = document.createElement("div");
+    row.className = "progress-row";
+    row.innerHTML = '<span class="p-dot"></span><span class="p-name"></span>'
+      + '<span class="p-state">queued</span><span class="p-time"></span>';
+    row.querySelector(".p-name").textContent = p;
+    rowsEl.appendChild(row);
+    rows.set(p, {
+      el: row,
+      stateEl: row.querySelector(".p-state"),
+      timeEl: row.querySelector(".p-time"),
+      startedAt: null,
+      completed: 0,
+    });
+  });
 
-  const startedRe = /\[(\d+)\/(\d+)\] problem=(\S+)/;
-  const doneRe = /recorded result for (\S+):/;
+  let totalCompleted = 0;
+  const totalRuns = problems.length * repeatN;
+  const updateSummary = () => { summaryEl.textContent = `${totalCompleted} of ${totalRuns} run(s) done`; };
+  updateSummary();
+
+  const tickInterval = setInterval(() => {
+    rows.forEach((r) => {
+      if (r.startedAt) r.timeEl.textContent = fmtElapsed(Date.now() - r.startedAt);
+    });
+  }, 1000);
+
+  const startedRe = /\[(\d+)\/(\d+)\] problem=(\S+)(?: repeat=(\d+)\/(\d+))?/;
+  const doneRe = /recorded result for (\S+): (parsed row found|no row parsed[^(]*)/;
   const onLine = (line) => {
     const started = startedRe.exec(line);
     if (started) {
-      progressLabel.textContent = `Running ${completed + 1} of ${total} — ${started[3]}`;
+      const [, , , problem, rep, repTotal] = started;
+      const r = rows.get(problem);
+      if (r) {
+        r.el.className = "progress-row running";
+        r.startedAt = Date.now();
+        r.stateEl.textContent = rep ? `running ${rep}/${repTotal}` : "running";
+      }
       return;
     }
     const done = doneRe.exec(line);
     if (done) {
-      completed += 1;
-      progressFill.style.width = `${Math.round((completed / total) * 100)}%`;
-      progressLabel.textContent = `Done ${completed} of ${total} — ${done[1]}`;
+      const [, problem, note] = done;
+      const r = rows.get(problem);
+      totalCompleted += 1;
+      updateSummary();
+      if (!r) return;
+      r.completed += 1;
+      r.startedAt = null;
+      const ok = note.startsWith("parsed row found");
+      if (r.completed >= repeatN) {
+        r.el.className = "progress-row " + (ok ? "done" : "failed");
+        r.stateEl.textContent = repeatN > 1 ? `done ${r.completed}/${repeatN}` : (ok ? "done" : "no row parsed");
+        r.timeEl.textContent = "";
+      } else {
+        r.stateEl.textContent = `done ${r.completed}/${repeatN} — next…`;
+      }
     }
   };
 
@@ -345,6 +387,7 @@ document.getElementById("run-test").addEventListener("click", async () => {
       model,
       judge_model: judgeModel,
       problems: batch.join(","),
+      repeat_n: String(repeatN),
       force_build: forceBuild && i === 0 ? "true" : "false", // only the very first call needs to build the image
     });
     if (agent.action_space) params.set("action_space", agent.action_space);
@@ -358,19 +401,104 @@ document.getElementById("run-test").addEventListener("click", async () => {
     await streamFrom("/api/run?" + params.toString(), onLine);
   }
 
-  progressFill.style.width = "100%";
-  progressFill.className = "progress-fill done";
-  progressLabel.textContent = `Done: ${completed} of ${total}`;
+  clearInterval(tickInterval);
+  summaryEl.textContent = `Done: ${totalCompleted} of ${totalRuns} run(s)`;
 
   runButton.disabled = false;
   runButton.textContent = "Run test(s)";
   if (batches.length > 1) {
     appendLog(`\n===== all ${batches.length} batches done (${problems.length} problem(s) total) =====\n`);
   }
+  // So the Results tab doesn't show stale data if the user flips over right after a run.
+  loadResults();
 });
 
 document.getElementById("clear-log").addEventListener("click", () => {
   logEl.textContent = "";
 });
+
+// ---- Tabs ------------------------------------------------------------------
+const tabRunBtn = document.getElementById("tab-btn-run");
+const tabResultsBtn = document.getElementById("tab-btn-results");
+const tabRunPanel = document.getElementById("tab-run");
+const tabResultsPanel = document.getElementById("tab-results");
+let resultsLoadedOnce = false;
+
+function showTab(name) {
+  const onResults = name === "results";
+  tabRunPanel.hidden = onResults;
+  tabResultsPanel.hidden = !onResults;
+  tabRunBtn.classList.toggle("active", !onResults);
+  tabResultsBtn.classList.toggle("active", onResults);
+  if (onResults && !resultsLoadedOnce) {
+    resultsLoadedOnce = true;
+    loadResults();
+  }
+}
+tabRunBtn.addEventListener("click", () => showTab("run"));
+tabResultsBtn.addEventListener("click", () => showTab("results"));
+
+// ---- Results dashboard ------------------------------------------------------
+function fmtWhen(iso) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch (e) { return iso; }
+}
+
+function passCell(value) {
+  const td = document.createElement("td");
+  if (value === true) { td.textContent = "✓ pass"; td.className = "r-pass"; }
+  else if (value === false) { td.textContent = "✗ fail"; td.className = "r-fail"; }
+  else { td.textContent = "—"; td.className = "r-unknown"; }
+  return td;
+}
+
+function timeCell(seconds) {
+  const td = document.createElement("td");
+  td.textContent = typeof seconds === "number" ? `${seconds.toFixed(0)}s` : "—";
+  return td;
+}
+
+async function loadResults() {
+  const sourceEl = document.getElementById("results-source");
+  const tbody = document.getElementById("results-tbody");
+  const emptyEl = document.getElementById("results-empty");
+  sourceEl.textContent = "loading…";
+  let data;
+  try {
+    const res = await fetch("/api/results");
+    data = await res.json();
+  } catch (e) {
+    sourceEl.textContent = "couldn't load results — is the server running?";
+    return;
+  }
+  sourceEl.textContent = data.source === "firestore"
+    ? "Showing the whole team's runs (via Firestore)."
+    : "Showing this machine's own runs only — Firebase isn't connected, see the Run tab's Keys & Firebase section.";
+
+  tbody.innerHTML = "";
+  emptyEl.hidden = data.runs.length > 0;
+  data.runs.forEach((r) => {
+    const tr = document.createElement("tr");
+    const when = document.createElement("td"); when.textContent = fmtWhen(r.timestamp_utc); tr.appendChild(when);
+    const by = document.createElement("td"); by.textContent = r.run_by || "unknown"; tr.appendChild(by);
+    const problem = document.createElement("td");
+    problem.className = "r-problem";
+    problem.textContent = r.repeat_n > 1 ? `${r.problem_id} (${r.repeat_index}/${r.repeat_n})` : (r.problem_id || "—");
+    tr.appendChild(problem);
+    const agent = document.createElement("td"); agent.textContent = r.agent_id || "—"; tr.appendChild(agent);
+    const model = document.createElement("td"); model.textContent = r.model_id || "—"; tr.appendChild(model);
+    tr.appendChild(passCell(r.diagnosis_pass));
+    tr.appendChild(passCell(r.mitigation_pass));
+    tr.appendChild(passCell(r.e2e_pass));
+    tr.appendChild(timeCell(r.ttd_s));
+    tr.appendChild(timeCell(r.ttm_s));
+    tbody.appendChild(tr);
+  });
+}
+document.getElementById("refresh-results").addEventListener("click", loadResults);
 
 loadConfig();

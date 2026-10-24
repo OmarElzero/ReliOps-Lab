@@ -10,6 +10,7 @@ itself has no cloud dependency, so it works today with no Firebase project, no l
 from __future__ import annotations
 
 import csv
+import json
 import os
 import shlex
 import shutil
@@ -136,14 +137,25 @@ def problem_sets() -> list[dict]:
     return sets
 
 
-def _stream(cmd: list[str], cwd: Path | None = None, env: dict | None = None) -> Iterator[str]:
-    """Run a command, yielding its combined stdout/stderr as it's produced (unbuffered)."""
-    full_env = {**os.environ, **(env or {})}
+def _stream(cmd: list[str], cwd: Path | None = None, env: dict | None = None, result: list | None = None) -> Iterator[str]:
+    """Run a command, yielding its combined stdout/stderr as it's produced (unbuffered). If
+    `result` is given, the process's exit code is appended to it once the command finishes, so a
+    caller can gate later steps on whether this one actually succeeded instead of always running
+    them next regardless (that gap used to let a failed `git clone` be followed straight into a
+    `git checkout` in a directory that was never a git repo).
+
+    stdin is always closed (DEVNULL), never inherited, and GIT_TERMINAL_PROMPT=0 is always set: a
+    GUI server has no terminal for a subprocess to prompt against, so a `git` that would otherwise
+    sit waiting for a username/password or an SSH host-key confirmation — looking like the whole
+    run has frozen, with no error and no way to answer it — fails fast instead and the real reason
+    shows up in the log."""
+    full_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})}
     yield f"$ {' '.join(shlex.quote(c) for c in cmd)}\n"
     proc = subprocess.Popen(
         cmd,
         cwd=str(cwd) if cwd else None,
         env=full_env,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -153,16 +165,39 @@ def _stream(cmd: list[str], cwd: Path | None = None, env: dict | None = None) ->
     for line in proc.stdout:
         yield line
     proc.wait()
+    if result is not None:
+        result.append(proc.returncode)
     yield f"\n[exit code {proc.returncode}]\n"
 
 
 def ensure_clone() -> Iterator[str]:
+    """Clones (or updates) ReliOps into DEFAULT_WORKDIR. Handles the two failure modes seen in
+    practice: a leftover, non-empty directory from an earlier interrupted/failed setup attempt
+    (git clone refuses to clone into it — we now clear it out first), and a clone that itself
+    failed (we now stop before `git checkout`, instead of running it in a directory that was
+    never actually a git repo and getting a confusing second error on top of the first)."""
     DEFAULT_WORKDIR.mkdir(parents=True, exist_ok=True)
-    if not (reliops_dir() / ".git").exists():
-        yield from _stream(["git", "clone", RELIOPS_REPO_URL, str(reliops_dir())])
+
+    if (reliops_dir() / ".git").exists():
+        yield "ReliOps clone already present — fetching the latest and switching to the working branch.\n"
+        yield from _stream(["git", "fetch", "origin", RELIOPS_BRANCH], cwd=reliops_dir())
         yield from _stream(["git", "checkout", RELIOPS_BRANCH], cwd=reliops_dir())
-    else:
-        yield "ReliOps clone already present, skipping clone.\n"
+        yield from _stream(["git", "pull", "--ff-only", "origin", RELIOPS_BRANCH], cwd=reliops_dir())
+        return
+
+    if reliops_dir().exists():
+        yield (
+            f"{reliops_dir()} exists but isn't a git clone (likely left over from an earlier "
+            "failed setup attempt) — clearing it out before cloning fresh.\n"
+        )
+        shutil.rmtree(reliops_dir())
+
+    clone_result: list[int] = []
+    yield from _stream(["git", "clone", RELIOPS_REPO_URL, str(reliops_dir())], result=clone_result)
+    if clone_result and clone_result[0] != 0:
+        yield "git clone failed — stopping before checkout (see the exit code above).\n"
+        return
+    yield from _stream(["git", "checkout", RELIOPS_BRANCH], cwd=reliops_dir())
 
 
 KNOWN_PROVIDERS = ["GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"]
@@ -239,15 +274,64 @@ def _run_log_header() -> list[str]:
     return list(_RUN_LOG_HEADER_FALLBACK)
 
 
+def _as_bool(value: object) -> bool | None:
+    """Same parsing SREGym's own sregym/results/report.py uses for its CSV's string-typed
+    booleans — matched deliberately so our reading of its row agrees with its own tooling."""
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    if normalized in {"true", "1", "yes"}:
+        return True
+    if normalized in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _as_float(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_sregym_row(row: dict | None) -> dict:
+    """Pulls the few fields we can state with confidence out of SREGym's own raw result row.
+    Verified against its source, not guessed: sregym/conductor/conductor.py sets
+    `self.results[stage_name.capitalize()] = outcome` (so a stage's own fields land at
+    "Diagnosis.<key>" / "Mitigation.<key>") and a top-level timing key per stage — "TTL" when the
+    stage is "diagnosis", "TTM" otherwise (conductor.py ~line 802); sregym/results/report.py reads
+    `row.get("Diagnosis.success")` / `row.get("Mitigation.success")` for pass/fail and computes
+    "overall" as diagnosis-and-mitigation itself — there's no separate e2e/overall column in the
+    raw row, so we compute it the same way it does. Anything not covered here (token counts, tool
+    call counts, durability) isn't in this row at all as far as this reading goes, and is left
+    blank rather than guessed."""
+    row = row or {}
+    diagnosis = _as_bool(row.get("Diagnosis.success"))
+    mitigation = _as_bool(row.get("Mitigation.success"))
+    incomplete = row.get("run_status") == "incomplete" or diagnosis is None or mitigation is None
+    e2e = None if incomplete else (diagnosis and mitigation)
+    return {
+        "diagnosis_pass": diagnosis,
+        "mitigation_pass": mitigation,
+        "e2e_pass": e2e,
+        "ttd_s": _as_float(row.get("TTL")),  # diagnosis-stage timing, per conductor.py
+        "ttm_s": _as_float(row.get("TTM")),  # mitigation-stage timing, per conductor.py
+        "run_status": row.get("run_status"),
+        "deploy_failed": _as_bool(row.get("deploy_failed")),
+    }
+
+
 def append_csv_run(record: dict) -> Path:
     """Appends one row to results/gui_runs.csv in the team's canonical schema (same columns as
     experiments/run_log_template.csv), alongside the fuller results/gui_runs.jsonl this tool
     already wrote (that one keeps everything — run_by, the Firebase outcome, SREGym's raw row
     untouched — this CSV is the trimmed, standard-shape version meant to sit next to the rest of
     the team's results/*.csv files). A column the template expects that SREGym's own row didn't
-    return, or that this GUI doesn't know, is left blank — never guessed."""
+    return, or that this GUI doesn't know, is left blank — never guessed (diagnosis_pass,
+    mitigation_pass, e2e_pass, ttd_s and ttm_s are the exception — see normalize_sregym_row)."""
     header = _run_log_header()
     row_data = dict(record.get("row") or {})  # SREGym's own metrics.md-shaped row, if present
+    normalized = normalize_sregym_row(record.get("row"))
     # What the GUI itself knows for certain always wins over whatever (if anything) `row` has
     # under the same name — these came straight from the form, not a derived/parsed value.
     row_data.update({
@@ -257,8 +341,14 @@ def append_csv_run(record: dict) -> Path:
         "agent_id": record.get("agent_id", ""),
         "model_id": record.get("model_id", ""),
         "action_space": record.get("action_space") or "",
+        "repeat_n": record.get("repeat_n", ""),
+        "diagnosis_pass": normalized["diagnosis_pass"],
+        "mitigation_pass": normalized["mitigation_pass"],
+        "e2e_pass": normalized["e2e_pass"],
+        "ttd_s": normalized["ttd_s"],
+        "ttm_s": normalized["ttm_s"],
     })
-    out_row = {col: row_data.get(col, "") for col in header}
+    out_row = {col: ("" if row_data.get(col) is None else row_data.get(col)) for col in header}
 
     csv_path = reliops_dir() / "results" / "gui_runs.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,6 +359,27 @@ def append_csv_run(record: dict) -> Path:
             writer.writeheader()
         writer.writerow(out_row)
     return csv_path
+
+
+def list_local_runs(limit: int = 300) -> list[dict]:
+    """Reads this machine's own results/gui_runs.jsonl for the dashboard tab — the fallback when
+    Firebase isn't connected (or the team hasn't shared a key), so "all runs" still means
+    something: just scoped to this laptop instead of the whole team. Newest first."""
+    jsonl_path = reliops_dir() / "results" / "gui_runs.jsonl"
+    if not jsonl_path.is_file():
+        return []
+    records = []
+    with jsonl_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    records.sort(key=lambda r: r.get("timestamp_utc", ""), reverse=True)
+    return records[:limit]
 
 
 def new_log_file(kind: str) -> Path:
@@ -385,6 +496,13 @@ def write_key(provider: str, value: str) -> None:
 
 def stream_setup() -> Iterator[str]:
     yield from ensure_clone()
+    quickstart = reliops_dir() / "scripts" / "quickstart.sh"
+    if not quickstart.is_file():
+        yield (
+            f"no {quickstart} found — the clone above didn't finish, so there's nothing to run "
+            "yet. Fix whatever the git step above reported and click Run setup again.\n"
+        )
+        return
     yield from _stream(["bash", "scripts/quickstart.sh", "--setup-only"], cwd=reliops_dir())
 
 
@@ -449,17 +567,21 @@ def stream_campaign(
     model: str,
     judge_model: str,
     problems: list[str],
+    repeat_n: int = 1,
     force_build: bool,
     run_by: str | None = None,
     on_result=None,
 ) -> Iterator[str]:
     """Runs one problem at a time (SREGym itself is single-run per process) and yields log lines
-    for all of them in order, with a banner between problems. `on_result(record)` is called after
-    each problem with whatever row we could recover — the GUI uses it to push to Firestore."""
+    for all of them in order, with a banner between problems. Each problem runs `repeat_n` times
+    in a row (repeat_n > 1 is how you get a real n for noisy metrics like time-to-diagnose — see
+    the canonical schema's `repeat_n` column). `on_result(record)` is called after each individual
+    run with whatever row we could recover — the GUI uses it to push to Firestore."""
     if not sregym_dir().exists():
         yield "SREGym clone not found — run Setup first.\n"
         return
 
+    repeat_n = max(1, repeat_n)
     base_env = {"AGENT_MODEL_ID": model}
     if action_space:
         base_env["REACT_V1_ACTION_SPACE"] = action_space
@@ -470,8 +592,14 @@ def stream_campaign(
                 k, _, v = line.partition("=")
                 base_env.setdefault(k.strip(), v.strip().strip('"'))
 
-    for i, problem in enumerate(problems, start=1):
-        yield f"\n===== [{i}/{len(problems)}] problem={problem} agent={agent} action_space={action_space or '-'} =====\n"
+    runs = [(problem, rep) for problem in problems for rep in range(1, repeat_n + 1)]
+    total_runs = len(runs)
+    for i, (problem, rep) in enumerate(runs, start=1):
+        repeat_note = f" repeat={rep}/{repeat_n}" if repeat_n > 1 else ""
+        yield (
+            f"\n===== [{i}/{total_runs}] problem={problem}{repeat_note} agent={agent} "
+            f"action_space={action_space or '-'} =====\n"
+        )
         started_at = time.time()
         env = dict(base_env)
         cmd = [
@@ -499,6 +627,8 @@ def stream_campaign(
             "action_space": action_space,
             "model_id": model,
             "judge_model_id": judge_model,
+            "repeat_n": repeat_n,
+            "repeat_index": rep,
             # Self-reported, not an authenticated identity — see README's "Shared results" section.
             # Whoever ran this typed it into the "Your name" field; it's a label for the team to
             # read, not an access-control boundary (the shared Firebase key has full access either way).
@@ -507,4 +637,6 @@ def stream_campaign(
         }
         if on_result:
             on_result(record)
-        yield f"----- recorded result for {problem}: {'parsed row found' if row else 'no row parsed — check the raw log above'} -----\n"
+        found_note = "parsed row found" if row else "no row parsed — check the raw log above"
+        repeat_suffix = f" (repeat {rep}/{repeat_n})" if repeat_n > 1 else ""
+        yield f"----- recorded result for {problem}: {found_note}{repeat_suffix} -----\n"

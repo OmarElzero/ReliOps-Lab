@@ -44,6 +44,26 @@ main {
   flex-direction: column;
   gap: 16px;
 }
+.tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.tab-btn {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); padding: 8px 4px; font-size: 14px; font-weight: 600;
+  border-radius: 0; cursor: pointer;
+}
+.tab-btn:hover { filter: none; color: var(--text); }
+.tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab-panel { display: flex; flex-direction: column; gap: 16px; }
+.tab-panel[hidden] { display: none; }
+
+/* results dashboard */
+.results-table-wrap { overflow-x: auto; max-height: 480px; overflow-y: auto; }
+.results-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.results-table th, .results-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.results-table th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; position: sticky; top: 0; background: var(--card); }
+.results-table td.r-pass { color: var(--ok); }
+.results-table td.r-fail { color: #e07a7a; }
+.results-table td.r-unknown { color: var(--muted); }
+.results-table td.r-problem { font-family: "SF Mono", Consolas, monospace; white-space: normal; max-width: 260px; }
 .card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -113,12 +133,24 @@ button:disabled { opacity: .55; cursor: default; filter: none; }
 .problem-toolbar .batch-label { margin: 0 0 0 auto; white-space: nowrap; }
 .problem-toolbar #batch-size { width: 64px; flex: none; }
 
-/* run progress */
+/* run progress — one row per problem (per repeat), not a single bar: some problems run 30+
+   minutes, so seeing *which one* is still going matters more than an overall percentage. */
 .progress-wrap { margin-top: 12px; }
-.progress { height: 8px; border-radius: 999px; background: #0a0b0e; border: 1px solid var(--border); overflow: hidden; }
-.progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .25s ease; }
-.progress-fill.done { background: var(--ok); }
-#progress-label { margin-top: 6px; }
+#progress-summary { margin: 0 0 8px; }
+.progress-rows { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+.progress-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: #0a0b0e;
+  font-size: 12.5px;
+}
+.progress-row .p-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.progress-row.running .p-dot { background: var(--accent); animation: p-pulse 1.2s ease-in-out infinite; }
+.progress-row.done .p-dot { background: var(--ok); animation: none; }
+.progress-row.failed .p-dot { background: #e07a7a; animation: none; }
+.progress-row .p-name { font-family: "SF Mono", Consolas, monospace; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.progress-row .p-state { color: var(--muted); white-space: nowrap; }
+.progress-row .p-time { color: var(--muted); font-family: "SF Mono", Consolas, monospace; white-space: nowrap; min-width: 42px; text-align: right; }
+@keyframes p-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 .actions .row { margin-top: 8px; }
 .log-card { flex: 1; }
 .log-head { justify-content: space-between; margin-bottom: 8px; }

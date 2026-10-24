@@ -17,6 +17,12 @@
 </header>
 
 <main>
+  <div class="tabs">
+    <button id="tab-btn-run" class="tab-btn active" type="button">Run</button>
+    <button id="tab-btn-results" class="tab-btn" type="button">Results</button>
+  </div>
+
+  <div id="tab-run" class="tab-panel">
   <section class="card">
     <h2>0 · Machine check</h2>
     <p class="hint">Rough check only — CPU, RAM, disk, Docker, and the CLI tools Setup needs. Not
@@ -69,6 +75,14 @@
     <p class="hint">Batching runs the selected problems a few at a time instead of one long
       sequential queue — each batch finishes and logs a summary before the next one starts, so a
       stuck run only costs you one batch, not the whole set. 0 runs everything in one go.</p>
+    <div class="row">
+      <label class="inline-label batch-label">Repeat each problem</label>
+      <input id="repeat-n" type="number" min="1" value="1" title="run each selected problem this many times in a row">
+      <label class="inline-label batch-label">time(s)</label>
+    </div>
+    <p class="hint">For a real n on noisy metrics like time-to-diagnose. Each repeat is its own
+      row below, so a problem that happens to take 30+ minutes doesn't look stuck — you can see
+      which specific repeat is still running.</p>
   </section>
 
   <section class="card">
@@ -85,15 +99,12 @@
     </div>
     <p class="hint" id="key-status"></p>
 
-    <label>Firebase service-account JSON path (optional — connects result sync)</label>
-    <div class="row">
-      <input id="fb-path" placeholder="/path/to/service-account.json">
-      <button id="connect-fb">Connect</button>
-    </div>
-    <p class="hint">Auto-detected on startup from <code>ReliOps/.env</code> — a
+    <label>Firebase (shared results)</label>
+    <p class="hint">Read straight from <code>ReliOps/.env</code> — a
       <code>GOOGLE_APPLICATION_CREDENTIALS</code> path, or the key's JSON pasted directly into
-      <code>FIREBASE_SERVICE_ACCOUNT_JSON</code> / <code>SERVICE_ACCOUNT_KEY</code>, no path needed
-      at all. The field above and the Connect button are only for overriding that.</p>
+      <code>FIREBASE_SERVICE_ACCOUNT_JSON</code> / <code>SERVICE_ACCOUNT_KEY</code>. Nothing to
+      paste or click here: put it in <code>.env</code> and the status pill at the top updates on
+      its own within a few seconds.</p>
     <p class="hint">If the whole team points this at the same Firebase project (one shared key),
       results show up for everyone in one place. That key has full access for anyone who has it —
       "Your name" above just labels who ran what, it isn't an access control. See the README's
@@ -109,8 +120,8 @@
       <button id="run-test" class="primary">Run test(s)</button>
     </div>
     <div id="progress-wrap" class="progress-wrap" hidden>
-      <div class="progress"><div id="progress-fill" class="progress-fill"></div></div>
-      <p class="hint" id="progress-label"></p>
+      <p class="hint" id="progress-summary"></p>
+      <div id="progress-rows" class="progress-rows"></div>
     </div>
   </section>
 
@@ -121,6 +132,34 @@
     </div>
     <pre id="log"></pre>
   </section>
+  </div>
+
+  <div id="tab-results" class="tab-panel" hidden>
+    <section class="card">
+      <div class="row log-head">
+        <h2>All runs</h2>
+        <button id="refresh-results" class="secondary small" type="button">Refresh</button>
+      </div>
+      <p class="hint" id="results-source"></p>
+      <p class="hint">Pass/fail and timing come straight from SREGym's own result row
+        (<code>Diagnosis.success</code>, <code>Mitigation.success</code>, <code>TTL</code>,
+        <code>TTM</code>) — verified against its source, not guessed, but if a column looks off
+        for a given run, the raw log for that run (under <code>results/gui_logs/</code>) is the
+        source of truth.</p>
+      <div class="results-table-wrap">
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>When</th><th>By</th><th>Problem</th><th>Agent</th><th>Model</th>
+              <th>Diagnosis</th><th>Mitigation</th><th>E2E</th><th>TTD</th><th>TTM</th>
+            </tr>
+          </thead>
+          <tbody id="results-tbody"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="results-empty" hidden>No runs recorded yet — run a test from the Run tab first.</p>
+    </section>
+  </div>
 </main>
 
 <script src="/app.js"></script>

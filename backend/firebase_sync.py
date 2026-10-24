@@ -3,16 +3,19 @@ docs/plan/05-platform-spec.md §4 of the ReliOps repo (jobId/campaignId are left
 this GUI runs ad-hoc tests, not full campaigns yet — same collection, so results from this tool
 and from the future job-queue runner end up side by side without a migration).
 
-Connecting is opt-in and auto-detected from `ReliOps/.env`, in this order:
-  1. A path saved from the GUI's "Connect" button this session (kept in memory only).
-  2. `GOOGLE_APPLICATION_CREDENTIALS=<path>` in `.env` — a path to the downloaded JSON file.
-  3. `FIREBASE_SERVICE_ACCOUNT_JSON={...}` or `SERVICE_ACCOUNT_KEY={...}` in `.env` — the JSON
+`ReliOps/.env` is the *only* source of credentials — there is no GUI field or "Connect" button to
+keep in sync with it, by design (an earlier version had both, and they drifted). Checked in order:
+  1. `GOOGLE_APPLICATION_CREDENTIALS=<path>` in `.env` — a path to the downloaded JSON file. A
+     Windows/WSL-style path (`\\wsl.localhost\\...`, `C:\\...`) is normalized automatically, since
+     this backend runs on Linux.
+  2. `FIREBASE_SERVICE_ACCOUNT_JSON={...}` or `SERVICE_ACCOUNT_KEY={...}` in `.env` — the JSON
      file's contents pasted directly, no file or path needed at all.
-  4. The default suggested file (runner.default_firebase_key_path()), if it happens to exist.
+  3. The default suggested file (runner.default_firebase_key_path()), if it happens to exist.
 Nothing is sent anywhere unless one of these resolves to real credentials — with none, every run
 is still saved locally (see runner.py), just not mirrored to Firestore. Credential content is
 never read into a log, never printed, and `.env`/`*.json` key files must stay out of git (see
-.gitignore).
+.gitignore). The frontend polls /api/firebase-status every few seconds so editing `.env` by hand
+(or running Setup, which may create it) is picked up with no extra step.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from typing import Any
 _client = None
 _status = "not configured"
 _app = None
+_resolved_label: str | None = None  # what we're connected with, so a repeat poll is a no-op
 APP_NAME = "reliops-lab"
 
 
@@ -105,46 +109,55 @@ def _normalize_windows_style_path(raw: str) -> str:
     return s
 
 
-def configure(service_account_path: str) -> str:
-    """Explicit Connect button in the GUI — a path the person typed or the pre-filled default."""
-    global _status, _client
-    if not service_account_path:
-        _client = None
-        _status = "connection failed: no path given"
-        return _status
-    normalized = _normalize_windows_style_path(service_account_path)
-    if not Path(normalized).is_file():
-        _client = None
-        note = f" (tried it as {normalized!r} too)" if normalized != service_account_path else ""
-        _status = f"connection failed: no file at {service_account_path!r}{note}"
-        return _status
-    _connect(normalized, f"path from GUI ({normalized})")
-    return _status
-
-
 def try_auto_connect() -> str:
-    """Called on startup / whenever /api/config is read: auto-detect from .env, so a teammate who
-    already has GOOGLE_APPLICATION_CREDENTIALS, FIREBASE_SERVICE_ACCOUNT_JSON, SERVICE_ACCOUNT_KEY
-    or the default file in place never has to click Connect at all."""
-    global _status, _client
-    if _client is not None:
-        return _status  # already connected this session, don't redo work on every /api/config poll
+    """Called on startup and on every /api/firebase-status poll: (re-)detect from .env, so a
+    teammate who has GOOGLE_APPLICATION_CREDENTIALS, FIREBASE_SERVICE_ACCOUNT_JSON,
+    SERVICE_ACCOUNT_KEY or the default file in place is connected with no manual step at all.
+    Re-resolves .env on every call (cheap — a small file read) but only actually reconnects to
+    Firebase when the resolved source changed, so a poll with nothing new to say isn't also
+    silently re-authenticating every few seconds."""
+    global _status, _client, _resolved_label
     found = _credential_from_env()
     if found is None:
+        _client = None
+        _resolved_label = None
         _status = "not configured — no credentials found in .env or the default file"
         return _status
     cred_source, label = found
     if label.startswith("bad-json:"):
+        _client = None
+        _resolved_label = None
         _status = f"connection failed: {label.split(':', 2)[2]} (check the JSON you pasted into .env)"
         return _status
+    if _client is not None and label == _resolved_label:
+        return _status  # same credentials as last time — nothing to do
     _connect(cred_source, label)
+    _resolved_label = label if _client is not None else None
     return _status
 
 
 def status() -> str:
+    return try_auto_connect()
+
+
+def list_runs(limit: int = 300) -> list[dict[str, Any]] | None:
+    """Fetches the most recent `runs/{id}` docs for the dashboard tab — the whole team's runs,
+    since they all write to this same collection. Returns None (not an empty list) when Firebase
+    isn't connected, so the caller can tell "no team data available" apart from "connected, team
+    just hasn't run anything yet" and fall back to this machine's own local results."""
+    status()  # re-resolve from .env first, same as every other call — see try_auto_connect
     if _client is None:
-        return try_auto_connect()
-    return _status
+        return None
+    try:
+        docs = (
+            _client.collection("runs")
+            .order_by("timestamp_utc", direction="DESCENDING")
+            .limit(limit)
+            .stream()
+        )
+        return [d.to_dict() for d in docs]
+    except Exception:  # noqa: BLE001 — a query hiccup falls back to local, not an error page
+        return None
 
 
 def write_run(record: dict[str, Any]) -> str:

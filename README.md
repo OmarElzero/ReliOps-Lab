@@ -8,9 +8,10 @@
 A small local GUI around [ReliOps](https://github.com/OmarElzero/ReliOps)'s SREGym setup: pick a
 test environment, an agent, a model and a set of problems, add your own API key, click **Run**,
 and watch the log stream live, right in the browser — no terminal juggling, no remembering which
-flags `quickstart.sh` wants today. Results are saved locally and, if you connect Firebase, mirrored
-to the same `runs` collection the full console (`docs/plan/05-platform-spec.md` in the main repo)
-will use later — this is that spec's v0, running on one laptop with no cloud project required.
+flags `quickstart.sh` wants today. Results are saved locally and, if `ReliOps/.env` has Firebase
+credentials in it, mirrored to the same `runs` collection the full console
+(`docs/plan/05-platform-spec.md` in the main repo) will use later — this is that spec's v0, running
+on one laptop with no cloud project required.
 
 ## Contents
 
@@ -31,8 +32,8 @@ will use later — this is that spec's v0, running on one laptop with no cloud p
   risk of touching real infrastructure. Good for a first look or a sponsor demo.
 - **Problem sets are discovered automatically** from any `ReliOps/experiments/*.csv` with a
   `problem_id` column — add a new set in the main repo, it just shows up here.
-- **Optional, local-only Firebase sync** — nothing leaves your machine until you give it a
-  service-account path yourself.
+- **Optional, local-only Firebase sync** — nothing leaves your machine unless `ReliOps/.env` has
+  credentials in it; the status pill at the top reflects `.env` automatically, no "Connect" step.
 
 ## Requirements
 
@@ -69,15 +70,15 @@ from a form instead of a terminal, and streams the output back.
 column shows up as a selectable set automatically, so a new set the team adds there (e.g. a
 stress set from `docs/plan/04-harder-envs.md`) appears with no change to this tool.
 
-**Firebase** is entirely optional and local: nothing is sent anywhere until you paste a path to a
-service-account file into the GUI. Without one, every run is still written to
-`ReliOps/results/gui_runs.jsonl` on your machine.
+**Firebase** is entirely optional and local: nothing is sent anywhere until `ReliOps/.env` has
+real credentials in it (there's no GUI field for this on purpose — see "Shared results" below).
+Without one, every run is still written to `ReliOps/results/gui_runs.jsonl` on your machine.
 
 ### Shared results across the team
 
-To see everyone's runs in one place, point everyone's "Firebase service-account JSON path" at the
-**same** Firebase project — one person creates the project and generates the key once, then shares
-that one JSON file with the team through a safe private channel (never git; it's already covered by
+To see everyone's runs in one place, point everyone's `ReliOps/.env` at the **same** Firebase
+project — one person creates the project and generates the key once, then shares that one JSON
+file with the team through a safe private channel (never git; it's already covered by
 `.gitignore`). Each run also tags itself with whatever you type into **"Your name"** in the header
 (saved in your browser only), so the team can tell whose run is whose in the `runs` collection.
 
@@ -92,12 +93,13 @@ that one JSON file with the team through a safe private channel (never git; it's
 4. Send that file to the team over a private channel — DM, not a public channel or git.
 
 **What every other person does, once, after receiving the file:**
-1. Save it at **`~/reliops-lab-workdir/firebase-service-account.json`** — that's the same folder
-   this tool already keeps its ReliOps clone in (`~/reliops-lab-workdir/`, see below), it's outside
-   any git repo, and it's the path the GUI's Firebase field is pre-filled with, so there's nothing
-   to figure out or type by hand.
-2. Open the GUI, click **Connect** next to that pre-filled path (change it only if you saved the
-   file somewhere else), type your name at the top, done.
+1. Save it anywhere, then add one line to your own `ReliOps/.env`:
+   `GOOGLE_APPLICATION_CREDENTIALS=/path/to/that/file.json` — or skip the file entirely and paste
+   the JSON itself into `.env` as `SERVICE_ACCOUNT_KEY={...}`. Either way, saving it at
+   `~/reliops-lab-workdir/firebase-service-account.json` needs no `.env` line at all — that's the
+   one path this tool checks automatically if nothing else is set.
+2. Open the GUI and type your name at the top. The status pill picks up `.env` on its own within
+   a few seconds — nothing else to click.
 
 **Read this before relying on it for anything sensitive:** a Firebase service-account key is an
 *admin* credential — it has full read/write/delete access to the whole project, for anyone who has
