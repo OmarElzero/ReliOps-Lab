@@ -49,6 +49,17 @@ yourself; Setup does it. The one thing to know because of this: **this project's
 
 - Python 3.11+, Docker running, `kubectl`/`helm`/`uv` (the GUI's Setup button installs `kind` for
   you; see `ReliOps/docs/MANUAL-SETUP.md` §0–2 for the rest).
+- **GitHub access to `OmarElzero/ReliOps`.** That repo is currently **private**, so **Run setup**'s
+  clone needs two things, each a one-time setup per machine, not per run:
+  1. Be added as a **Collaborator** on it (ask Omar: `github.com/OmarElzero/ReliOps/settings/access`).
+  2. Git credentials that don't need an interactive prompt (this GUI can't show you one). Easiest:
+     install the [GitHub CLI](https://cli.github.com) and run `gh auth login` once. If you're on
+     WSL, run it **inside WSL** — Windows' own git credentials don't carry over, since WSL has its
+     own separate git install. (Alternative without installing anything new: a Personal Access
+     Token from `github.com/settings/tokens` + `git config --global credential.helper store`, then
+     one manual `git clone` by hand to get prompted for it once.)
+  If Setup's clone step fails with an auth-looking error, the log now explains this same thing —
+  this bullet exists so you see it *before* hitting that error.
 - Your own model API key (one key per person — never share/rotate one key across the team, see
   `ReliOps/docs/plan/01-review-and-answers.md` §3.4).
 - Optional: a Firebase service-account JSON (Firebase console → Project settings → Service
@@ -63,7 +74,8 @@ cd backend && uvicorn app:app --port 8765 --reload
 ```
 
 Open http://localhost:8765. First time: click **Run setup** (clones ReliOps + SREGym, applies the
-3 required patches, builds the kind cluster — ~10 min the first time). Then pick an agent, a
+3 required patches, builds the kind cluster — ~10 min the first time; make sure the GitHub access
+in "Requirements" above is sorted before this step, or the clone will fail). Then pick an agent, a
 model, a problem set, save your key, and click **Run test(s)**.
 
 No cluster yet and just want to see how it looks? Click **Demo mode** — it plays back a fake run
