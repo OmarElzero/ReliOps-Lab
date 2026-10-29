@@ -41,6 +41,18 @@ yourself; Setup does it. The one thing to know because of this: **this project's
   risk of touching real infrastructure. Good for a first look or a sponsor demo.
 - **Problem sets are discovered automatically** from any `ReliOps/experiments/*.csv` with a
   `problem_id` column — add a new set in the main repo, it just shows up here.
+- **Results with statistics (v1).** The Results tab shows a pass rate per configuration (agent +
+  model + action space + config label + judge + run class) with a Wilson 95% interval and a
+  problem-level bootstrap interval, and a paired comparison of any two configurations (exact McNemar
+  on matched problem/repeat pairs). Runs that crashed or never finished are shown as *incomplete*,
+  never counted as failures. Exploration and frozen runs are never mixed.
+- **Stores the text, not just the scores (v1).** Each run keeps the diagnosis the agent submitted,
+  the judge's reasoning, checklist and D1-D3 scores, the judge model, a free-text config label, and
+  the path to the agent transcript, so a run can be re-judged later by a stronger judge.
+- **Story view (v1).** For `reliops_v1` runs, each result has a step-by-step story: what the agent
+  thought, did and saw, interleaved with a cluster timeline recorded during the run (needs the main
+  repo's `scripts/replay_trace.py` and `scripts/cluster_recorder.py`; `git pull` the ReliOps clone).
+  Stories live on the machine that ran the test.
 - **Optional, local-only Firebase sync** — nothing leaves your machine unless this project's own
   `.env` has credentials in it; the status pill at the top reflects `.env` automatically, no
   "Connect" step.
@@ -152,8 +164,8 @@ GUI, not a setting to flip here.
 - No multi-machine job queue — this is one browser talking to one local server on one laptop.
 - No sealed-box key encryption — your key only ever touches your own local `.env`, so this is
   fine for a single person running their own machine, not for handing a key to a sponsor VM.
-- No campaign-level statistics (Wilson CIs, paired comparisons) — that's the results-explorer in
-  v2; for now, read `ReliOps/results/gui_runs.jsonl` or SREGym's own CSVs directly.
+- Statistics are the basics only (Wilson, problem bootstrap, exact McNemar). No multiple-comparison
+  correction, no per-fault-class breakdown, no export of figures yet.
 - **One test environment only (SREGym), hardcoded.** `runner.stream_campaign()` shells out straight
   to SREGym's own CLI (`uv run main.py --agent … --problem …`) — there's no abstraction between
   "this tool" and "SREGym specifically" yet. "Any agent" currently only means any agent SREGym's own
@@ -172,7 +184,10 @@ GUI, not a setting to flip here.
 reliops-lab/
 ├── backend/
 │   ├── app.py            # FastAPI routes + SSE streaming
-│   ├── runner.py         # drives the ReliOps clone: setup, demo, campaign runs
+│   ├── runner.py         # drives the ReliOps clone: setup, demo, campaign runs, result storage
+│   ├── stats.py          # Wilson, problem bootstrap, exact McNemar (standard library only)
+│   ├── test_stats.py     # python3 -I backend/test_stats.py
+│   ├── test_runner_storage.py  # python3 -I backend/test_runner_storage.py
 │   └── firebase_sync.py  # optional, local-only Firestore mirroring
 ├── frontend/
 │   ├── index.html

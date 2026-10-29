@@ -22,6 +22,20 @@ runByEl.addEventListener("change", () => {
   try { localStorage.setItem("reliops_lab_run_by", runByEl.value.trim()); } catch (e) { /* ignore */ }
 });
 
+// The config label and run class are also per-viewer conveniences (remembered between sessions).
+const configLabelEl = document.getElementById("config-label");
+const runClassEl = document.getElementById("run-class");
+try {
+  configLabelEl.value = localStorage.getItem("reliops_lab_config_label") || "";
+  runClassEl.value = localStorage.getItem("reliops_lab_run_class") || "exploration";
+} catch (e) { /* ignore */ }
+configLabelEl.addEventListener("change", () => {
+  try { localStorage.setItem("reliops_lab_config_label", configLabelEl.value.trim()); } catch (e) { /* ignore */ }
+});
+runClassEl.addEventListener("change", () => {
+  try { localStorage.setItem("reliops_lab_run_class", runClassEl.value); } catch (e) { /* ignore */ }
+});
+
 let CONFIG = null;
 
 async function loadConfig() {
@@ -441,6 +455,10 @@ document.getElementById("run-test").addEventListener("click", async () => {
     });
     if (agent.action_space) params.set("action_space", agent.action_space);
     if (runBy) params.set("run_by", runBy);
+    const configLabel = configLabelEl.value.trim();
+    if (configLabel) params.set("config_label", configLabel);
+    params.set("run_class", runClassEl.value);
+    params.set("record_walkthrough", document.getElementById("record-walkthrough").checked ? "true" : "false");
 
     if (batches.length > 1) {
       appendLog(`\n===== batch ${i + 1}/${batches.length}: ${batch.length} problem(s) =====\n`);
@@ -534,6 +552,203 @@ function logCell(logFile) {
   return td;
 }
 
+// ---- Detail panel (diagnosis text, judge verdict, story) -------------------------
+const detailCard = document.getElementById("run-detail");
+const detailTitle = document.getElementById("detail-title");
+const detailBody = document.getElementById("detail-body");
+document.getElementById("detail-close").addEventListener("click", () => { detailCard.hidden = true; });
+
+function showDetail(title, text) {
+  detailTitle.textContent = title;
+  detailBody.textContent = text;
+  detailCard.hidden = false;
+  detailCard.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function linkButton(text, onClick, title) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "link-btn";
+  b.textContent = text;
+  if (title) b.title = title;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function diagnosisDetail(r) {
+  const parts = [];
+  parts.push("DIAGNOSIS THE AGENT SUBMITTED\n" + (r.diagnosis_text || "(not stored for this run)"));
+  const scores = ["diagnosis_d1", "diagnosis_d2", "diagnosis_d3"].map((k, i) =>
+    `D${i + 1}=${typeof r[k] === "number" ? r[k] : "?"}`).join("  ");
+  parts.push(`JUDGE (${r.judge_model_id || "judge model not recorded"})\n${scores}`);
+  if (r.judge_reasoning) parts.push("Reasoning: " + r.judge_reasoning);
+  if (r.judge_checklist) {
+    try {
+      const items = JSON.parse(r.judge_checklist);
+      parts.push("Checklist:\n" + items.map((q) => `  ${q.id}: ${q.answer}${q.evidence ? " — " + q.evidence : ""}`).join("\n"));
+    } catch (e) { /* leave it out if it is not valid JSON */ }
+  }
+  return parts.join("\n\n");
+}
+
+function textCell(r) {
+  const td = document.createElement("td");
+  if (r.diagnosis_text || r.judge_reasoning) {
+    td.appendChild(linkButton("text", () => showDetail(`${r.problem_id} — diagnosis and judge verdict`, diagnosisDetail(r)),
+      "what the agent submitted and how the judge scored it"));
+  } else {
+    td.textContent = "—";
+    td.title = "no diagnosis text stored for this run (it was recorded before the Lab kept it, or the run did not reach diagnosis)";
+  }
+  return td;
+}
+
+function storyCell(r) {
+  const td = document.createElement("td");
+  if (r.has_story && r.run_id) {
+    td.appendChild(linkButton("story", async () => {
+      showDetail(`${r.problem_id} — story`, "loading…");
+      try {
+        const res = await fetch("/api/story/" + encodeURIComponent(r.run_id));
+        detailBody.textContent = await res.text();
+      } catch (e) { detailBody.textContent = "could not load the story — is the server running?"; }
+    }, "step-by-step: what the agent thought, did and saw, with the cluster timeline"));
+  } else {
+    td.textContent = "—";
+    td.title = "no story: only reliops_v1 runs write a transcript, and older runs were not recorded";
+  }
+  return td;
+}
+
+function fillLabelPresets(runs) {
+  const dl = document.getElementById("config-label-presets");
+  dl.innerHTML = "";
+  Array.from(new Set(runs.map((r) => r.config_label).filter(Boolean))).sort().forEach((l) => {
+    const o = document.createElement("option"); o.value = l; dl.appendChild(o);
+  });
+}
+
+// ---- Summary (Wilson + bootstrap per configuration) and paired comparison ----------
+const pct = (x) => (typeof x === "number" ? `${(x * 100).toFixed(0)}%` : "—");
+const interval = (lo, hi) => (typeof lo === "number" && typeof hi === "number" ? `${pct(lo)} – ${pct(hi)}` : "—");
+let SUMMARY_GROUPS = [];
+
+function groupName(g) {
+  return `${g.config_label !== "-" ? g.config_label : "(no label)"} · ${g.agent_id} · ${g.model_id} · ${g.action_space} · judge ${g.judge_model_id} · ${g.run_class}`;
+}
+
+async function loadSummary() {
+  const metric = document.getElementById("sum-metric").value;
+  const runClass = document.getElementById("sum-class").value;
+  const tbody = document.getElementById("summary-tbody");
+  const emptyEl = document.getElementById("summary-empty");
+  let data;
+  try {
+    const q = new URLSearchParams({ metric });
+    if (runClass) q.set("run_class", runClass);
+    data = await (await fetch("/api/summary?" + q.toString())).json();
+  } catch (e) { return; }
+  SUMMARY_GROUPS = data.groups || [];
+  tbody.innerHTML = "";
+  emptyEl.hidden = SUMMARY_GROUPS.length > 0;
+  SUMMARY_GROUPS.forEach((g) => {
+    const tr = document.createElement("tr");
+    const cfg = document.createElement("td");
+    cfg.className = "r-config";
+    cfg.appendChild(el("div", g.config_label !== "-" ? g.config_label : "(no label)", "cfg-label"));
+    cfg.appendChild(el("div", `${g.agent_id} · ${g.model_id} · ${g.action_space}`, "cfg-sub"));
+    cfg.appendChild(el("div", `judge ${g.judge_model_id} · ${g.run_class}`, "cfg-sub"));
+    tr.appendChild(cfg);
+    const cells = [
+      `${g.passes} / ${g.n}`, pct(g.rate), interval(g.wilson_lo, g.wilson_hi),
+      interval(g.boot_lo, g.boot_hi), String(g.problems), g.incomplete ? String(g.incomplete) : "0",
+    ];
+    cells.forEach((text, i) => {
+      const td = document.createElement("td");
+      td.textContent = text;
+      if (i === 2 || i === 3) td.className = "r-interval";
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  ["cmp-a", "cmp-b"].forEach((id, idx) => {
+    const sel = document.getElementById(id);
+    const prev = sel.value;
+    sel.innerHTML = "";
+    SUMMARY_GROUPS.forEach((g, i) => {
+      const o = document.createElement("option");
+      o.value = g.key; o.textContent = groupName(g);
+      sel.appendChild(o);
+    });
+    if (prev && SUMMARY_GROUPS.some((g) => g.key === prev)) sel.value = prev;
+    else if (SUMMARY_GROUPS[idx]) sel.value = SUMMARY_GROUPS[idx].key;
+  });
+}
+document.getElementById("sum-metric").addEventListener("change", loadSummary);
+document.getElementById("sum-class").addEventListener("change", loadSummary);
+
+function el(tag, text, cls) {
+  const e = document.createElement(tag);
+  if (text !== undefined) e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+
+document.getElementById("cmp-go").addEventListener("click", async () => {
+  const out = document.getElementById("cmp-out");
+  const a = document.getElementById("cmp-a").value;
+  const b = document.getElementById("cmp-b").value;
+  const metric = document.getElementById("sum-metric").value;
+  out.hidden = false;
+  out.innerHTML = "";
+  if (!a || !b || a === b) {
+    out.appendChild(el("p", "Pick two different configurations.", "hint"));
+    return;
+  }
+  let r;
+  try {
+    r = await (await fetch("/api/compare?" + new URLSearchParams({ a, b, metric }).toString())).json();
+  } catch (e) {
+    out.appendChild(el("p", "could not compare — is the server running?", "hint"));
+    return;
+  }
+  const nameOf = (k) => { const g = SUMMARY_GROUPS.find((x) => x.key === k); return g ? groupName(g) : k; };
+  out.appendChild(el("p", `${r.pairs} matched (problem, repeat) pairs`, "cmp-head"));
+  const t = el("table", undefined, "results-table");
+  const head = el("tr");
+  ["Configuration", "Rate", "95% Wilson"].forEach((h) => head.appendChild(el("th", h)));
+  t.appendChild(head);
+  [[nameOf(a), r.a_rate, r.a_wilson], [nameOf(b), r.b_rate, r.b_wilson]].forEach(([name, rate, w]) => {
+    const tr = el("tr");
+    tr.appendChild(el("td", name));
+    tr.appendChild(el("td", pct(rate)));
+    tr.appendChild(el("td", w ? interval(w[0], w[1]) : "—", "r-interval"));
+    t.appendChild(tr);
+  });
+  const wrap = el("div", undefined, "results-table-wrap");
+  wrap.appendChild(t);
+  out.appendChild(wrap);
+  out.appendChild(el("p",
+    `Only A passed: ${r.only_a} · only B passed: ${r.only_b} · both: ${r.both} · neither: ${r.neither}` +
+    ` · exact McNemar p = ${typeof r.p_value === "number" ? r.p_value.toFixed(3) : "—"}`, "cmp-stat"));
+  (r.warnings || []).forEach((w) => out.appendChild(el("p", "⚠ " + w, "cmp-warn")));
+  if (r.by_problem && r.by_problem.length) {
+    const pt = el("table", undefined, "results-table");
+    const ph = el("tr");
+    ["Problem", "Pairs", "A passes", "B passes"].forEach((h) => ph.appendChild(el("th", h)));
+    pt.appendChild(ph);
+    r.by_problem.forEach((p) => {
+      const tr = el("tr");
+      tr.appendChild(el("td", p.problem, "r-problem"));
+      [p.pairs, p.a_pass, p.b_pass].forEach((v) => tr.appendChild(el("td", String(v))));
+      pt.appendChild(tr);
+    });
+    const pw = el("div", undefined, "results-table-wrap");
+    pw.appendChild(pt);
+    out.appendChild(pw);
+  }
+});
+
 // "Coverage" groups the same runs by problem+agent+model, so the team can see at a glance which
 // combos have barely been tested (or not at all) — that's what to run next — instead of having to
 // scan the full run-by-run table and count by eye. Computed client-side from the same /api/results
@@ -617,16 +832,24 @@ async function loadResults() {
     tr.appendChild(problem);
     const agent = document.createElement("td"); agent.textContent = r.agent_id || "—"; tr.appendChild(agent);
     const model = document.createElement("td"); model.textContent = r.model_id || "—"; tr.appendChild(model);
+    const label = document.createElement("td");
+    label.textContent = (r.config_label || "—") + (r.run_class === "frozen" ? " ❄" : "");
+    label.title = r.run_class === "frozen" ? "frozen run" : "exploration run";
+    tr.appendChild(label);
     tr.appendChild(passCell(r.diagnosis_pass));
     tr.appendChild(passCell(r.mitigation_pass));
     tr.appendChild(passCell(r.e2e_pass));
     tr.appendChild(timeCell(r.ttd_s));
     tr.appendChild(timeCell(r.ttm_s));
+    tr.appendChild(textCell(r));
+    tr.appendChild(storyCell(r));
     tr.appendChild(logCell(r.log_file));
     tbody.appendChild(tr);
   });
 
   renderCoverage(data.runs);
+  fillLabelPresets(data.runs);
+  loadSummary();
 }
 document.getElementById("refresh-results").addEventListener("click", loadResults);
 

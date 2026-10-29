@@ -17,11 +17,12 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 import firebase_sync
 import runner
+import stats
 
 app = FastAPI(title="ReliOps Lab")
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -101,9 +102,8 @@ def doctor():
     return runner.doctor()
 
 
-@app.get("/api/results")
-def results(limit: int = 300):
-    """Backs the Results tab/dashboard: every recorded run, newest first, and who ran it.
+def _collect_runs(limit: int) -> tuple[str, list[dict]]:
+    """Every recorded run, newest first, as flat dicts the tables and the statistics both read.
     Firestore (the whole team's runs) wins when connected; this machine's own
     results/gui_runs.jsonl is the fallback when it isn't — either way the caller is told which
     one it got, since "no runs yet" and "not seeing the team's runs" are different problems."""
@@ -118,6 +118,8 @@ def results(limit: int = 300):
     runs = []
     for r in raw_runs:
         normalized = runner.normalize_sregym_row(r.get("row"))
+        # Older records (before the Lab stored these) get them recovered from SREGym's own row.
+        diag = runner.extract_diagnosis(r.get("row"))
         runs.append({
             "run_id": r.get("run_id"),
             "timestamp_utc": r.get("timestamp_utc"),
@@ -125,13 +127,65 @@ def results(limit: int = 300):
             "problem_id": r.get("problem_id"),
             "agent_id": r.get("agent_id"),
             "model_id": r.get("model_id"),
+            "judge_model_id": r.get("judge_model_id"),
             "action_space": r.get("action_space"),
+            "config_label": r.get("config_label") or "",
+            "run_class": r.get("run_class") or "exploration",
             "repeat_index": r.get("repeat_index"),
             "repeat_n": r.get("repeat_n"),
             "log_file": r.get("log_file"),  # servable via GET /api/log/<name>, if present
+            "diagnosis_text": r.get("diagnosis_text") or diag["diagnosis_text"],
+            "judge_reasoning": r.get("judge_reasoning") or diag["judge_reasoning"],
+            "judge_checklist": r.get("judge_checklist") or diag["judge_checklist"],
+            "has_story": bool(r.get("transcript_rel")),
             **normalized,
         })
+    return source, runs
+
+
+@app.get("/api/results")
+def results(limit: int = 300):
+    """Backs the Results tab/dashboard: every recorded run, newest first, and who ran it."""
+    source, runs = _collect_runs(limit)
     return {"source": source, "runs": runs}
+
+
+@app.get("/api/summary")
+def summary(metric: str = "e2e_pass", run_class: Optional[str] = None, limit: int = 5000):
+    """Pass rate per configuration with a Wilson interval and a problem-level bootstrap interval
+    (docs/plan/03-testing-plan.md section 6). Runs that crashed or never finished are reported as
+    `incomplete`, never silently counted as failures."""
+    if metric not in stats.METRICS:
+        return JSONResponse({"error": f"metric must be one of {stats.METRICS}"}, status_code=400)
+    source, runs = _collect_runs(limit)
+    if run_class:
+        runs = [r for r in runs if r["run_class"] == run_class]
+    return {"source": source, "metric": metric, "groups": stats.summarize(runs, metric)}
+
+
+@app.get("/api/compare")
+def compare(a: str, b: str, metric: str = "e2e_pass", limit: int = 5000):
+    """Paired comparison of two configurations (keys come from /api/summary): matched on
+    (problem, repeat), exact McNemar on the pairs where the outcome flipped."""
+    if metric not in stats.METRICS:
+        return JSONResponse({"error": f"metric must be one of {stats.METRICS}"}, status_code=400)
+    _, runs = _collect_runs(limit)
+    return stats.compare(runs, a, b, metric)
+
+
+@app.get("/api/story/{run_id}")
+def story(run_id: str):
+    """Step-by-step story of one run (agent thoughts, actions and observations, interleaved with the
+    cluster timeline), as Markdown. Only available on the machine that ran it and only for reliops_v1."""
+    if not run_id.replace("-", "").isalnum():
+        return PlainTextResponse("invalid run id", status_code=400)
+    record = next((r for r in runner.list_local_runs(100000) if r.get("run_id") == run_id), None)
+    if record is None:
+        return PlainTextResponse("No such run on this machine (stories are stored where the run happened).", status_code=404)
+    try:
+        return PlainTextResponse(runner.render_story(record), media_type="text/markdown; charset=utf-8")
+    except FileNotFoundError as e:
+        return PlainTextResponse(str(e), status_code=404)
 
 
 @app.post("/api/stop")
@@ -176,6 +230,9 @@ def run(
     force_build: bool = False,
     repeat_n: int = 1,  # run each problem this many times in a row — see runner.stream_campaign
     run_by: Optional[str] = None,  # self-reported name, for a shared-key team — see README
+    config_label: Optional[str] = None,  # free text naming the agent variant, e.g. "F7-on" or "base"
+    run_class: str = "exploration",  # "exploration" or "frozen" — kept apart in every statistic
+    record_walkthrough: bool = True,  # record the cluster timeline so the run has a story
 ):
     problem_list = [p.strip() for p in problems.split(",") if p.strip()]
 
@@ -200,6 +257,9 @@ def run(
         repeat_n=repeat_n,
         force_build=force_build,
         run_by=run_by,
+        config_label=config_label,
+        run_class=run_class,
+        record_walkthrough=record_walkthrough,
         on_result=on_result,
     )
     return _sse(gen, "run")

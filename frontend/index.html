@@ -8,7 +8,7 @@
 </head>
 <body>
 <header>
-  <h1>ReliOps Lab <span class="tag">v0 · local</span></h1>
+  <h1>ReliOps Lab <span class="tag">v1 · local</span></h1>
   <div class="row header-name">
     <label for="run-by" class="inline-label">Your name</label>
     <input id="run-by" placeholder="e.g. Omar" autocomplete="off">
@@ -55,6 +55,19 @@
     <p class="hint">Grades diagnosis quality against a fixed checklist — kept the same across
       every agent/model you try here, so results stay comparable to each other. Changing it is
       fine to experiment with, but the number won't compare to anyone else's runs.</p>
+    <label>Config label <span class="tag">(names the agent variant you are testing)</span></label>
+    <input id="config-label" placeholder="e.g. base, F7-on, prompt-v2" autocomplete="off" list="config-label-presets">
+    <datalist id="config-label-presets"></datalist>
+    <p class="hint">Free text. Runs with the same agent, model, action space, judge and label are
+      grouped together in the Results tab, so two variants of the same agent never get averaged
+      into one number. Change the label whenever you change the agent's code or prompt.</p>
+    <label>Run class</label>
+    <select id="run-class">
+      <option value="exploration">exploration — trying things, numbers are for learning</option>
+      <option value="frozen">frozen — agent, judge and problems fixed for a measured campaign</option>
+    </select>
+    <p class="hint">The two classes are never mixed in a table. Use <em>frozen</em> only for runs
+      you intend to report.</p>
   </section>
 
   <section class="card">
@@ -121,6 +134,7 @@
   <section class="card actions">
     <h2>Run</h2>
     <label class="checkbox"><input type="checkbox" id="force-build"> force-build (first run of this agent on this machine)</label>
+    <label class="checkbox"><input type="checkbox" id="record-walkthrough" checked> record a walkthrough (cluster timeline + agent steps, for the Story view; <code>reliops_v1</code> only)</label>
     <div class="row">
       <button id="run-setup" class="secondary">Run setup (clone + patches + cluster)</button>
       <button id="run-demo" class="secondary">Demo mode (no cluster needed)</button>
@@ -146,6 +160,55 @@
   </div>
 
   <div id="tab-results" class="tab-panel" hidden>
+    <section class="card">
+      <div class="row log-head">
+        <h2>Summary — pass rate per configuration</h2>
+        <label class="inline-label" for="sum-metric">Metric</label>
+        <select id="sum-metric">
+          <option value="e2e_pass">end-to-end</option>
+          <option value="diagnosis_pass">diagnosis</option>
+          <option value="mitigation_pass">mitigation</option>
+        </select>
+        <label class="inline-label" for="sum-class">Class</label>
+        <select id="sum-class">
+          <option value="">all</option>
+          <option value="exploration">exploration</option>
+          <option value="frozen">frozen</option>
+        </select>
+      </div>
+      <p class="hint">One row per agent + model + action space + config label + judge + class. The
+        <strong>95% Wilson</strong> interval is for the run-level pass rate; the
+        <strong>problem bootstrap</strong> resamples problems, so repeats of one problem do not
+        count as independent evidence. Runs that crashed or never finished are shown as
+        <em>incomplete</em> and are <strong>not</strong> counted as failures.</p>
+      <div class="results-table-wrap">
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Configuration</th><th>Pass / n</th><th>Rate</th><th>95% Wilson</th>
+              <th>Problem bootstrap</th><th>Problems</th><th>Incomplete</th>
+            </tr>
+          </thead>
+          <tbody id="summary-tbody"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="summary-empty" hidden>No runs recorded yet.</p>
+    </section>
+
+    <section class="card">
+      <h2>Compare two configurations (paired)</h2>
+      <p class="hint">Matches the same problem and repeat number in both configurations and tests the
+        pairs whose outcome differs with an exact McNemar test. Run both on the same problems with
+        the same repeat count, and keep the judge the same.</p>
+      <div class="row">
+        <select id="cmp-a"></select>
+        <span class="tag">vs</span>
+        <select id="cmp-b"></select>
+        <button id="cmp-go" class="secondary" type="button">Compare</button>
+      </div>
+      <div id="cmp-out" hidden></div>
+    </section>
+
     <section class="card">
       <div class="row log-head">
         <h2>Coverage — what's been tested</h2>
@@ -183,14 +246,23 @@
         <table class="results-table">
           <thead>
             <tr>
-              <th>When</th><th>By</th><th>Problem</th><th>Agent</th><th>Model</th>
-              <th>Diagnosis</th><th>Mitigation</th><th>E2E</th><th>TTD</th><th>TTM</th><th>Log</th>
+              <th>When</th><th>By</th><th>Problem</th><th>Agent</th><th>Model</th><th>Label</th>
+              <th>Diagnosis</th><th>Mitigation</th><th>E2E</th><th>TTD</th><th>TTM</th>
+              <th>Text</th><th>Story</th><th>Log</th>
             </tr>
           </thead>
           <tbody id="results-tbody"></tbody>
         </table>
       </div>
       <p class="hint" id="results-empty" hidden>No runs recorded yet — run a test from the Run tab first.</p>
+    </section>
+
+    <section class="card" id="run-detail" hidden>
+      <div class="row log-head">
+        <h2 id="detail-title">Detail</h2>
+        <button id="detail-close" class="secondary small" type="button">Close</button>
+      </div>
+      <pre id="detail-body" class="detail-body"></pre>
     </section>
   </div>
 </main>

@@ -15,6 +15,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -134,6 +135,7 @@ def _read_problems(csv_path: Path) -> list[dict]:
                     "n": (row.get("n") or "").strip() or str(i),
                     "category": (row.get("type") or "").strip() or "Uncategorized",
                     "difficulty": (row.get("expected_difficulty") or "").strip(),
+                    "app": (row.get("app") or "").strip(),  # used to guess the namespace to record
                 })
             return rows
     except (OSError, csv.Error):
@@ -343,16 +345,103 @@ _RUN_LOG_HEADER_FALLBACK = [
 ]
 
 
+# Columns the Lab adds on top of the team's template. They are appended to whatever header the template
+# has (and skipped if the template already lists them), so the template stays the single source of truth
+# and this tool never silently drops the diagnosis text again.
+LAB_EXTRA_COLUMNS = [
+    "judge_model_id", "run_by", "run_class", "config_label",
+    "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel",
+]
+
+
 def _run_log_header() -> list[str]:
+    cols: list[str] = []
     template = reliops_dir() / "experiments" / "run_log_template.csv"
     try:
         first_line = template.read_text(encoding="utf-8").splitlines()[0]
         cols = [c.strip() for c in first_line.split(",") if c.strip()]
-        if cols:
-            return cols
-    except OSError:
+    except (OSError, IndexError):
         pass
-    return list(_RUN_LOG_HEADER_FALLBACK)
+    if not cols:
+        cols = list(_RUN_LOG_HEADER_FALLBACK)
+    return cols + [c for c in LAB_EXTRA_COLUMNS if c not in cols]
+
+
+def _ensure_csv_header(csv_path: Path, header: list[str]) -> list[str]:
+    """If results/gui_runs.csv already exists with a different (older) header, rewrite it under the
+    new header so appended rows line up with their columns. Columns that exist only in the old file
+    are kept at the end (never dropped). Returns the header to write rows with."""
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        return header
+    with csv_path.open(encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        old_header = list(reader.fieldnames or [])
+        if old_header == header:
+            return header
+        old_rows = list(reader)
+    merged = header + [c for c in old_header if c not in header]
+    tmp = csv_path.with_suffix(".csv.tmp")
+    with tmp.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=merged, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(old_rows)
+    tmp.replace(csv_path)
+    return merged
+
+
+def _parse_literal(value: object) -> object:
+    """SREGym writes dict/list result values into the CSV with Python's repr (str(dict)), so a value
+    read back from a CSV is a string like "{'D1': {'name': ..., 'score': 1.0}}". Try JSON first,
+    then Python literal syntax; anything else is returned unchanged."""
+    import ast
+
+    if not isinstance(value, str) or not value.strip():
+        return value
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            return parse(value)
+        except (ValueError, SyntaxError):
+            continue
+    return value
+
+
+def extract_diagnosis(row: dict | None) -> dict:
+    """Pulls the diagnosis text the agent submitted, the judge's reasoning and checklist, and the
+    D1-D3 scores out of SREGym's own result row.
+
+    Key names checked against the SREGym source (conductor.py `_evaluate_diagnosis` sets
+    r["submission"]; llm_as_a_judge_oracle.py sets reasoning, composite_score,
+    dimensions={"D1": {"name", "score"}, ...} and checklist=[{id, answer, evidence, confidence}];
+    main.py flattens one level into "Diagnosis.<key>" columns). Rows read back from a CSV carry the
+    dict/list values as Python-repr strings, so they are parsed with _parse_literal. Anything not
+    found is None, never guessed."""
+    row = row or {}
+
+    def first(*keys):
+        for k in keys:
+            v = row.get(k)
+            if v not in (None, ""):
+                return v
+        return None
+
+    dims = _parse_literal(row.get("Diagnosis.dimensions"))
+    scores: dict[str, float | None] = {"D1": None, "D2": None, "D3": None}
+    for d in scores:
+        entry = dims.get(d) if isinstance(dims, dict) else None
+        scores[d] = _as_float(entry.get("score") if isinstance(entry, dict) else entry)
+        if scores[d] is None:  # a CSV that was flattened further than SREGym does today
+            scores[d] = _as_float(row.get(f"Diagnosis.dimensions.{d}.score"))
+
+    checklist = _parse_literal(row.get("Diagnosis.checklist"))
+    return {
+        "diagnosis_text": first("Diagnosis.submission"),
+        "judge_reasoning": first("Diagnosis.reasoning"),
+        "judge_checklist": json.dumps(checklist, default=str) if isinstance(checklist, list) and checklist else None,
+        "diagnosis_d1": scores["D1"],
+        "diagnosis_d2": scores["D2"],
+        "diagnosis_d3": scores["D3"],
+        "diagnosis_composite": _as_float(first("Diagnosis.composite_score")),
+    }
 
 
 def _as_bool(value: object) -> bool | None:
@@ -428,11 +517,24 @@ def append_csv_run(record: dict) -> Path:
         "e2e_pass": normalized["e2e_pass"],
         "ttd_s": normalized["ttd_s"],
         "ttm_s": normalized["ttm_s"],
+        # Fields the Lab itself records (not in SREGym's row): who/what configuration, and the text
+        # that lets a better judge re-grade this run later.
+        "judge_model_id": record.get("judge_model_id", ""),
+        "run_by": record.get("run_by", ""),
+        "run_class": record.get("run_class", ""),
+        "config_label": record.get("config_label", ""),
+        "diagnosis_text": record.get("diagnosis_text"),
+        "judge_reasoning": record.get("judge_reasoning"),
+        "judge_checklist": record.get("judge_checklist"),
+        "transcript_rel": record.get("transcript_rel"),
     })
-    out_row = {col: ("" if row_data.get(col) is None else row_data.get(col)) for col in header}
-
+    for col in ("diagnosis_d1", "diagnosis_d2", "diagnosis_d3", "diagnosis_composite"):
+        if record.get(col) is not None:
+            row_data[col] = record[col]
     csv_path = reliops_dir() / "results" / "gui_runs.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
+    header = _ensure_csv_header(csv_path, header)
+    out_row = {col: ("" if row_data.get(col) is None else row_data.get(col)) for col in header}
     is_new = not csv_path.exists() or csv_path.stat().st_size == 0
     with csv_path.open("a", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
@@ -695,6 +797,86 @@ def _latest_result_row(problem: str, after_ts: float) -> dict | None:
     return None
 
 
+def _find_transcript(problem: str, after_ts: float) -> str | None:
+    """Path (relative to the SREGym clone) of the react-v1 transcript this run wrote, if any. Only
+    reliops_v1 writes one; other agents return None and simply have no story."""
+    root = sregym_dir()
+    best: tuple[float, Path] | None = None
+    for p in (root / "results").glob(f"*/*/{problem}/run_*/react_v1_transcript.jsonl"):
+        try:
+            m = p.stat().st_mtime
+        except OSError:
+            continue
+        if m >= after_ts - 5 and (best is None or m > best[0]):
+            best = (m, p)
+    return str(best[1].relative_to(root)) if best else None
+
+
+def namespace_for(problem: str) -> str | None:
+    """Kubernetes namespace to record for a problem, taken from the problem set's `app` column
+    (hotel-reservation -> namespace hotel-reservation, verified in a real run log; other apps use
+    the same convention but are unverified). The recorder tolerates a namespace that does not
+    exist yet or at all: it just records nothing."""
+    for s in problem_sets():
+        for p in s.get("problems", []):
+            if p["id"] == problem and p.get("app"):
+                return p["app"]
+    return None
+
+
+def walkthrough_dir(run_id: str) -> Path:
+    return reliops_dir() / "results" / "gui_walkthrough" / run_id
+
+
+def _start_recorder(namespace: str | None, out_path: Path):
+    script = reliops_dir() / "scripts" / "cluster_recorder.py"
+    if not namespace or not script.is_file():
+        return None
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        return subprocess.Popen(
+            [sys.executable, str(script), "-n", namespace, "--out", str(out_path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+
+
+def _stop_recorder(proc) -> None:
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=10)
+    except Exception:  # noqa: BLE001 - never let cleanup break a finished run
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def render_story(record: dict) -> str:
+    """Markdown story (agent steps interleaved with cluster events) for one recorded run. Uses
+    scripts/replay_trace.py from the ReliOps clone, so there is one renderer for the Lab and the
+    command line. Raises FileNotFoundError with a plain explanation when the pieces are missing."""
+    import importlib.util
+
+    rel = record.get("transcript_rel")
+    if not rel:
+        raise FileNotFoundError("This run has no agent transcript (only reliops_v1 writes one).")
+    transcript = sregym_dir() / rel
+    if not transcript.is_file():
+        raise FileNotFoundError(f"Transcript not found on this machine: {transcript}")
+    script = reliops_dir() / "scripts" / "replay_trace.py"
+    if not script.is_file():
+        raise FileNotFoundError("scripts/replay_trace.py is missing; git pull the ReliOps clone.")
+    spec = importlib.util.spec_from_file_location("replay_trace", script)
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    cluster = walkthrough_dir(record.get("run_id", "")) / "cluster.jsonl"
+    return mod.render_story(str(transcript), str(cluster) if cluster.is_file() else None)
+
+
 def stream_campaign(
     *,
     agent: str,
@@ -705,6 +887,9 @@ def stream_campaign(
     repeat_n: int = 1,
     force_build: bool,
     run_by: str | None = None,
+    config_label: str | None = None,
+    run_class: str = "exploration",
+    record_walkthrough: bool = True,
     on_result=None,
 ) -> Iterator[str]:
     """Runs one problem at a time (SREGym itself is single-run per process) and yields log lines
@@ -736,7 +921,14 @@ def stream_campaign(
             f"action_space={action_space or '-'} =====\n"
         )
         started_at = time.time()
+        run_id = str(__import__("uuid").uuid4())
+        recorder = None
+        if record_walkthrough:
+            # Cluster timeline for this run's story; read-only kubectl polling, see scripts/cluster_recorder.py.
+            recorder = _start_recorder(namespace_for(problem), walkthrough_dir(run_id) / "cluster.jsonl")
         env = dict(base_env)
+        if os.environ.get("REACT_V1_LOG_OBS") is None:
+            env["REACT_V1_LOG_OBS"] = "on"  # record what each command returned, for the story
         cmd = [
             "uv", "run", "main.py",
             "--agent", agent,
@@ -755,14 +947,17 @@ def stream_campaign(
         # combined per-request SSE log app.py writes — so this exact run's log can be reopened and
         # read on its own from the Results tab later (see _problem_log_path's docstring).
         problem_log_path = _problem_log_path(problem, rep, repeat_n)
-        with problem_log_path.open("w", encoding="utf-8") as plog:
-            for line in _stream(cmd, cwd=sregym_dir(), env=env):
-                plog.write(line)
-                yield line
-
+        try:
+            with problem_log_path.open("w", encoding="utf-8") as plog:
+                for line in _stream(cmd, cwd=sregym_dir(), env=env):
+                    plog.write(line)
+                    yield line
+        finally:
+            _stop_recorder(recorder)  # also runs if the browser tab closes mid-run
         row = _latest_result_row(problem, started_at)
+        diagnosis = extract_diagnosis(row)
         record = {
-            "run_id": str(__import__("uuid").uuid4()),
+            "run_id": run_id,
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "problem_id": problem,
             "agent_id": agent,
@@ -775,6 +970,12 @@ def stream_campaign(
             # Whoever ran this typed it into the "Your name" field; it's a label for the team to
             # read, not an access-control boundary (the shared Firebase key has full access either way).
             "run_by": run_by or "unknown",
+            # "exploration" = any config, any time; "frozen" = the agent/judge/problem set were frozen
+            # for a measured campaign. The results tables keep the two apart so they are never averaged.
+            "run_class": run_class if run_class in ("exploration", "frozen") else "exploration",
+            "config_label": (config_label or "").strip(),
+            "transcript_rel": _find_transcript(problem, started_at),
+            **diagnosis,  # diagnosis_text, judge_reasoning, diagnosis_d1..d3, diagnosis_composite
             "row": row,  # SREGym's own metrics.md-shaped row, or None if we couldn't locate it
             "log_file": problem_log_path.name,  # served by GET /api/log/<name> — this run's own log
         }
