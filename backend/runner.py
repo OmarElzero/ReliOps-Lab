@@ -15,6 +15,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import re
 import sys
 import threading
 import time
@@ -350,7 +351,7 @@ _RUN_LOG_HEADER_FALLBACK = [
 # and this tool never silently drops the diagnosis text again.
 LAB_EXTRA_COLUMNS = [
     "judge_model_id", "run_by", "run_class", "config_label",
-    "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel",
+    "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel", "manifest_id",
 ]
 
 
@@ -526,9 +527,11 @@ def append_csv_run(record: dict) -> Path:
         "diagnosis_text": record.get("diagnosis_text"),
         "judge_reasoning": record.get("judge_reasoning"),
         "judge_checklist": record.get("judge_checklist"),
+        "manifest_id": record.get("manifest_id"),
         "transcript_rel": record.get("transcript_rel"),
     })
-    for col in ("diagnosis_d1", "diagnosis_d2", "diagnosis_d3", "diagnosis_composite"):
+    for col in ("diagnosis_d1", "diagnosis_d2", "diagnosis_d3", "diagnosis_composite", "git_commit",
+                "prompt_tokens", "completion_tokens", "total_tokens", "num_llm_calls", "num_tool_calls"):
         if record.get(col) is not None:
             row_data[col] = record[col]
     csv_path = reliops_dir() / "results" / "gui_runs.csv"
@@ -855,6 +858,125 @@ def _stop_recorder(proc) -> None:
             pass
 
 
+def _git_commit_safe() -> str | None:
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=reliops_dir(), capture_output=True, text=True, timeout=20)
+        return out.stdout.strip() if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def transcript_stats(transcript_rel: str | None) -> dict:
+    """Token and step counts from a reliops_v1 transcript (the template's own column names). Empty dict
+    for agents that write no transcript; those runs simply have no cost numbers."""
+    if not transcript_rel:
+        return {}
+    path = sregym_dir() / transcript_rel
+    if not path.is_file():
+        return {}
+    prompt = completion = calls = actions = 0
+    seen = False
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("type") == "model_call":
+                    seen = True
+                    calls += 1
+                    u = rec.get("usage") or {}
+                    prompt += int(u.get("prompt_tokens") or 0)
+                    completion += int(u.get("completion_tokens") or 0)
+                elif rec.get("type") == "action":
+                    actions += 1
+    except OSError:
+        return {}
+    if not seen:
+        return {}
+    return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion,
+            "num_llm_calls": calls, "num_tool_calls": actions}
+
+
+def cards_dir() -> Path:
+    return reliops_dir() / "experiments" / "problem-cards"
+
+
+def list_cards() -> list[dict]:
+    """Problem cards in the ReliOps clone (experiments/problem-cards/<problem_id>.md; TEMPLATE.md and
+    README are not cards). The file stays the single source of truth; the Lab only displays it."""
+    out = []
+    d = cards_dir()
+    if d.is_dir():
+        for p in sorted(d.glob("*.md")):
+            if p.stem.upper() in ("TEMPLATE", "README"):
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"^Status:\s*\**([A-Za-z-]+)", text, re.M)
+            out.append({"problem_id": p.stem, "status": (m.group(1).lower() if m else "unknown")})
+    return out
+
+
+def read_card(problem_id: str) -> str | None:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", problem_id or ""):
+        return None
+    p = cards_dir() / f"{problem_id}.md"
+    return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
+
+
+def card_section(card: str | None, number: int) -> str | None:
+    """Text of '## <number>. ...' up to the next '## ' heading; used to show 'what a correct diagnosis
+    must say' next to a diagnosis a person is hand-labelling."""
+    if not card:
+        return None
+    m = re.search(rf"^## {number}\..*?$(.*?)(?=^## |\Z)", card, re.M | re.S)
+    return m.group(0).strip() if m else None
+
+
+def stream_rejudge(judge_model: str, items: list[dict], on_result=None, script: Path | None = None) -> Iterator[str]:
+    """Re-judges stored diagnoses with `judge_model` by running scripts/rejudge.py inside SREGym's own
+    environment (so the reference answer is SREGym's, and only the judge changes). `items` are dicts with
+    run_id, problem_id, submission. Each verdict is handed to `on_result` as it is read back."""
+    if not items:
+        yield "nothing to re-judge\n"
+        return
+    script = script or (reliops_dir() / "scripts" / "rejudge.py")
+    if not script.is_file():
+        yield f"{script} not found: git pull the ReliOps clone.\n"
+        return
+    work = reliops_dir() / "results" / "gui_rejudge_work"
+    work.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    inp, out = work / f"{stamp}_in.jsonl", work / f"{stamp}_out.jsonl"
+    inp.write_text("\n".join(json.dumps(i) for i in items) + "\n", encoding="utf-8")
+    env = {"JUDGE_MODEL_ID": judge_model, "PYTHONPATH": str(sregym_dir())}
+    for k, v in merged_env_vars().items():
+        env.setdefault(k, v)
+    cmd = ["uv", "run", "python", str(script), "--in", str(inp), "--out", str(out)]
+    yield from _stream(cmd, cwd=sregym_dir(), env=env)
+    n = 0
+    if out.is_file():
+        for line in out.read_text(encoding="utf-8").splitlines():
+            try:
+                v = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if v.get("judge_model_id") == "dry-run":
+                continue  # never store the script's test verdicts as if a judge had said them
+            dims = v.get("dimensions") or {}
+            rec = {"run_id": v.get("run_id"), "problem_id": v.get("problem_id"), "judge_model_id": judge_model,
+                   "success": v.get("success"), "judgment": v.get("judgment"),
+                   "composite_score": v.get("composite_score"),
+                   "d1": (dims.get("D1") or {}).get("score"), "d2": (dims.get("D2") or {}).get("score"),
+                   "d3": (dims.get("D3") or {}).get("score"), "reasoning": v.get("reasoning"),
+                   "checklist": json.dumps(v.get("checklist") or [], default=str), "error": v.get("error")}
+            if on_result:
+                on_result(rec)
+            n += 1
+    yield f"----- stored {n} re-judge verdict(s) from {judge_model} -----\n"
+
+
 def render_story(record: dict) -> str:
     """Markdown story (agent steps interleaved with cluster events) for one recorded run. Uses
     scripts/replay_trace.py from the ReliOps clone, so there is one renderer for the Lab and the
@@ -890,6 +1012,8 @@ def stream_campaign(
     config_label: str | None = None,
     run_class: str = "exploration",
     record_walkthrough: bool = True,
+    cells: list[tuple[str, int]] | None = None,
+    manifest_id: str | None = None,
     on_result=None,
 ) -> Iterator[str]:
     """Runs one problem at a time (SREGym itself is single-run per process) and yields log lines
@@ -912,8 +1036,11 @@ def stream_campaign(
     for k, v in merged_env_vars().items():
         base_env.setdefault(k, v)
 
-    runs = [(problem, rep) for problem in problems for rep in range(1, repeat_n + 1)]
+    # `cells` (problem, repeat) pairs override the plain grid: used to run only the missing cells of a
+    # frozen campaign, or one machine's slice of it.
+    runs = list(cells) if cells else [(problem, rep) for problem in problems for rep in range(1, repeat_n + 1)]
     total_runs = len(runs)
+    commit = _git_commit_safe()
     for i, (problem, rep) in enumerate(runs, start=1):
         repeat_note = f" repeat={rep}/{repeat_n}" if repeat_n > 1 else ""
         yield (
@@ -956,6 +1083,7 @@ def stream_campaign(
             _stop_recorder(recorder)  # also runs if the browser tab closes mid-run
         row = _latest_result_row(problem, started_at)
         diagnosis = extract_diagnosis(row)
+        transcript_rel = _find_transcript(problem, started_at)
         record = {
             "run_id": run_id,
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -974,7 +1102,10 @@ def stream_campaign(
             # for a measured campaign. The results tables keep the two apart so they are never averaged.
             "run_class": run_class if run_class in ("exploration", "frozen") else "exploration",
             "config_label": (config_label or "").strip(),
-            "transcript_rel": _find_transcript(problem, started_at),
+            "transcript_rel": transcript_rel,
+            "manifest_id": manifest_id,
+            "git_commit": commit,
+            **transcript_stats(transcript_rel),
             **diagnosis,  # diagnosis_text, judge_reasoning, diagnosis_d1..d3, diagnosis_composite
             "row": row,  # SREGym's own metrics.md-shaped row, or None if we couldn't locate it
             "log_file": problem_log_path.name,  # served by GET /api/log/<name> — this run's own log

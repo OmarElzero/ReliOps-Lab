@@ -1,6 +1,6 @@
 # ReliOps Lab
 
-[![Status](https://img.shields.io/badge/status-v0%20%E2%80%94%20active%20development-orange)](#what-v0-does-not-do-yet-see-docsplan05-platform-specmd-v1v2-in-the-main-repo)
+[![Status](https://img.shields.io/badge/status-v2%20%E2%80%94%20not%20yet%20run%20on%20a%20live%20cluster-orange)](#what-it-does-not-do-yet)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](requirements.txt)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Part of ReliOps](https://img.shields.io/badge/part%20of-ReliOps-15675A)](https://github.com/OmarElzero/ReliOps)
@@ -28,7 +28,8 @@ yourself; Setup does it. The one thing to know because of this: **this project's
 - [Requirements](#requirements)
 - [Run it](#run-it)
 - [How it fits with the main repo](#how-it-fits-with-the-main-repo)
-- [What v0 does *not* do yet](#what-v0-does-not-do-yet-see-docsplan05-platform-specmd-v1v2-in-the-main-repo)
+- [Access and security](#access-and-security)
+- [What it does *not* do yet](#what-it-does-not-do-yet)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -53,6 +54,24 @@ yourself; Setup does it. The one thing to know because of this: **this project's
   thought, did and saw, interleaved with a cluster timeline recorded during the run (needs the main
   repo's `scripts/replay_trace.py` and `scripts/cluster_recorder.py`; `git pull` the ReliOps clone).
   Stories live on the machine that ran the test.
+- **Problem cards (v1.1).** Click a problem to see what it injects, what a correct diagnosis must say,
+  and the attempt log for it.
+- **Failure tagging (v1.1).** Tag each failed run (blamed-wrong-service, wrong-mechanism,
+  anchored-on-first-claim, stopped-early, ...), the first wrong step and a note; tag counts appear in the
+  per-configuration table.
+- **Shared stories (v1.1).** With Firebase configured, stories are uploaded so teammates can read runs
+  made on another machine.
+- **Frozen campaigns (v2).** Create a manifest (agent commit, model, action space, judge, label, hashed
+  problem set, repeat count); the grid shows done / missing cells and resumes; laptop *k* of *n* takes
+  every n-th missing cell so five laptops split one campaign without overlap. Uncommitted `agent/` or
+  `scripts/` changes are refused.
+- **Judge audit (v2).** Hand-label diagnoses blind to the judge's verdict, re-judge stored diagnosis text
+  with another judge model, and read agreement (Wilson interval and Cohen's kappa), including
+  judge-against-judge.
+- **Standing audit (v2).** A dumb-baseline floor and no-fault controls are shown beside every
+  configuration; "not clearly above the floor" is flagged.
+- **Cost columns (v2)**: mean tokens, LLM calls, time, and tokens per resolved incident (reliops_v1 runs).
+- **Export (v2)**: runs and summary as CSV, and a summary figure as SVG.
 - **Optional, local-only Firebase sync** — nothing leaves your machine unless this project's own
   `.env` has credentials in it; the status pill at the top reflects `.env` automatically, no
   "Connect" step.
@@ -79,10 +98,18 @@ yourself; Setup does it. The one thing to know because of this: **this project's
 
 ## Run it
 
+One command (creates the virtualenv on first use, starts the server, opens the browser):
+
+```bash
+bash start.sh          # Linux / WSL / macOS;   on Windows double-click start.cmd (it runs start.sh inside WSL)
+```
+
+`PORT=9000 bash start.sh` changes the port; `LAB_NO_BROWSER=1` skips opening the browser. By hand:
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cd backend && uvicorn app:app --port 8765 --reload
+cd backend && uvicorn app:app --host 127.0.0.1 --port 8765 --reload
 ```
 
 Open http://localhost:8765. First time: click **Run setup** (clones ReliOps + SREGym, applies the
@@ -159,8 +186,25 @@ Authentication + Firestore Security Rules) are already designed in
 `docs/plan/05-platform-spec.md` for the full v1/v2 platform — that's a bigger build than this local
 GUI, not a setting to flip here.
 
-## What v0 does **not** do yet (see `docs/plan/05-platform-spec.md` v1/v2 in the main repo)
+## Access and security
 
+There is no login, on purpose: this is a single-user tool that runs on your own machine and listens only on
+`127.0.0.1`. It holds your API keys and can start runs that change a cluster, so it must stay that way:
+do not bind it to `0.0.0.0` or put it behind a public tunnel. As a guard against web pages calling it from
+your browser, the server answers only requests whose Host is `localhost`, `127.0.0.1` or `[::1]` and
+refuses state-changing requests with a foreign Origin (`LAB_ALLOWED_HOSTS=name1,name2` adds names). Who may
+see the team's shared data is decided by the Firebase key you hold, see the warning above. A hosted
+dashboard for the whole team would use Firebase Authentication with an allow-list and Firestore security
+rules (design in `docs/plan/05-platform-spec.md`); that is not built.
+
+## What it does **not** do yet
+
+- Tested on synthetic data and in a browser against demo data; **not yet run against a live SREGym cluster**.
+  The first real run will confirm recorder start/stop, transcript lookup, and `scripts/rejudge.py` on the
+  real problem registry.
+- No in-machine parallel runs (`sregym-dind`); use machine slices instead. No AIOpsLab adapter.
+- The agent does not yet emit claim / critic records (proposal R1); the Story view already renders them.
+- Stories and rendered Markdown/Mermaid use CDN scripts; without internet the raw text is shown.
 - No multi-machine job queue — this is one browser talking to one local server on one laptop.
 - No sealed-box key encryption — your key only ever touches your own local `.env`, so this is
   fine for a single person running their own machine, not for handing a key to a sponsor VM.
@@ -188,11 +232,18 @@ reliops-lab/
 │   ├── stats.py          # Wilson, problem bootstrap, exact McNemar (standard library only)
 │   ├── test_stats.py     # python3 -I backend/test_stats.py
 │   ├── test_runner_storage.py  # python3 -I backend/test_runner_storage.py
+│   ├── test_v2.py        # python3 -I backend/test_v2.py  (API tests need: pip install httpx)
+│   ├── store.py          # append-only records: reviews, labels, re-judges, manifests
+│   ├── campaign.py       # frozen manifests, grid, slices
+│   ├── audit.py          # judge audit, standing audit (floor and controls)
+│   ├── export.py         # CSV and SVG export
 │   └── firebase_sync.py  # optional, local-only Firestore mirroring
 ├── frontend/
 │   ├── index.html
-│   ├── app.js            # form state, SSE client, log rendering
+│   ├── app.js            # form state, SSE client, log rendering, results
+│   ├── v2.js             # campaigns, judge audit, problems tabs
 │   └── style.css
+├── start.sh / start.cmd  # one-command launcher
 ├── requirements.txt
 ├── LICENSE
 └── CONTRIBUTING.md

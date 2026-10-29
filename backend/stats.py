@@ -63,6 +63,20 @@ def bootstrap_problem_ci(
     return lo, hi
 
 
+def cohen_kappa(a: list[bool], b: list[bool]) -> float | None:
+    """Cohen's kappa for two binary raters over the same items. None if there are no items, or if
+    chance agreement is 1 (both raters constant and identical), where kappa is undefined."""
+    n = len(a)
+    if n == 0 or n != len(b):
+        return None
+    po = sum(1 for x, y in zip(a, b) if x == y) / n
+    pa, pb = sum(a) / n, sum(b) / n
+    pe = pa * pb + (1 - pa) * (1 - pb)
+    if pe >= 1.0:
+        return None
+    return (po - pe) / (1 - pe)
+
+
 def config_key(run: dict) -> str:
     return KEY_SEP.join(str(run.get(f) or "-") for f in KEY_FIELDS)
 
@@ -74,6 +88,27 @@ def key_to_dict(key: str) -> dict:
 def _known(run: dict, metric: str) -> bool | None:
     v = run.get(metric)
     return v if isinstance(v, bool) else None
+
+
+def _num(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def cost_summary(rs: list[dict], passes: int) -> dict:
+    """Cost per configuration from whatever runs recorded it (reliops_v1 transcripts). Averages use
+    only the runs that have the number; `tokens_per_resolved` spends ALL measured tokens (failures
+    included) over the number of passes, which is the cost of getting one fix, not one attempt."""
+    toks = [t for t in (_num(r.get("total_tokens")) for r in rs) if t is not None]
+    calls = [c for c in (_num(r.get("num_llm_calls")) for r in rs) if c is not None]
+    times = [x for x in ((_num(r.get("ttd_s")) or 0) + (_num(r.get("ttm_s")) or 0) for r in rs
+                         if _num(r.get("ttd_s")) is not None or _num(r.get("ttm_s")) is not None)]
+    return {
+        "cost_runs": len(toks),
+        "mean_tokens": (sum(toks) / len(toks)) if toks else None,
+        "mean_llm_calls": (sum(calls) / len(calls)) if calls else None,
+        "mean_time_s": (sum(times) / len(times)) if times else None,
+        "tokens_per_resolved": (sum(toks) / passes) if toks and passes else None,
+    }
 
 
 def summarize(runs: Iterable[dict], metric: str = "e2e_pass") -> list[dict]:
@@ -98,6 +133,17 @@ def summarize(runs: Iterable[dict], metric: str = "e2e_pass") -> list[dict]:
             per_problem[r.get("problem_id") or "?"].append(v)
         ci = wilson(k, n)
         bci = bootstrap_problem_ci(per_problem)
+        # Failure tags only count runs known to have failed, so "untagged" shows how much reading is left.
+        tags: dict[str, int] = defaultdict(int)
+        untagged = 0
+        for r, v in known:
+            if v is False:
+                t = (r.get("failure_mode_tag") or "").strip()
+                if t:
+                    tags[t] += 1
+                else:
+                    untagged += 1
+        cost = cost_summary(rs, k)
         out.append({
             "key": key,
             **key_to_dict(key),
@@ -112,6 +158,9 @@ def summarize(runs: Iterable[dict], metric: str = "e2e_pass") -> list[dict]:
             "problems": len(per_problem),
             "boot_lo": bci[0] if bci else None,
             "boot_hi": bci[1] if bci else None,
+            "failure_tags": dict(tags),
+            "failures_untagged": untagged,
+            **cost,
         })
     out.sort(key=lambda g: (-(g["n"]), g["key"]))
     return out

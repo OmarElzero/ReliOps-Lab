@@ -11,6 +11,7 @@ Run: `uvicorn app:app --port 8765 --reload` from this directory, then open http:
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 from pathlib import Path
@@ -20,11 +21,49 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
+import audit
+import campaign
+import export
 import firebase_sync
 import runner
 import stats
+import store
 
 app = FastAPI(title="ReliOps Lab")
+
+# This server holds API keys, can start runs that change a cluster, and can write to the team's
+# Firestore, and it has no login by design: it is a single-user local tool, bound to 127.0.0.1.
+# What it must still refuse is a *web page* in the user's browser calling it (cross-site requests,
+# DNS rebinding). So: only accept requests whose Host is a loopback name, and refuse state-changing
+# requests that carry a foreign Origin. LAB_ALLOWED_HOSTS (comma-separated) adds names, for example
+# when reaching the Lab through a tunnel you control.
+_LOOPBACK = {"localhost", "127.0.0.1", "[::1]", "::1", "testserver"}
+
+
+def _allowed_hosts() -> set[str]:
+    extra = {h.strip().lower() for h in os.environ.get("LAB_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    return _LOOPBACK | extra
+
+
+def _host_only(value: str) -> str:
+    value = value.strip().lower()
+    if value.startswith("["):  # [::1]:8765
+        return value.split("]")[0] + "]"
+    return value.split(":")[0]
+
+
+@app.middleware("http")
+async def local_only_guard(request, call_next):
+    allowed = _allowed_hosts()
+    if _host_only(request.headers.get("host", "")) not in allowed:
+        return PlainTextResponse("ReliOps Lab only answers on localhost.", status_code=403)
+    origin = request.headers.get("origin")
+    if origin and request.method not in ("GET", "HEAD", "OPTIONS"):
+        from urllib.parse import urlparse
+
+        if (urlparse(origin).hostname or "").lower() not in {h.strip("[]") for h in allowed}:
+            return PlainTextResponse("Cross-site request refused.", status_code=403)
+    return await call_next(request)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 
@@ -36,6 +75,11 @@ def index():
 @app.get("/app.js")
 def app_js():
     return FileResponse(FRONTEND_DIR / "app.js")
+
+
+@app.get("/v2.js")
+def v2_js():
+    return FileResponse(FRONTEND_DIR / "v2.js")
 
 
 @app.get("/style.css")
@@ -115,9 +159,11 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
         source = "local"
         raw_runs = runner.list_local_runs(limit)
 
+    reviews = {x["run_id"]: x for x in store.read("reviews") if x.get("run_id")}
     runs = []
     for r in raw_runs:
         normalized = runner.normalize_sregym_row(r.get("row"))
+        review = reviews.get(r.get("run_id")) or {}
         # Older records (before the Lab stored these) get them recovered from SREGym's own row.
         diag = runner.extract_diagnosis(r.get("row"))
         runs.append({
@@ -137,7 +183,18 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "diagnosis_text": r.get("diagnosis_text") or diag["diagnosis_text"],
             "judge_reasoning": r.get("judge_reasoning") or diag["judge_reasoning"],
             "judge_checklist": r.get("judge_checklist") or diag["judge_checklist"],
-            "has_story": bool(r.get("transcript_rel")),
+            "has_story": bool(r.get("transcript_rel") or r.get("story_shared")),
+            "manifest_id": r.get("manifest_id"),
+            "git_commit": r.get("git_commit"),
+            "total_tokens": r.get("total_tokens"),
+            "prompt_tokens": r.get("prompt_tokens"),
+            "completion_tokens": r.get("completion_tokens"),
+            "num_llm_calls": r.get("num_llm_calls"),
+            "num_tool_calls": r.get("num_tool_calls"),
+            "failure_mode_tag": review.get("failure_mode_tag") or "",
+            "first_bad_step": review.get("first_bad_step"),
+            "review_note": review.get("note") or "",
+            "reviewed_by": review.get("reviewer") or "",
             **normalized,
         })
     return source, runs
@@ -180,12 +237,17 @@ def story(run_id: str):
     if not run_id.replace("-", "").isalnum():
         return PlainTextResponse("invalid run id", status_code=400)
     record = next((r for r in runner.list_local_runs(100000) if r.get("run_id") == run_id), None)
-    if record is None:
-        return PlainTextResponse("No such run on this machine (stories are stored where the run happened).", status_code=404)
-    try:
-        return PlainTextResponse(runner.render_story(record), media_type="text/markdown; charset=utf-8")
-    except FileNotFoundError as e:
-        return PlainTextResponse(str(e), status_code=404)
+    local_error = "No such run on this machine."
+    if record is not None:
+        try:
+            return PlainTextResponse(runner.render_story(record), media_type="text/markdown; charset=utf-8")
+        except FileNotFoundError as e:
+            local_error = str(e)
+    shared = firebase_sync.read_story(run_id)  # a teammate's run: the story was shared when it finished
+    if shared:
+        return PlainTextResponse(shared, media_type="text/markdown; charset=utf-8")
+    return PlainTextResponse(local_error + " No shared copy found either (shared stories need Firebase connected on both machines).",
+                             status_code=404)
 
 
 @app.post("/api/stop")
@@ -233,10 +295,50 @@ def run(
     config_label: Optional[str] = None,  # free text naming the agent variant, e.g. "F7-on" or "base"
     run_class: str = "exploration",  # "exploration" or "frozen" — kept apart in every statistic
     record_walkthrough: bool = True,  # record the cluster timeline so the run has a story
+    manifest_id: Optional[str] = None,  # run (the missing cells of) a frozen campaign
+    slice_k: int = 1,  # this machine's share of the missing cells: k of n
+    slice_n: int = 1,
+    cells: Optional[str] = None,  # explicit "problem:repeat,problem:repeat" list
 ):
     problem_list = [p.strip() for p in problems.split(",") if p.strip()]
+    cell_list = None
+    if cells:
+        try:
+            cell_list = [(c.rsplit(":", 1)[0], int(c.rsplit(":", 1)[1])) for c in cells.split(",") if c.strip()]
+        except (ValueError, IndexError):
+            return _sse(iter(["invalid cells list, expected problem:repeat,problem:repeat\n"]), "run")
+
+    if manifest_id:
+        manifest = next((m for m in store.read("manifests") if m.get("manifest_id") == manifest_id), None)
+        if manifest is None:
+            return _sse(iter([f"unknown manifest {manifest_id}\n"]), "run")
+        problem_list = list(manifest["problems"])
+        wrong = campaign.verify_run(manifest, agent_id=agent, model_id=model, action_space=action_space,
+                                    judge_model_id=judge_model, config_label=config_label or "", problems=problem_list)
+        if wrong:
+            return _sse(iter(["REFUSED: this run does not match the frozen manifest:\n"] +
+                             [f"  - {w}\n" for w in wrong] +
+                             ["Fix the settings above (or freeze a new manifest) and run again.\n"]), "run")
+        _, all_runs = _collect_runs(5000)
+        todo = campaign.grid(manifest, all_runs)["todo"]
+        try:
+            cell_list = campaign.slice_cells(todo, slice_k, slice_n)
+        except ValueError as e:
+            return _sse(iter([f"{e}\n"]), "run")
+        run_class = "frozen"
+        repeat_n = manifest["repeat_n"]
+        if not cell_list:
+            return _sse(iter(["nothing left to run for this slice: every cell has a result\n"]), "run")
+    elif run_class == "frozen":
+        return _sse(iter(["A frozen run needs a manifest: freeze one in the Campaigns tab first, so the settings "
+                          "it was measured with are recorded and enforced.\n"]), "run")
 
     def on_result(record: dict) -> None:
+        # Share the story with teammates before the run record goes out, so the flag travels with it.
+        try:
+            record["story_shared"] = firebase_sync.write_story(record["run_id"], runner.render_story(record)).startswith("written")
+        except (FileNotFoundError, ValueError, OSError):
+            record["story_shared"] = False
         outcome = firebase_sync.write_run(record)
         record["_firebase"] = outcome
         # Full record, every field, nothing dropped — the raw backup.
@@ -260,6 +362,177 @@ def run(
         config_label=config_label,
         run_class=run_class,
         record_walkthrough=record_walkthrough,
+        cells=cell_list,
+        manifest_id=manifest_id,
         on_result=on_result,
     )
     return _sse(gen, "run")
+
+
+# ---- Problem cards ------------------------------------------------------------------
+@app.get("/api/cards")
+def cards():
+    return {"cards": runner.list_cards()}
+
+
+@app.get("/api/card/{problem_id}")
+def card(problem_id: str):
+    text = runner.read_card(problem_id)
+    if text is None:
+        return PlainTextResponse("No problem card for this problem yet. Copy experiments/problem-cards/TEMPLATE.md "
+                                 "in the ReliOps repo to experiments/problem-cards/<problem_id>.md.", status_code=404)
+    return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
+
+
+# ---- Failure tags / reviews -----------------------------------------------------------
+FAILURE_TAGS = ["blamed-wrong-service", "wrong-mechanism", "anchored-on-first-claim", "stopped-early", "no-action-fits",
+                "fix-didnt-hold", "tool-error", "timeout", "invented-incident", "other"]
+
+
+class ReviewIn(BaseModel):
+    run_id: str
+    failure_mode_tag: str = ""
+    first_bad_step: Optional[int] = None
+    note: str = ""
+    reviewer: str = ""
+
+
+@app.get("/api/failure_tags")
+def failure_tags():
+    return {"tags": FAILURE_TAGS}
+
+
+@app.post("/api/review")
+def review(body: ReviewIn):
+    if body.failure_mode_tag and body.failure_mode_tag not in FAILURE_TAGS:
+        return JSONResponse({"error": f"tag must be one of {FAILURE_TAGS}"}, status_code=400)
+    rec = store.append("reviews", {"run_id": body.run_id, "failure_mode_tag": body.failure_mode_tag,
+                                   "first_bad_step": body.first_bad_step, "note": body.note,
+                                   "reviewer": body.reviewer or "unknown"})
+    return {"ok": True, "review": rec}
+
+
+# ---- Judge audit ----------------------------------------------------------------------
+class LabelIn(BaseModel):
+    run_id: str
+    correct: bool
+    labeler: str = ""
+
+
+@app.get("/api/label_queue")
+def label_queue(limit: int = 20):
+    _, runs = _collect_runs(5000)
+    labels = store.read("labels")
+    queue_ = audit.label_queue(runs, labels, limit)
+    for item in queue_:
+        card = runner.read_card(item["problem_id"] or "")
+        item["expected"] = runner.card_section(card, 4)  # "What a correct diagnosis must say", if the card has it
+    return {"queue": queue_, "labeled": len(labels)}
+
+
+@app.post("/api/label")
+def label(body: LabelIn):
+    return {"ok": True, "label": store.append("labels", {"run_id": body.run_id, "correct": body.correct,
+                                                         "labeler": body.labeler or "unknown"})}
+
+
+@app.get("/api/judge_audit")
+def judge_audit():
+    _, runs = _collect_runs(5000)
+    return audit.judge_audit(runs, store.read("labels"), store.read("rejudges"))
+
+
+@app.get("/api/rejudge")
+def rejudge(judge_model: str, scope: str = "labeled"):
+    """Re-judge stored diagnoses with another judge. scope=labeled (default) re-judges only runs a person
+    has hand-labelled, which is what the agreement table needs; scope=all re-judges every stored diagnosis."""
+    _, runs = _collect_runs(5000)
+    labeled = {l["run_id"] for l in store.read("labels")}
+    have = {r["run_id"] for r in store.read("rejudges") if r.get("judge_model_id") == judge_model}
+    items = [{"run_id": r["run_id"], "problem_id": r["problem_id"], "submission": r["diagnosis_text"]}
+             for r in runs if (r.get("diagnosis_text") or "").strip() and r["run_id"] not in have
+             and (scope == "all" or r["run_id"] in labeled)]
+    return _sse(runner.stream_rejudge(judge_model, items, on_result=lambda rec: store.append("rejudges", rec)), "rejudge")
+
+
+# ---- Frozen campaigns -----------------------------------------------------------------
+class ManifestIn(BaseModel):
+    model_config = {"protected_namespaces": ()}
+    name: str = ""
+    agent_id: str
+    model_id: str
+    action_space: Optional[str] = None
+    judge_model_id: str
+    config_label: str
+    problems: list[str]
+    repeat_n: int = 3
+    created_by: str = ""
+    notes: str = ""
+
+
+@app.post("/api/manifest")
+def create_manifest(body: ManifestIn):
+    try:
+        m = campaign.create_manifest(name=body.name, agent_id=body.agent_id, model_id=body.model_id,
+                                     action_space=body.action_space, judge_model_id=body.judge_model_id,
+                                     problems=body.problems, repeat_n=body.repeat_n, config_label=body.config_label,
+                                     created_by=body.created_by, notes=body.notes)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"ok": True, "manifest": store.append("manifests", m)}
+
+
+@app.get("/api/manifests")
+def manifests():
+    return {"manifests": sorted(store.read("manifests"), key=lambda m: m.get("created_at", ""), reverse=True)}
+
+
+@app.get("/api/campaign")
+def campaign_grid(manifest_id: str, metric: str = "e2e_pass", k: int = 1, n: int = 1):
+    manifest = next((m for m in store.read("manifests") if m.get("manifest_id") == manifest_id), None)
+    if manifest is None:
+        return JSONResponse({"error": "unknown manifest"}, status_code=404)
+    _, runs = _collect_runs(5000)
+    g = campaign.grid(manifest, runs, metric)
+    try:
+        mine = campaign.slice_cells(g["todo"], k, n)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    g["slice"] = {"k": k, "n": n, "cells": [{"problem": p, "repeat": r} for p, r in mine]}
+    g["todo"] = [{"problem": p, "repeat": r} for p, r in g["todo"]]
+    g["summary"] = campaign.manifest_runs_summary(manifest, runs, metric)
+    g["current_commit"] = campaign.git_commit()
+    g["agent_dirty"] = campaign.agent_dirty()
+    return g
+
+
+# ---- Standing audit and exports ---------------------------------------------------------
+@app.get("/api/standing_audit")
+def standing_audit(metric: str = "e2e_pass"):
+    _, runs = _collect_runs(5000)
+    return audit.standing_audit(runs, metric)
+
+
+@app.get("/api/export/runs.csv")
+def export_runs():
+    _, runs = _collect_runs(100000)
+    return PlainTextResponse(export.runs_csv(runs), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": "attachment; filename=reliops_runs.csv"})
+
+
+@app.get("/api/export/summary.csv")
+def export_summary(metric: str = "e2e_pass", run_class: Optional[str] = None):
+    _, runs = _collect_runs(100000)
+    if run_class:
+        runs = [r for r in runs if r["run_class"] == run_class]
+    return PlainTextResponse(export.summary_csv(stats.summarize(runs, metric)), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f"attachment; filename=reliops_summary_{metric}.csv"})
+
+
+@app.get("/api/export/summary.svg")
+def export_summary_svg(metric: str = "e2e_pass", run_class: Optional[str] = None):
+    _, runs = _collect_runs(100000)
+    if run_class:
+        runs = [r for r in runs if r["run_class"] == run_class]
+    return PlainTextResponse(export.summary_svg(stats.summarize(runs, metric), metric), media_type="image/svg+xml",
+                             headers={"Content-Disposition": f"attachment; filename=reliops_summary_{metric}.svg"})

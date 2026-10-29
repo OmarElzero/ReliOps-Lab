@@ -492,25 +492,19 @@ document.getElementById("clear-log").addEventListener("click", () => {
 });
 
 // ---- Tabs ------------------------------------------------------------------
-const tabRunBtn = document.getElementById("tab-btn-run");
-const tabResultsBtn = document.getElementById("tab-btn-results");
-const tabRunPanel = document.getElementById("tab-run");
-const tabResultsPanel = document.getElementById("tab-results");
+const TAB_LOADERS = {};  // tab name -> function called each time the tab is opened (v2.js registers its own)
 let resultsLoadedOnce = false;
 
 function showTab(name) {
-  const onResults = name === "results";
-  tabRunPanel.hidden = onResults;
-  tabResultsPanel.hidden = !onResults;
-  tabRunBtn.classList.toggle("active", !onResults);
-  tabResultsBtn.classList.toggle("active", onResults);
-  if (onResults && !resultsLoadedOnce) {
+  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".tab-panel").forEach((p) => { p.hidden = p.id !== "tab-" + name; });
+  if (name === "results" && !resultsLoadedOnce) {
     resultsLoadedOnce = true;
     loadResults();
   }
+  if (TAB_LOADERS[name]) TAB_LOADERS[name]();
 }
-tabRunBtn.addEventListener("click", () => showTab("run"));
-tabResultsBtn.addEventListener("click", () => showTab("results"));
+document.querySelectorAll(".tab-btn").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
 // ---- Results dashboard ------------------------------------------------------
 function fmtWhen(iso) {
@@ -558,8 +552,11 @@ const detailTitle = document.getElementById("detail-title");
 const detailBody = document.getElementById("detail-body");
 document.getElementById("detail-close").addEventListener("click", () => { detailCard.hidden = true; });
 
-function showDetail(title, text) {
+function showDetail(title, text, extraEl) {
   detailTitle.textContent = title;
+  const extra = document.getElementById("detail-extra");
+  extra.innerHTML = "";
+  if (extraEl) extra.appendChild(extraEl);
   detailBody.textContent = text;
   detailCard.hidden = false;
   detailCard.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -594,8 +591,9 @@ function diagnosisDetail(r) {
 function textCell(r) {
   const td = document.createElement("td");
   if (r.diagnosis_text || r.judge_reasoning) {
-    td.appendChild(linkButton("text", () => showDetail(`${r.problem_id} — diagnosis and judge verdict`, diagnosisDetail(r)),
-      "what the agent submitted and how the judge scored it"));
+    td.appendChild(linkButton("text", () => showDetail(`${r.problem_id} — diagnosis and judge verdict`, diagnosisDetail(r),
+      window.buildReviewForm ? window.buildReviewForm(r) : null),
+      "what the agent submitted and how the judge scored it, plus a form to tag the failure"));
   } else {
     td.textContent = "—";
     td.title = "no diagnosis text stored for this run (it was recorded before the Lab kept it, or the run did not reach diagnosis)";
@@ -607,7 +605,7 @@ function storyCell(r) {
   const td = document.createElement("td");
   if (r.has_story && r.run_id) {
     td.appendChild(linkButton("story", async () => {
-      showDetail(`${r.problem_id} — story`, "loading…");
+      showDetail(`${r.problem_id} — story`, "loading…", window.buildReviewForm ? window.buildReviewForm(r) : null);
       try {
         const res = await fetch("/api/story/" + encodeURIComponent(r.run_id));
         detailBody.textContent = await res.text();
@@ -633,6 +631,21 @@ const pct = (x) => (typeof x === "number" ? `${(x * 100).toFixed(0)}%` : "—");
 const interval = (lo, hi) => (typeof lo === "number" && typeof hi === "number" ? `${pct(lo)} – ${pct(hi)}` : "—");
 let SUMMARY_GROUPS = [];
 
+function costText(g) {
+  if (typeof g.mean_tokens !== "number") return "—";
+  const k = (x) => (x >= 1000 ? `${(x / 1000).toFixed(1)}k` : String(Math.round(x)));
+  let t = `${k(g.mean_tokens)} tok/run`;
+  if (typeof g.mean_llm_calls === "number") t += ` · ${g.mean_llm_calls.toFixed(1)} calls`;
+  if (typeof g.tokens_per_resolved === "number") t += ` · ${k(g.tokens_per_resolved)} tok/fix`;
+  return t;
+}
+
+function tagText(g) {
+  const parts = Object.entries(g.failure_tags || {}).map(([t, n]) => `${t} ×${n}`);
+  if (g.failures_untagged) parts.push(`untagged ×${g.failures_untagged}`);
+  return parts.length ? parts.join(", ") : "—";
+}
+
 function groupName(g) {
   return `${g.config_label !== "-" ? g.config_label : "(no label)"} · ${g.agent_id} · ${g.model_id} · ${g.action_space} · judge ${g.judge_model_id} · ${g.run_class}`;
 }
@@ -649,6 +662,11 @@ async function loadSummary() {
     data = await (await fetch("/api/summary?" + q.toString())).json();
   } catch (e) { return; }
   SUMMARY_GROUPS = data.groups || [];
+  const exportQ = new URLSearchParams({ metric });
+  if (runClass) exportQ.set("run_class", runClass);
+  document.getElementById("export-summary-csv").href = "/api/export/summary.csv?" + exportQ.toString();
+  document.getElementById("export-summary-svg").href = "/api/export/summary.svg?" + exportQ.toString();
+  if (window.loadStanding) window.loadStanding(metric);
   tbody.innerHTML = "";
   emptyEl.hidden = SUMMARY_GROUPS.length > 0;
   SUMMARY_GROUPS.forEach((g) => {
@@ -662,11 +680,13 @@ async function loadSummary() {
     const cells = [
       `${g.passes} / ${g.n}`, pct(g.rate), interval(g.wilson_lo, g.wilson_hi),
       interval(g.boot_lo, g.boot_hi), String(g.problems), g.incomplete ? String(g.incomplete) : "0",
+      costText(g), tagText(g),
     ];
     cells.forEach((text, i) => {
       const td = document.createElement("td");
       td.textContent = text;
       if (i === 2 || i === 3) td.className = "r-interval";
+      if (i >= 6) td.className = "r-wrap";
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
@@ -828,7 +848,13 @@ async function loadResults() {
     const by = document.createElement("td"); by.textContent = r.run_by || "unknown"; tr.appendChild(by);
     const problem = document.createElement("td");
     problem.className = "r-problem";
-    problem.textContent = r.repeat_n > 1 ? `${r.problem_id} (${r.repeat_index}/${r.repeat_n})` : (r.problem_id || "—");
+    const problemLabel = r.repeat_n > 1 ? `${r.problem_id} (${r.repeat_index}/${r.repeat_n})` : (r.problem_id || "—");
+    if (r.problem_id) {
+      problem.appendChild(linkButton(problemLabel, () => { if (window.openProblem) window.openProblem(r.problem_id); },
+        "open this problem's card and attempt log"));
+    } else {
+      problem.textContent = problemLabel;
+    }
     tr.appendChild(problem);
     const agent = document.createElement("td"); agent.textContent = r.agent_id || "—"; tr.appendChild(agent);
     const model = document.createElement("td"); model.textContent = r.model_id || "—"; tr.appendChild(model);
@@ -841,6 +867,9 @@ async function loadResults() {
     tr.appendChild(passCell(r.e2e_pass));
     tr.appendChild(timeCell(r.ttd_s));
     tr.appendChild(timeCell(r.ttm_s));
+    const tagTd = document.createElement("td");
+    tagTd.textContent = r.failure_mode_tag ? r.failure_mode_tag + (r.first_bad_step ? ` @${r.first_bad_step}` : "") : "—";
+    tr.appendChild(tagTd);
     tr.appendChild(textCell(r));
     tr.appendChild(storyCell(r));
     tr.appendChild(logCell(r.log_file));

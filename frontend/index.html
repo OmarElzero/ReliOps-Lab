@@ -18,8 +18,11 @@
 
 <main>
   <div class="tabs">
-    <button id="tab-btn-run" class="tab-btn active" type="button">Run</button>
-    <button id="tab-btn-results" class="tab-btn" type="button">Results</button>
+    <button id="tab-btn-run" class="tab-btn active" data-tab="run" type="button">Run</button>
+    <button id="tab-btn-results" class="tab-btn" data-tab="results" type="button">Results</button>
+    <button id="tab-btn-campaigns" class="tab-btn" data-tab="campaigns" type="button">Campaigns</button>
+    <button id="tab-btn-audit" class="tab-btn" data-tab="audit" type="button">Judge audit</button>
+    <button id="tab-btn-problems" class="tab-btn" data-tab="problems" type="button">Problems</button>
   </div>
 
   <div id="tab-run" class="tab-panel">
@@ -175,6 +178,9 @@
           <option value="exploration">exploration</option>
           <option value="frozen">frozen</option>
         </select>
+        <a id="export-summary-csv" class="log-link" href="#" download>CSV</a>
+        <a id="export-summary-svg" class="log-link" href="#" download>chart (SVG)</a>
+        <a class="log-link" href="/api/export/runs.csv" download>all runs (CSV)</a>
       </div>
       <p class="hint">One row per agent + model + action space + config label + judge + class. The
         <strong>95% Wilson</strong> interval is for the run-level pass rate; the
@@ -186,7 +192,7 @@
           <thead>
             <tr>
               <th>Configuration</th><th>Pass / n</th><th>Rate</th><th>95% Wilson</th>
-              <th>Problem bootstrap</th><th>Problems</th><th>Incomplete</th>
+              <th>Problem bootstrap</th><th>Problems</th><th>Incomplete</th><th>Cost</th><th>Failure tags</th>
             </tr>
           </thead>
           <tbody id="summary-tbody"></tbody>
@@ -207,6 +213,21 @@
         <button id="cmp-go" class="secondary" type="button">Compare</button>
       </div>
       <div id="cmp-out" hidden></div>
+    </section>
+
+    <section class="card">
+      <h2>Standing audit — does it beat the floor?</h2>
+      <p class="hint">Each configuration against the <code>dumb-baseline</code> runs (give the near-zero-LLM
+        baseline that config label). <em>Clearly above</em> means the Wilson lower bound is above the floor's
+        pass rate. No-fault control problems (ids containing <code>no_fault</code>, <code>noop</code> or
+        <code>control</code>) are counted separately.</p>
+      <div class="results-table-wrap">
+        <table class="results-table">
+          <thead><tr><th>Configuration</th><th>Rate (lower bound)</th><th>Floor</th><th>Verdict</th><th>Controls</th></tr></thead>
+          <tbody id="audit-tbody"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="audit-notes"></p>
     </section>
 
     <section class="card">
@@ -248,7 +269,7 @@
             <tr>
               <th>When</th><th>By</th><th>Problem</th><th>Agent</th><th>Model</th><th>Label</th>
               <th>Diagnosis</th><th>Mitigation</th><th>E2E</th><th>TTD</th><th>TTM</th>
-              <th>Text</th><th>Story</th><th>Log</th>
+              <th>Tag</th><th>Text</th><th>Story</th><th>Log</th>
             </tr>
           </thead>
           <tbody id="results-tbody"></tbody>
@@ -262,11 +283,110 @@
         <h2 id="detail-title">Detail</h2>
         <button id="detail-close" class="secondary small" type="button">Close</button>
       </div>
+      <div id="detail-extra"></div>
       <pre id="detail-body" class="detail-body"></pre>
+    </section>
+  </div>
+  <div id="tab-campaigns" class="tab-panel" hidden>
+    <section class="card">
+      <h2>Freeze a campaign</h2>
+      <p class="hint">Records exactly what a measured run is allowed to be: agent code commit, model, action space,
+        judge, config label, problem set and repeat count. Uses the settings currently chosen on the Run tab
+        (agent, model, judge, label, selected problems, repeat count). Needs the ReliOps clone's
+        <code>agent/</code> and <code>scripts/</code> committed, and refuses runs that do not match afterwards.</p>
+      <label for="freeze-name">Campaign name</label>
+      <input id="freeze-name" placeholder="e.g. phase-b-baseline" autocomplete="off">
+      <div class="row"><button id="freeze-go" class="primary" type="button">Freeze current Run-tab settings</button></div>
+      <p class="hint" id="freeze-msg"></p>
+    </section>
+
+    <section class="card">
+      <h2>Campaign grid</h2>
+      <div class="row">
+        <select id="camp-select"></select>
+        <label class="inline-label" for="camp-k">my slice</label>
+        <input id="camp-k" class="narrow" type="number" min="1" value="1">
+        <label class="inline-label" for="camp-n">of</label>
+        <input id="camp-n" class="narrow" type="number" min="1" value="1">
+        <button id="camp-refresh" class="secondary" type="button">Refresh</button>
+        <button id="camp-run" class="primary" type="button">Run my missing cells</button>
+      </div>
+      <p class="hint">Cells are (problem, repeat). With five laptops, give each the same campaign and its own
+        slice (1 of 5 ... 5 of 5): slices never overlap, and a cell that crashed (no known outcome) is run again.
+        Progress streams into the Run tab's live log.</p>
+      <p class="hint" id="camp-info"></p>
+      <div id="camp-grid" class="camp-grid"></div>
+    </section>
+  </div>
+
+  <div id="tab-audit" class="tab-panel" hidden>
+    <section class="card">
+      <h2>Hand-label diagnoses</h2>
+      <p class="hint">Is the diagnosis below correct against what the problem's card says a correct diagnosis must
+        say? The original judge's verdict is hidden so it does not bias you. About 30 labels are needed before a
+        kappa means much.</p>
+      <div id="label-box"></div>
+    </section>
+
+    <section class="card">
+      <h2>Judge agreement</h2>
+      <div class="results-table-wrap">
+        <table class="results-table">
+          <thead><tr><th>Judge</th><th>Judged</th><th>Labelled overlap</th><th>Agreement</th><th>95% Wilson</th>
+            <th>Cohen's kappa</th><th>TP / FP / TN / FN</th></tr></thead>
+          <tbody id="judge-tbody"></tbody>
+        </table>
+      </div>
+      <div class="results-table-wrap">
+        <table class="results-table">
+          <thead><tr><th>Judge A</th><th>Judge B</th><th>Shared runs</th><th>Agree</th><th>Kappa</th></tr></thead>
+          <tbody id="pair-tbody"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="judge-notes"></p>
+    </section>
+
+    <section class="card">
+      <h2>Re-judge with another model</h2>
+      <p class="hint">Grades the stored diagnosis text again with a different judge, using SREGym's own judge and
+        reference answers (only the judge model changes). Run it with a stronger model and with a model from a
+        second family, then compare agreement above. Needs the SREGym clone (Run setup done) and that judge's key in
+        <code>.env</code>.</p>
+      <div class="row">
+        <input id="rejudge-model" list="model-presets" placeholder="judge model, e.g. gemini/gemini-3.5-flash" style="flex:1 1 280px">
+        <select id="rejudge-scope" style="width:auto">
+          <option value="labeled">only hand-labelled runs</option>
+          <option value="all">every stored diagnosis</option>
+        </select>
+        <button id="rejudge-go" class="secondary" type="button">Re-judge</button>
+      </div>
+      <pre id="rejudge-log" class="detail-body" style="margin-top:10px;max-height:240px"></pre>
+    </section>
+  </div>
+
+  <div id="tab-problems" class="tab-panel" hidden>
+    <section class="card">
+      <h2>Problem cards</h2>
+      <p class="hint">What each problem is, how the fault works, what a correct diagnosis and fix look like. Cards live
+        in the ReliOps repo (<code>experiments/problem-cards/</code>), so they are edited and reviewed like code;
+        this page only displays them, with every recorded attempt below.</p>
+      <div class="row">
+        <select id="card-select"></select>
+        <button id="card-refresh" class="secondary" type="button">Refresh</button>
+      </div>
+      <div id="card-body" class="card-body"></div>
+      <h2 style="margin-top:18px">Attempts on this problem</h2>
+      <div class="results-table-wrap">
+        <table class="results-table">
+          <thead><tr><th>When</th><th>Label</th><th>Model</th><th>Diagnosis</th><th>E2E</th><th>Tag</th><th>First bad step</th><th>Text</th><th>Story</th></tr></thead>
+          <tbody id="attempt-tbody"></tbody>
+        </table>
+      </div>
     </section>
   </div>
 </main>
 
 <script src="/app.js"></script>
+<script src="/v2.js"></script>
 </body>
 </html>

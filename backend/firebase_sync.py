@@ -182,3 +182,49 @@ def write_run(record: dict[str, Any]) -> str:
         return "written to Firestore runs/" + str(self_id)
     except Exception as e:  # noqa: BLE001
         return f"not written: {e} (local copy is still saved)"
+
+
+def write_doc(collection: str, doc_id: str, doc: dict[str, Any]) -> str:
+    """Generic mirror for the small shared collections (reviews, labels, rejudges, manifests).
+    Never raises; a Firestore hiccup only means the record stays local-only."""
+    if _client is None:
+        return "not written: Firebase not connected (local copy is still saved)"
+    try:
+        _client.collection(collection).document(doc_id).set(doc)
+        return f"written to Firestore {collection}/{doc_id}"
+    except Exception as e:  # noqa: BLE001
+        return f"not written: {e} (local copy is still saved)"
+
+
+def list_docs(collection: str, limit: int = 5000) -> list[dict[str, Any]] | None:
+    """All docs of a small shared collection, or None when Firebase is not connected."""
+    status()
+    if _client is None:
+        return None
+    try:
+        return [d.to_dict() for d in _client.collection(collection).limit(limit).stream()]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+STORY_MAX_BYTES = 900_000  # a Firestore document is limited to 1 MiB
+
+
+def write_story(run_id: str, text: str) -> str:
+    """Shares a rendered story (Markdown, observations already clipped) so teammates on other
+    machines can read it. Truncated at ~900 KB with a visible note rather than failing."""
+    data = text.encode("utf-8")
+    if len(data) > STORY_MAX_BYTES:
+        text = data[:STORY_MAX_BYTES].decode("utf-8", errors="ignore") + "\n\n[story truncated to fit the shared store]\n"
+    return write_doc("stories", run_id, {"run_id": run_id, "text": text})
+
+
+def read_story(run_id: str) -> str | None:
+    status()
+    if _client is None:
+        return None
+    try:
+        doc = _client.collection("stories").document(run_id).get()
+        return (doc.to_dict() or {}).get("text") if doc.exists else None
+    except Exception:  # noqa: BLE001
+        return None
