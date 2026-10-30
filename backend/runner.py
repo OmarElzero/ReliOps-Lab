@@ -874,6 +874,20 @@ def new_log_file(kind: str) -> Path:
 # concurrent campaigns), so there's no "whose run am I stopping" ambiguity to track.
 _stop_event = threading.Event()
 
+# Set when a campaign stops itself because the setup looks broken (too many incomplete runs in a row, or a
+# cluster that is down). A queue reads it after each step: without it the next step would start as if nothing
+# happened, which is what the "[stopped ...]" message says does not happen.
+_halt_reason: str | None = None
+
+
+def halt_reason() -> str | None:
+    return _halt_reason
+
+
+def _halt(reason: str | None) -> None:
+    global _halt_reason
+    _halt_reason = reason
+
 
 def request_stop() -> None:
     """Asks the campaign currently in stream_campaign() to stop after whatever problem it's in the
@@ -1351,6 +1365,7 @@ def stream_campaign(
         return
 
     _stop_event.clear()  # a fresh "Run test(s)" click always starts clean, even after a past stop
+    _halt(None)
     repeat_n = max(1, repeat_n)
     base_env = {"AGENT_MODEL_ID": model}
     if action_space:
@@ -1512,8 +1527,10 @@ def stream_campaign(
                 "Finished runs are kept and only missing cells run next time. "
                 "Set RELIOPS_MAX_INCOMPLETE=0 in .env to turn this stop off.]\n"
             )
+            _halt(incomplete_reason or "the cluster is not ready")
             return
         if streak_limit and incomplete_streak >= streak_limit and i < total_runs and not _stop_event.is_set():
+            _halt(f"{incomplete_streak} runs in a row ended incomplete")
             yield (
                 f"\n[stopped: {incomplete_streak} runs in a row ended incomplete, which usually means the setup is broken "
                 "(model credential, stale agent image, cluster). The queue stops here instead of spending the night on empty runs. "

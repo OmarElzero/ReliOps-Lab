@@ -437,6 +437,13 @@ class SetupGuardTests(unittest.TestCase):
         log, records = self._run([{"run_status": "incomplete"}] * 5, env={"RELIOPS_MAX_INCOMPLETE": "0"})
         self.assertEqual(len(records), 5)
 
+    def test_a_campaign_that_stops_itself_leaves_a_halt_reason_and_a_clean_one_clears_it(self):
+        self._run([{"run_status": "incomplete"}] * 5)
+        self.assertIn("3 runs in a row", self.r.halt_reason())
+        good = {"Diagnosis.success": True, "Mitigation.success": True}
+        self._run([good] * 5)
+        self.assertIsNone(self.r.halt_reason())
+
     # Lines copied from a real log (a run on 30 Oct 2026 where two kind workers never became Ready).
     CLUSTER_LOG = [
         "[10/30/26 11:38:40] INFO     __main__ - Judge pre-flight check passed\n",
@@ -620,6 +627,50 @@ class IncompleteReasonInTheTableTests(TmpRepoCase):
         self.assertEqual(app_module._incomplete_reason({"row": None, "log_file": "../x"}), "")
         self.assertEqual(app_module._incomplete_reason({"row": None, "log_file": "missing.log"}), "")
         self.assertEqual(app_module._incomplete_reason({"row": None, "incomplete_reason": "stored", "log_file": "a.log"}), "stored")
+
+
+class QueueStopsWhenAStepHaltsTests(TmpRepoCase):
+    """A step that stops itself (credentials, cluster) used to end only that step: the queue went on to the
+    next one, although the message said the queue stops. The later steps would hit the same fault."""
+
+    def _drive(self, halting_steps):
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        from unittest import mock
+        import runner
+        started = []
+        step = lambda n: {"name": f"step {n}", "enabled": True, "agent_id": "a", "model_id": "m", "judge_model_id": "j",
+                          "problems": ["p"], "repeat_n": 1, "run_class": "exploration"}
+        queue = {"name": "q", "steps": [step(1), step(2), step(3)]}
+
+        def fake_run_lines(**kw):
+            n = len(started) + 1
+            started.append(n)
+            if n in halting_steps:
+                runner._halt("3 runs in a row ended incomplete")
+            yield f"run for step {n}\n"
+
+        with mock.patch.object(app_module, "_run_lines", side_effect=fake_run_lines), \
+             mock.patch.object(app_module.store, "read", return_value=[]), \
+             mock.patch.object(app_module, "_collect_runs", return_value=("local", [])), \
+             mock.patch.object(app_module.queueplan, "todo", return_value=[("p", 1)]):
+            runner._halt(None)
+            log = "".join(app_module._queue_lines(queue, "me", "exp"))
+        return log, started
+
+    def test_a_halting_step_stops_the_whole_queue(self):
+        log, started = self._drive({1})
+        self.assertEqual(started, [1])
+        self.assertIn("stopped after step 1/3", log)
+        self.assertIn("2 later step(s) were not started", log)
+        self.assertNotIn("[QUEUE] finished", log)
+
+    def test_a_queue_without_a_halt_runs_every_step(self):
+        log, started = self._drive(set())
+        self.assertEqual(started, [1, 2, 3])
+        self.assertIn("[QUEUE] finished", log)
 
 
 class JudgeScoresReachThePageTests(TmpRepoCase):

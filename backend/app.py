@@ -733,6 +733,13 @@ def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: b
             manifest_id=step.get("manifest_id"), cells=None if step.get("manifest_id") else cell_list,
             purpose=step.get("purpose") or None, experiment=label)
         yield f"##### [QUEUE] step {i}/{len(steps)} end #####\n"
+        halted = runner.halt_reason()
+        if halted:
+            # The step stopped itself because the setup looks broken; the later steps would hit the same thing.
+            left = len(steps) - i
+            yield (f"\n##### [QUEUE] stopped after step {i}/{len(steps)} ({halted}); {left} later step(s) were not started. "
+                   "Fix the cause, then run the queue again: finished runs are kept and only missing cells run. #####\n")
+            return
     yield "\n##### [QUEUE] finished #####\n"
 
 
