@@ -629,6 +629,34 @@ class IncompleteReasonInTheTableTests(TmpRepoCase):
         self.assertEqual(app_module._incomplete_reason({"row": None, "incomplete_reason": "stored", "log_file": "a.log"}), "stored")
 
 
+class ResultFileBelongsToOneRunTests(unittest.TestCase):
+    """A run that died before writing a result must not be given the previous repeat's row."""
+
+    def test_the_second_run_does_not_reuse_the_first_runs_file(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        from unittest import mock
+        import runner
+        tmp = Path(tempfile.mkdtemp())
+        folder = tmp / "results" / "1030_1800"
+        folder.mkdir(parents=True)
+        (folder / "reliops_v1_ALL_results.csv").write_text("problem_id,Diagnosis.success\ngc,False\n", encoding="utf-8")
+        runner._CLAIMED_RESULT_FILES.clear()
+        with mock.patch.object(runner, "sregym_dir", return_value=tmp):
+            first = runner._latest_result_row("gc", time.time() - 60)   # run 1: its own file
+            second = runner._latest_result_row("gc", time.time() - 3)   # run 2 died early: the same file is only 3 s old
+            self.assertEqual(first["Diagnosis.success"], "False")
+            self.assertIsNone(second)
+            # A new run writes a new file, and that one is found.
+            folder2 = tmp / "results" / "1030_1802"
+            folder2.mkdir()
+            (folder2 / "reliops_v1_ALL_results.csv").write_text("problem_id,Diagnosis.success\ngc,True\n", encoding="utf-8")
+            third = runner._latest_result_row("gc", time.time() - 3)
+            self.assertEqual(third["Diagnosis.success"], "True")
+        runner._CLAIMED_RESULT_FILES.clear()
+
+
 class QueueStopsWhenAStepHaltsTests(TmpRepoCase):
     """A step that stops itself (credentials, cluster) used to end only that step: the queue went on to the
     next one, although the message said the queue stops. The later steps would hit the same fault."""

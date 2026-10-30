@@ -1109,6 +1109,13 @@ def stream_demo() -> Iterator[str]:
         time.sleep(0.5)
 
 
+# Result files already matched to a run. SREGym writes one `<agent>_ALL_results.csv` per invocation, so a file belongs to
+# at most one run. Without this, a run that died before writing anything (an invalid key at the judge pre-flight, 10
+# seconds in) was matched to the previous repeat's file, because that file was written seconds before this run began,
+# and was recorded as a second copy of the previous result.
+_CLAIMED_RESULT_FILES: set[str] = set()
+
+
 def _latest_result_row(problem: str, after_ts: float) -> dict | None:
     """Best-effort: find SREGym's own summary CSV written after the run started and pull out the
     row for this problem. Returns None rather than a guess if nothing matches — a run with no
@@ -1127,6 +1134,8 @@ def _latest_result_row(problem: str, after_ts: float) -> dict | None:
     for csv_path in candidates:
         if csv_path.stat().st_mtime < after_ts - 5:
             break
+        if str(csv_path) in _CLAIMED_RESULT_FILES:
+            continue
         try:
             with csv_path.open(encoding="utf-8", newline="") as f:
                 rows = list(csv.DictReader(f))
@@ -1134,6 +1143,7 @@ def _latest_result_row(problem: str, after_ts: float) -> dict | None:
             continue
         for row in reversed(rows):
             if row.get("problem_id") == problem or row.get("problem") == problem:
+                _CLAIMED_RESULT_FILES.add(str(csv_path))
                 return row
     return None
 
