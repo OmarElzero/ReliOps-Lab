@@ -5,10 +5,23 @@ set -euo pipefail
 cd "$(dirname "$0")"
 PORT="${PORT:-8765}"
 
-if [ ! -d .venv ]; then
-  echo "[first run] creating the virtualenv and installing requirements..."
-  python3 -m venv .venv
-  .venv/bin/pip install -q -r requirements.txt
+# A half-made virtualenv (for example one interrupted earlier, with no bin/activate) is rebuilt.
+if [ ! -f .venv/bin/activate ]; then
+  echo "[setup] creating the virtualenv..."
+  rm -rf .venv
+  if command -v uv >/dev/null 2>&1; then
+    uv venv -q .venv
+  else
+    python3 -m venv .venv || { echo "python3 -m venv failed. On Ubuntu or WSL run: sudo apt install python3-venv"; exit 1; }
+  fi
+fi
+if [ ! -x .venv/bin/uvicorn ]; then
+  echo "[setup] installing requirements..."
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install -q --python .venv/bin/python -r requirements.txt
+  else
+    .venv/bin/python -m pip install -q -r requirements.txt
+  fi
 fi
 
 URL="http://localhost:${PORT}"

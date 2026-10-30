@@ -70,7 +70,7 @@ def summary_svg(groups: list[dict], metric: str) -> str:
             out.append(f'<line x1="{x1:.1f}" y1="{yc}" x2="{x2:.1f}" y2="{yc}" stroke="#111" stroke-width="1.5"/>')
             for x in (x1, x2):
                 out.append(f'<line x1="{x:.1f}" y1="{yc - 5}" x2="{x:.1f}" y2="{yc + 5}" stroke="#111" stroke-width="1.5"/>')
-        out.append(f'<text x="{left + plot_w + 8}" y="{y + bar_h - 3}" fill="#111">{g["passes"]}/{g["n"]}'
-                   f'{f" (+{g["incomplete"]} incomplete)" if g.get("incomplete") else ""}</text>')
+        extra = f" (+{g['incomplete']} incomplete)" if g.get("incomplete") else ""
+        out.append(f'<text x="{left + plot_w + 8}" y="{y + bar_h - 3}" fill="#111">{g["passes"]}/{g["n"]}{extra}</text>')
     out.append("</svg>")
     return "\n".join(out)

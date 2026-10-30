@@ -1,7 +1,7 @@
 # ReliOps Lab
 
 [![Status](https://img.shields.io/badge/status-v2%20%E2%80%94%20not%20yet%20run%20on%20a%20live%20cluster-orange)](#what-it-does-not-do-yet)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](requirements.txt)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](requirements.txt)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Part of ReliOps](https://img.shields.io/badge/part%20of-ReliOps-15675A)](https://github.com/OmarElzero/ReliOps)
 
@@ -78,7 +78,7 @@ yourself; Setup does it. The one thing to know because of this: **this project's
 
 ## Requirements
 
-- Python 3.11+, Docker running, `kubectl`/`helm`/`uv` (the GUI's Setup button installs `kind` for
+- Python 3.10+, Docker running, `kubectl`/`helm`/`uv` (the GUI's Setup button installs `kind` for
   you; see `ReliOps/docs/MANUAL-SETUP.md` §0–2 for the rest).
 - **GitHub access to `OmarElzero/ReliOps`.** That repo is currently **private**, so **Run setup**'s
   clone needs two things, each a one-time setup per machine, not per run:
