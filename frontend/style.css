@@ -150,6 +150,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .results-table td.r-fail { color: var(--bad); font-weight: 600; }
 .results-table td.r-unknown { color: var(--muted); }
 .results-table td.r-problem { font-family: var(--mono); white-space: normal; max-width: 280px; font-size: 12px; }
+.results-table td.r-why { white-space: normal; min-width: 220px; max-width: 320px; font-size: 12px; color: var(--muted); }
 .results-table td.r-interval { font-variant-numeric: tabular-nums; color: var(--muted); }
 .results-table td.r-config { white-space: normal; min-width: 220px; }
 .results-table td.r-wrap { white-space: normal; min-width: 110px; font-size: 11.5px; }

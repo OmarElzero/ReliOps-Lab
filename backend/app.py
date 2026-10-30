@@ -210,6 +210,29 @@ def doctor():
     return runner.doctor()
 
 
+_REASON_CACHE: dict[tuple[str, float], str] = {}
+
+
+def _incomplete_reason(r: dict) -> str:
+    """Why a run has no result. Newer records carry it; older ones get it read from their own log when that log is on
+    this machine (cached by file and modification time, so the table refresh does not re-read every log)."""
+    if not runner.run_incomplete(r.get("row")):
+        return ""
+    if r.get("incomplete_reason"):
+        return r["incomplete_reason"]
+    name = r.get("log_file") or ""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return ""
+    path = runner.reliops_dir() / "results" / "gui_logs" / name
+    try:
+        key = (name, path.stat().st_mtime)
+        if key not in _REASON_CACHE:
+            _REASON_CACHE[key] = runner.classify_incomplete(path.read_text(encoding="utf-8", errors="replace"))[1]
+        return _REASON_CACHE[key]
+    except OSError:
+        return ""
+
+
 def _collect_runs(limit: int) -> tuple[str, list[dict]]:
     """Every recorded run, newest first, as flat dicts the tables and the statistics both read.
     Firestore (the whole team's runs) wins when connected; this machine's own
@@ -241,6 +264,7 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "action_space": r.get("action_space"),
             "config_label": r.get("config_label") or "",
             "experiment": r.get("experiment") or "",
+            "incomplete_reason": _incomplete_reason(r),
             "run_class": r.get("run_class") or "exploration",
             "repeat_index": r.get("repeat_index"),
             "repeat_n": r.get("repeat_n"),

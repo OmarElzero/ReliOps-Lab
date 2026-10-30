@@ -397,7 +397,7 @@ class SetupGuardTests(unittest.TestCase):
         self.assertEqual(self.r.max_incomplete_streak({"RELIOPS_MAX_INCOMPLETE": "0"}), 0)
         self.assertEqual(self.r.max_incomplete_streak({"RELIOPS_MAX_INCOMPLETE": "x"}), 3)
 
-    def _run(self, rows, env=None):
+    def _run(self, rows, env=None, stream=("line\n",), nodes=None):
         import tempfile
         from pathlib import Path
         from unittest import mock
@@ -408,7 +408,8 @@ class SetupGuardTests(unittest.TestCase):
         with mock.patch.object(r, "sregym_dir", return_value=tmp), \
              mock.patch.object(r, "merged_env_vars", return_value=env or {}), \
              mock.patch.object(r, "preflight_warnings", return_value=[]), \
-             mock.patch.object(r, "_stream", side_effect=lambda *a, **k: iter(["line\n"])), \
+             mock.patch.object(r, "cluster_node_problems", return_value=nodes), \
+             mock.patch.object(r, "_stream", side_effect=lambda *a, **k: iter(list(stream))), \
              mock.patch.object(r, "_latest_result_row", side_effect=lambda *a, **k: rows.pop(0)), \
              mock.patch.object(r, "_find_transcript", return_value=None), \
              mock.patch.object(r, "_start_recorder", return_value=None), \
@@ -435,6 +436,76 @@ class SetupGuardTests(unittest.TestCase):
     def test_the_stop_can_be_turned_off(self):
         log, records = self._run([{"run_status": "incomplete"}] * 5, env={"RELIOPS_MAX_INCOMPLETE": "0"})
         self.assertEqual(len(records), 5)
+
+    # Lines copied from a real log (a run on 30 Oct 2026 where two kind workers never became Ready).
+    CLUSTER_LOG = [
+        "[10/30/26 11:38:40] INFO     __main__ - Judge pre-flight check passed\n",
+        "Timed out after 120s waiting for nodes to become Ready.\n",
+        "Timed out after 120s waiting for kind-worker to become Ready.\n",
+        "Timed out after 120s waiting for kind-worker3 to become Ready.\n",
+        "start_problem failed (deploy attempt 1/3): Timeout: Not all pods in namespace\n",
+        "'kube-system' reached the Ready state within 600 seconds.\n",
+        "Not all pods in namespace 'kube-system' reached the Ready state within 600 seconds.\n",
+        "Cleanup failed; refusing to retry deployment against uncertain state\n",
+        "Benchmark campaign aborted: Benchmark cleanup did not terminate during deployment\n",
+    ]
+
+    def test_reason_for_a_cluster_that_never_became_ready(self):
+        kind, why = self.r.classify_incomplete("".join(self.CLUSTER_LOG))
+        self.assertEqual(kind, "cluster")
+        self.assertIn("kind-worker, kind-worker3", why)
+        self.assertIn("kube-system", why)
+        self.assertIn("cleanup did not finish", why)
+
+    def test_cluster_timeouts_after_the_agent_started_are_not_called_a_cluster_problem(self):
+        kind, why = self.r.classify_incomplete("Starting agent now: reliops_v1\n" + "".join(self.CLUSTER_LOG))
+        self.assertNotEqual(kind, "cluster")
+
+    def test_reason_for_a_rejected_key_and_for_an_unknown_ending(self):
+        kind, why = self.r.classify_incomplete("litellm.BadRequestError: API key not valid. Please pass a valid API key.")
+        self.assertEqual(kind, "key")
+        self.assertIn("rejected", why)
+        kind, why = self.r.classify_incomplete("Starting agent now: reliops_v1\nsomething odd\n")
+        self.assertEqual((kind, "agent started" in why), ("other", True))
+        kind, why = self.r.classify_incomplete("some output\n")
+        self.assertEqual((kind, "before the agent started" in why), ("other", True))
+        self.assertEqual(self.r.classify_incomplete("")[0], "other")
+
+    def test_key_problem_through_a_gateway_is_not_read_as_a_dead_key(self):
+        log = "agent_api_base: https://opencode.ai/zen/v1, judge_api_base: unset\nAuthenticationError: Invalid credential\n"
+        self.assertEqual(self.r.classify_incomplete(log)[0], "other")
+
+    def test_queue_stops_at_the_first_run_that_ended_on_a_broken_cluster(self):
+        log, records = self._run([{"run_status": "incomplete"}] * 5, stream=self.CLUSTER_LOG)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["incomplete_kind"], "cluster")
+        self.assertIn("kind-worker3", records[0]["incomplete_reason"])
+        self.assertIn("kubectl get nodes", log)
+        self.assertNotIn("runs in a row ended incomplete", log)
+
+    def test_a_complete_run_has_no_reason(self):
+        good = {"Diagnosis.success": True, "Mitigation.success": True}
+        log, records = self._run([good] * 5, stream=self.CLUSTER_LOG)
+        self.assertEqual(len(records), 5)
+        self.assertTrue(all(r["incomplete_reason"] == "" and r["incomplete_kind"] == "" for r in records))
+
+    def test_nodes_not_ready_before_a_run_give_a_warning_and_the_run_still_goes_ahead(self):
+        log, records = self._run([{"Diagnosis.success": True, "Mitigation.success": True}] * 5, nodes=["kind-worker3 (NotReady)"])
+        self.assertIn("kind-worker3 (NotReady)", log)
+        self.assertEqual(len(records), 5)
+
+    def test_node_check_reads_kubectl_output_and_stays_quiet_when_it_cannot_run(self):
+        out = "kind-control-plane   Ready      control-plane   5d   v1.35\nkind-worker3   NotReady   <none>   5d   v1.35\n" \
+              "kind-worker2   Ready,SchedulingDisabled   <none>   5d   v1.35\n"
+        done = mock.Mock(returncode=0, stdout=out)
+        with mock.patch.object(self.r.shutil, "which", return_value="/usr/bin/kubectl"), \
+             mock.patch.object(self.r.subprocess, "run", return_value=done):
+            self.assertEqual(self.r.cluster_node_problems(), ["kind-worker3 (NotReady)"])
+        with mock.patch.object(self.r.shutil, "which", return_value=None):
+            self.assertIsNone(self.r.cluster_node_problems())
+        with mock.patch.object(self.r.shutil, "which", return_value="/usr/bin/kubectl"), \
+             mock.patch.object(self.r.subprocess, "run", return_value=mock.Mock(returncode=1, stdout="")):
+            self.assertIsNone(self.r.cluster_node_problems())
 
 
 class EnvFileTests(unittest.TestCase):
@@ -478,6 +549,25 @@ class EnvFileTests(unittest.TestCase):
         self.assertEqual(len(w), 1)
         self.assertIn("AQ.A", w[0])
         self.assertNotIn("xxxxxxxx", w[0])   # only the first 4 characters and the length are shown
+
+
+class IncompleteReasonInTheTableTests(TmpRepoCase):
+    """Runs recorded before the reason was stored get it read from their own log on this machine."""
+
+    def test_old_incomplete_runs_get_a_reason_from_their_log_and_complete_runs_get_none(self):
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        logs = self.tmp / "results" / "gui_logs"
+        logs.mkdir(parents=True)
+        (logs / "a.log").write_text("Timed out after 120s waiting for kind-worker3 to become Ready.\n", encoding="utf-8")
+        reason = app_module._incomplete_reason({"row": None, "log_file": "a.log"})
+        self.assertIn("kind-worker3", reason)
+        self.assertEqual(app_module._incomplete_reason({"row": {"Diagnosis.success": True}, "log_file": "a.log"}), "")
+        self.assertEqual(app_module._incomplete_reason({"row": None, "log_file": "../x"}), "")
+        self.assertEqual(app_module._incomplete_reason({"row": None, "log_file": "missing.log"}), "")
+        self.assertEqual(app_module._incomplete_reason({"row": None, "incomplete_reason": "stored", "log_file": "a.log"}), "stored")
 
 
 class KeyMarkFollowsTheValueTests(TmpRepoCase):

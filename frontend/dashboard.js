@@ -541,6 +541,9 @@
       tr.appendChild(passCell(r.e2e_pass));
       tr.appendChild(timeCell(r.ttd_s));
       tr.appendChild(timeCell(r.ttm_s));
+      const why = el("td", r.incomplete_reason || "—", r.incomplete_reason ? "r-why" : "");
+      if (r.incomplete_reason) why.title = r.incomplete_reason;
+      tr.appendChild(why);
       tr.appendChild(el("td", r.failure_mode_tag ? r.failure_mode_tag + (r.first_bad_step ? ` @${r.first_bad_step}` : "") : "—"));
       tr.appendChild(textButton(r));
       tr.appendChild(storyCell(r));

@@ -206,6 +206,73 @@ def max_incomplete_streak(env_vars: dict[str, str]) -> int:
         return 3
 
 
+# Wording SREGym's own output uses when the cluster could not be made ready (read from real logs, see the tests).
+_NODE_TIMEOUT_RE = re.compile(r"Timed out after \d+s waiting for (?:node )?(\S+?) to become Ready")
+_PODS_TIMEOUT_RE = re.compile(r"Not all pods in namespace '([^']+)' reached the Ready state")
+_CLEANUP_RE = re.compile(r"Cleanup failed; refusing to retry|cleanup did not (?:terminate|finish)", re.I)
+_ABORT_RE = re.compile(r"Benchmark campaign aborted: ([\s\S]{0,200})")
+_JUDGE_PREFLIGHT_RE = re.compile(r"pre-flight check (?:failed|error)|pre-flight[^\n]{0,40}\bfail", re.I)
+_API_BASE_RE = re.compile(r"agent_api_base:\s*(\S+?),")
+
+
+def classify_incomplete(log_text: str) -> tuple[str, str]:
+    """Why a run ended incomplete, read from its own log: (kind, one-line reason).
+
+    kind is "cluster" (the cluster was not ready, so nothing more can run until it is fixed), "key" (the model key was
+    rejected or ran out of quota), "judge" (the judge model check failed), or "other". The wording of the log lines is
+    SREGym's own; anything not recognised falls under "other" with a plain statement of whether the agent ever started."""
+    text = log_text or ""
+    if not text.strip():
+        return "other", "No log was recorded for this run."
+    agent_started = "Starting agent now" in text
+    if not agent_started:
+        parts = []
+        if _NODE_TIMEOUT_RE.search(text):
+            nodes = sorted({n for n in _NODE_TIMEOUT_RE.findall(text) if n != "nodes"})
+            parts.append(f"node{'s' if len(nodes) > 1 else ''} {', '.join(nodes)} did not become Ready" if nodes
+                         else "the nodes did not become Ready")
+        namespaces = sorted(set(_PODS_TIMEOUT_RE.findall(text)))
+        if namespaces:
+            parts.append("pods in " + ", ".join(namespaces) + " did not become Ready")
+        if _CLEANUP_RE.search(text):
+            parts.append("cleanup did not finish, so the benchmark refused to go on with an uncertain cluster")
+        if parts:
+            return "cluster", "Cluster not ready: " + "; ".join(parts) + "."
+    base = _API_BASE_RE.search(text)
+    via_base = bool(base) and base.group(1).lower() not in ("unset", "none")
+    key = classify_key_problem(text, via_custom_base=via_base)
+    if key:
+        word = "rejected" if key["status"] == "dead" else "out of quota"
+        return "key", f"Model key {word} ({key['reason']})."
+    if _JUDGE_PREFLIGHT_RE.search(text):
+        return "judge", "The judge model check failed before the run started (see the log)."
+    abort = _ABORT_RE.search(text)
+    if abort:
+        return "other", "Benchmark aborted: " + re.sub(r"\s+", " ", abort.group(1)).strip()[:140]
+    if agent_started:
+        return "other", "The agent started but the run ended without a result (see the log)."
+    return "other", "The run ended before the agent started (see the log)."
+
+
+def cluster_node_problems(timeout: int = 15) -> list[str] | None:
+    """Nodes that are not Ready right now, as ["kind-worker3 (NotReady)"]. None when it cannot be checked
+    (no kubectl, no cluster answering), which is never treated as a problem."""
+    if not shutil.which("kubectl"):
+        return None
+    try:
+        r = subprocess.run(["kubectl", "get", "nodes", "--no-headers", "--request-timeout=10s"],
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    rows = [line.split() for line in r.stdout.splitlines() if line.strip()]
+    rows = [c for c in rows if len(c) >= 2]
+    if not rows:
+        return None
+    return [f"{c[0]} ({c[1]})" for c in rows if not c[1].startswith("Ready")]
+
+
 def key_looks_garbled(value: str) -> bool:
     """True when a key value carries text that is never part of a key (whitespace, quotes, '#').
 
@@ -559,7 +626,7 @@ _RUN_LOG_HEADER_FALLBACK = [
 # has (and skipped if the template already lists them), so the template stays the single source of truth
 # and this tool never silently drops the diagnosis text again.
 LAB_EXTRA_COLUMNS = [
-    "judge_model_id", "run_by", "run_class", "config_label", "experiment",
+    "judge_model_id", "run_by", "run_class", "config_label", "experiment", "incomplete_reason",
     "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel", "manifest_id",
 ]
 
@@ -734,6 +801,7 @@ def append_csv_run(record: dict) -> Path:
         "run_class": record.get("run_class", ""),
         "config_label": record.get("config_label", ""),
         "experiment": record.get("experiment", ""),
+        "incomplete_reason": record.get("incomplete_reason", ""),
         "diagnosis_text": record.get("diagnosis_text"),
         "judge_reasoning": record.get("judge_reasoning"),
         "judge_checklist": record.get("judge_checklist"),
@@ -1327,6 +1395,11 @@ def stream_campaign(
             f"\n===== [{i}/{total_runs}] problem={problem}{repeat_note} agent={agent} "
             f"action_space={action_space or '-'} =====\n"
         )
+        bad_nodes = cluster_node_problems()
+        if bad_nodes:
+            yield (f"[check] cluster nodes not Ready right now: {', '.join(bad_nodes)}. SREGym tries to revive a stopped kubelet "
+                   "at the start of each problem, so the run goes ahead; if it ends with 'Cluster not ready', the queue stops "
+                   "and the cluster needs fixing first (kubectl get nodes).\n")
         started_at = time.time()
         run_id = str(__import__("uuid").uuid4())
         recorder = None
@@ -1372,6 +1445,12 @@ def stream_campaign(
         row = _latest_result_row(problem, started_at)
         diagnosis = extract_diagnosis(row)
         transcript_rel = _find_transcript(problem, started_at)
+        incomplete_kind, incomplete_reason = "", ""
+        if run_incomplete(row):
+            try:
+                incomplete_kind, incomplete_reason = classify_incomplete(problem_log_path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                incomplete_kind, incomplete_reason = "other", "No log was recorded for this run."
         record = {
             "run_id": run_id,
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1396,6 +1475,9 @@ def stream_campaign(
             "manifest_id": manifest_id,
             "git_commit": commit,
             "key_slot": key_slot,
+            # Why the run has no result (empty for a complete run); the Results table shows it.
+            "incomplete_kind": incomplete_kind,
+            "incomplete_reason": incomplete_reason,
             **transcript_stats(transcript_rel),
             **diagnosis,  # diagnosis_text, judge_reasoning, diagnosis_d1..d3, diagnosis_composite
             "row": row,  # SREGym's own metrics.md-shaped row, or None if we couldn't locate it
@@ -1408,6 +1490,16 @@ def stream_campaign(
         yield f"----- recorded result for {problem}: {found_note}{repeat_suffix} -----\n"
 
         incomplete_streak = incomplete_streak + 1 if run_incomplete(row) else 0
+        if streak_limit and incomplete_kind == "cluster" and i < total_runs and not _stop_event.is_set():
+            # A broken cluster does not heal between runs, and each attempt costs a long wait (about 27 minutes in a real
+            # log), so the queue stops at the first one instead of waiting for the streak limit.
+            yield (
+                f"\n[stopped: {incomplete_reason} The next runs would hit the same cluster. Check it with 'kubectl get nodes'; "
+                "if a node stays NotReady, restart the kind node containers (docker restart kind-worker ...) or rebuild with "
+                "'kind delete cluster' and run Setup again. Finished runs are kept and only missing cells run next time. "
+                "Set RELIOPS_MAX_INCOMPLETE=0 in .env to turn this stop off.]\n"
+            )
+            return
         if streak_limit and incomplete_streak >= streak_limit and i < total_runs and not _stop_event.is_set():
             yield (
                 f"\n[stopped: {incomplete_streak} runs in a row ended incomplete, which usually means the setup is broken "

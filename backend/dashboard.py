@@ -214,7 +214,7 @@ def build(all_runs: list[dict], f: dict, metric: str, manifests: list[dict], lab
     trim = sorted(runs, key=lambda r: r.get("timestamp_utc") or "", reverse=True)[:RUN_LIMIT]
     cols = ("run_id", "timestamp_utc", "problem_id", "category", "app", "purpose", "purpose_source", "agent_id", "model_id",
             "action_space", "config_label", "experiment", "judge_model_id", "run_class", "repeat_index", "e2e_pass", "diagnosis_pass",
-            "mitigation_pass", "ttd_s", "ttm_s", "failure_mode_tag", "first_bad_step", "review_note", "run_by", "manifest_id",
+            "mitigation_pass", "ttd_s", "ttm_s", "incomplete_reason", "failure_mode_tag", "first_bad_step", "review_note", "run_by", "manifest_id",
             "git_commit", "key_slot", "has_story", "log_file", "total_tokens")
     rows = []
     for r in trim:
