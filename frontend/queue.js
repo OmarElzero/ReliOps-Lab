@@ -607,6 +607,7 @@
     try { st = await jsonGet("/api/state"); } catch (e) { return; }
     const prev = job;
     job = st.job;
+    renderKeyAlerts(st.key_alerts);
     if (job && job.state === "running" && !es) openStream(`/api/job/stream?offset=${lastId > 0 ? lastId : -300}`);
     renderJob(prev);
   }
@@ -693,17 +694,58 @@
     if (!d.keys.length) box.append(h("p", { class: "hint", text: "No model key saved yet." }));
     d.keys.forEach((k) => {
       const until = k.status === "exhausted" && k.until ? " until " + new Date(k.until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
-      const row = h("div", { class: "key-row" },
-        h("code", { text: k.var }), h("span", { class: "tag", text: k.owner !== k.var ? k.owner : "" }),
-        h("span", { class: "pill " + (k.status === "ok" ? "ok" : "warn"), title: k.reason || "" }, h("span", { class: "dot" }), k.status === "ok" ? "ok" : k.status === "dead" ? "dead" : "resting" + until));
-      const set = (status) => async () => { await jsonPost("/api/keys/mark", { var: k.var, status, by: who() }); loadKeyHealth(); };
+      const row = h("div", { class: "key-row", "data-var": k.var });
+      if (k.rotatable) {
+        const cb = h("input", { type: "checkbox", "aria-label": "rotate " + k.var, title: k.status === "dead" ? "Dead: replace the key or clear the mark first" : "Include in rotation" });
+        cb.checked = !!k.in_pool; cb.disabled = k.status === "dead" && !k.in_pool;
+        row.append(cb);
+      }
+      row.append(h("code", { text: k.var }));
+      if (k.rotatable) row.append(h("input", { type: "text", class: "ko", placeholder: "owner", value: k.owner !== k.var ? k.owner : "", "aria-label": "owner of " + k.var }));
+      row.append(h("span", { class: "pill " + (k.status === "ok" ? "ok" : "warn"), title: k.reason || "" }, h("span", { class: "dot" }), k.status === "ok" ? "ok" : k.status === "dead" ? "dead" : "resting" + until));
+      const set = (status) => async () => { await jsonPost("/api/keys/mark", { var: k.var, status, by: who() }); loadKeyHealth(); pollState(); };
       row.append(h("button", { type: "button", class: "ghost small", text: "Mark dead", onclick: set("dead") }),
                  h("button", { type: "button", class: "ghost small", text: "Mark resting for today", onclick: set("exhausted") }),
                  h("button", { type: "button", class: "ghost small", text: "Clear", onclick: set("ok") }));
       if (k.source) row.append(h("span", { class: "hint", style: "flex-basis:100%;margin:0", text: `from ${k.source}${k.shape ? " · " + k.shape : ""}${k.note ? ". " + k.note : ""}` }));
       box.append(row);
     });
-    $("key-health-help").textContent = d.pool ? "Rotation is on: each run uses the next healthy key." : d.help;
+    $("key-health-help").textContent = d.pool ? "Rotation is ON: each run uses the next healthy ticked key." : "Rotation is OFF: every run uses GEMINI_API_KEY.";
+  }
+  $("key-pool-save").addEventListener("click", async () => {
+    const vars = [], owners = {};
+    document.querySelectorAll("#key-health .key-row").forEach((r) => {
+      const cb = r.querySelector('input[type="checkbox"]');
+      if (cb && cb.checked) { const v = r.getAttribute("data-var"); vars.push(v); const o = r.querySelector("input.ko"); if (o && o.value.trim()) owners[v] = o.value.trim(); }
+    });
+    const msg = $("key-pool-msg");
+    const { ok, data } = await jsonPost("/api/keys/pool", { vars, owners });
+    msg.textContent = ok ? (data.message || "saved") : (data.error || "could not save");
+    loadKeyHealth(); pollState();
+  });
+
+  // ---- Key alert bar (every tab): a dead key needs a person; a resting one comes back by itself ----------------
+  const baseTitle = document.title;
+  function renderKeyAlerts(alerts) {
+    const bar = $("key-alert");
+    alerts = alerts || [];
+    bar.innerHTML = "";
+    bar.hidden = alerts.length === 0;
+    const dead = alerts.filter((a) => a.status === "dead");
+    document.title = dead.length ? `⚠ ${dead.length} dead key${dead.length > 1 ? "s" : ""} · ${baseTitle}` : baseTitle;
+    alerts.forEach((a) => {
+      const who_ = a.owner && a.owner !== a.var ? `${a.var} (${a.owner})` : a.var;
+      const row = h("div", { class: "ka-row" + (a.status === "dead" ? "" : " rest") });
+      if (a.status === "dead") {
+        row.append(h("span", { class: "ka-text" }, h("strong", { text: "Dead key: " }), `${who_}. ${a.reason || "the provider rejected it"}. ${a.in_pool ? "It is skipped while it stays dead. Remove it from the rotation, or replace the key value in .env (the mark clears by itself)." : "Runs will stop until you replace the key value in .env."}`));
+        if (a.in_pool) row.append(h("button", { type: "button", class: "secondary small", text: "Remove from rotation", onclick: async () => { await jsonPost("/api/keys/pool/remove", { var: a.var }); loadKeyHealth(); pollState(); } }));
+        row.append(h("button", { type: "button", class: "ghost small", text: "It works: clear the mark", onclick: async () => { await jsonPost("/api/keys/mark", { var: a.var, status: "ok", by: who() }); loadKeyHealth(); pollState(); } }));
+      } else {
+        const t = a.until ? new Date(a.until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "later";
+        row.append(h("span", { class: "ka-text" }, h("strong", { text: "Resting: " }), `${who_} used up its quota and is back at ${t}.`));
+      }
+      bar.append(row);
+    });
   }
   TAB_LOADERS.run = loadKeyHealth;
 

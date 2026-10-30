@@ -44,7 +44,9 @@ The one-off page for setting up a machine and for a single quick run.
 
 The Lab's `.env` reader follows the usual rules: a quoted value ends at its closing quote, so `GEMINI_API_KEY="AIza..." # note` is read as the key alone; comment and blank lines between entries are ignored; `export KEY=value` works. Each key row in Key health shows where its value comes from (Lab .env, the ReliOps clone's .env, or your shell) and only its first 4 characters and its length. A dead mark is dropped by itself when the key's value changes.
 
-Rotating several keys is **off** unless you add `RELIOPS_KEY_POOL=GEMINI_API_KEY,GEMINI_API_KEY_2` (and optionally `RELIOPS_KEY_OWNERS=omar,sara`) to `.env`. Each run then uses the next healthy key, dead and resting keys are skipped, the run records which slot and owner it used, and if every key is resting the queue waits and carries on by itself. If every key is dead it stops and tells you.
+Rotating several keys is **off** until you turn it on in **Setup & quick run → Key health and rotation**: tick two or more Gemini keys (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`, ...), give each an owner name if you like, and press **Save rotation** (it writes `RELIOPS_KEY_POOL` and `RELIOPS_KEY_OWNERS` in the Lab's `.env`; you can also write them by hand). Each run then uses the next healthy key, dead and resting keys are skipped, the run records which slot and owner it used, and if every key is resting the queue waits and carries on by itself. If every key is dead it stops and tells you.
+
+**Dead key alert.** When a run shows that a key was rejected, a red bar appears at the top of every tab (and the browser tab title gets a warning) naming the key and its owner, with **Remove from rotation** and **It works: clear the mark**. A key that is out of quota shows as a quieter "resting until" line. Replacing the key's value in `.env` clears the mark by itself.
 
 ### Guards against a broken setup
 

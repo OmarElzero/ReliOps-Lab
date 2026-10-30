@@ -502,3 +502,66 @@ class KeyMarkFollowsTheValueTests(TmpRepoCase):
             k = c.get("/api/keys").json()["keys"][0]
             self.assertEqual(k["status"], "ok")
             self.assertTrue(runner.key_available("GEMINI_API_KEY"))
+
+
+class RotationFromTheScreenTests(TmpRepoCase):
+    def setUp(self):
+        super().setUp()
+        try:
+            from fastapi.testclient import TestClient
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi/httpx not available: {e}")
+        import runner
+        self.runner = runner
+        self.app_module = app_module
+        (self.tmp / "results").mkdir(exist_ok=True)
+        self.env = self.tmp / "lab.env"
+        self.env.write_text('# my keys\nGEMINI_API_KEY="AIza' + "a" * 35 + '" # main\nGEMINI_API_KEY_2="AIza' + "b" * 35
+                            + '"\nGEMINI_API_KEY_3=AIza' + "c" * 35 + "\nOTHER=1\n")
+        p = mock.patch.object(runner, "lab_env_path", return_value=self.env)
+        p.start()
+        self.addCleanup(p.stop)
+        self.c = TestClient(app_module.app)
+
+    def test_write_pool_changes_only_its_two_lines_and_turns_off(self):
+        r = self.runner
+        r.write_pool(["GEMINI_API_KEY", "GEMINI_API_KEY_2"], {"GEMINI_API_KEY": "omar", "GEMINI_API_KEY_2": "sara, x"})
+        text = self.env.read_text()
+        self.assertIn("RELIOPS_KEY_POOL=GEMINI_API_KEY,GEMINI_API_KEY_2\n", text)
+        self.assertIn("RELIOPS_KEY_OWNERS=omar,sara  x\n", text)       # a comma in a name cannot split the list
+        self.assertIn('# my keys', text)
+        self.assertIn("OTHER=1", text)
+        pool = r.key_pool(r.read_env_file(self.env))
+        self.assertEqual([p["owner"] for p in pool], ["omar", "sara  x"])
+        self.assertEqual(r.pool_target(pool), "GEMINI_API_KEY")
+        r.write_pool(["GEMINI_API_KEY_2"], {})                         # one key: rotation off
+        self.assertNotIn("RELIOPS_KEY_POOL", self.env.read_text())
+        self.assertIn("OTHER=1", self.env.read_text())
+
+    def test_screen_flow_save_dead_alert_remove(self):
+        c = self.c
+        keys = {k["var"]: k for k in c.get("/api/keys").json()["keys"]}
+        self.assertEqual(sorted(keys), ["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"])
+        self.assertTrue(all(not k["in_pool"] for k in keys.values()))
+        self.assertEqual(c.post("/api/keys/pool", json={"vars": ["NOPE"]}).status_code, 400)
+        r = c.post("/api/keys/pool", json={"vars": ["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"],
+                                           "owners": {"GEMINI_API_KEY_2": "sara"}}).json()
+        self.assertTrue(r["rotation"])
+        k = c.get("/api/keys").json()
+        self.assertTrue(k["pool"])
+        self.assertEqual(next(x for x in k["keys"] if x["var"] == "GEMINI_API_KEY_2")["owner"], "sara")
+        self.assertEqual(c.get("/api/state").json()["key_alerts"], [])
+        self.app_module._record_key_event("GEMINI_API_KEY_2", "sara", "dead", None, "API key not valid")
+        alerts = c.get("/api/state").json()["key_alerts"]
+        self.assertEqual([(a["var"], a["owner"], a["status"], a["in_pool"]) for a in alerts], [("GEMINI_API_KEY_2", "sara", "dead", True)])
+        out = c.post("/api/keys/pool/remove", json={"var": "GEMINI_API_KEY_2"}).json()
+        self.assertEqual(out["left"], 2)
+        self.assertEqual(c.get("/api/state").json()["key_alerts"], [])     # no longer in use
+        self.assertIn("GEMINI_API_KEY,GEMINI_API_KEY_3", self.env.read_text())
+
+    def test_a_single_dead_key_raises_an_alert_without_a_remove_button_case(self):
+        self.app_module._record_key_event("GEMINI_API_KEY", "you", "dead", None, "AuthenticationError")
+        a = self.c.get("/api/state").json()["key_alerts"]
+        self.assertEqual(len(a), 1)
+        self.assertFalse(a[0]["in_pool"])

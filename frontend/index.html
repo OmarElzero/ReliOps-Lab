@@ -29,6 +29,7 @@
     </div>
   </div>
 </header>
+<div id="key-alert" class="key-alert" role="alert" hidden></div>
 
 <main>
   <div id="tab-queue" class="tab-panel">
@@ -196,9 +197,16 @@
       read.</p>
     <p class="hint" id="key-status"></p>
 
-    <label>Key health</label>
+    <label>Key health and rotation</label>
     <div id="key-health" class="key-health"></div>
+    <div class="key-actions">
+      <button id="key-pool-save" type="button" class="secondary">Save rotation</button>
+      <span class="hint" id="key-pool-msg"></span>
+    </div>
     <p class="hint" id="key-health-help"></p>
+    <p class="hint">Rotation spreads runs over several Gemini keys: each run uses the next healthy one, dead or resting keys are skipped,
+      and each run records which key slot and owner it used. Tick two or more keys and press <strong>Save rotation</strong>; untick all but one to switch it off.
+      Use keys that belong to the people who run them.</p>
 
     <label>Firebase (shared results)</label>
     <p class="hint">Read straight from this project's own <code>.env</code> (same file as the

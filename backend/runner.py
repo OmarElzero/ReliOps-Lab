@@ -121,13 +121,19 @@ def merged_env_vars() -> dict[str, str]:
 _key_counter = 0
 
 
+def pool_target(pool: list[dict]) -> str:
+    """The variable a run's chosen key is copied into: the one the agent actually reads."""
+    return "GEMINI_API_KEY" if pool and all(GEMINI_FAMILY_RE.match(k["var"]) for k in pool) else pool[0]["var"]
+
+
 def key_pool(env_vars: dict[str, str]) -> list[dict]:
     """Optional round-robin over several API keys. Off unless the .env names a pool:
 
         RELIOPS_KEY_POOL=GEMINI_API_KEY,GEMINI_API_KEY_2,GEMINI_API_KEY_3
         RELIOPS_KEY_OWNERS=omar,sara,ahmed        (optional, same order; shown in the log and stored on each run)
 
-    The first name is the variable the agent reads; each run gets the next key in the list copied into it.
+    Each run gets the next key in the list copied into the variable the agent reads (GEMINI_API_KEY for Gemini keys,
+    otherwise the first name in the list).
     Returns [{var, owner, value}] for the listed variables that have a value. The secret is never logged or stored;
     a run records only its slot and owner."""
     names = [n.strip() for n in (env_vars.get("RELIOPS_KEY_POOL") or "").split(",") if n.strip()]
@@ -899,6 +905,39 @@ def _write_key_to(env_path: Path, provider: str, value: str) -> None:
     env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+def _set_env_line(env_path: Path, name: str, value: str | None) -> None:
+    """Sets `NAME=value` (unquoted, one line) in a .env file, replacing the existing line for that name, or removes it
+    when value is None. Every other line is left exactly as it was."""
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    out, done = [], False
+    for line in lines:
+        if line.lstrip().startswith(f"{name}=") and not line.startswith((" ", "\t")):
+            if value is not None and not done:
+                out.append(f"{name}={value}")
+            done = True
+        else:
+            out.append(line)
+    if value is not None and not done:
+        out.append(f"{name}={value}")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+GEMINI_FAMILY_RE = re.compile(r"^GEMINI_API_KEY(_[A-Za-z0-9]+)?$")
+
+
+def write_pool(var_names: list[str], owners: dict[str, str]) -> None:
+    """Turns key rotation on (two or more keys) or off, in this tool's own .env. Only the two settings lines change."""
+    names = [n for n in var_names if GEMINI_FAMILY_RE.match(n)]
+    if len(names) < 2:
+        _set_env_line(lab_env_path(), "RELIOPS_KEY_POOL", None)
+        _set_env_line(lab_env_path(), "RELIOPS_KEY_OWNERS", None)
+        return
+    clean = lambda o: re.sub(r"[,\r\n#]", " ", o or "").strip()   # owners are shown in the log; keep the line simple
+    _set_env_line(lab_env_path(), "RELIOPS_KEY_POOL", ",".join(names))
+    _set_env_line(lab_env_path(), "RELIOPS_KEY_OWNERS", ",".join(clean(owners.get(n)) for n in names))
+
+
 def write_key(provider: str, value: str) -> None:
     """Saves an API key into this tool's own .env (lab_env_path()) — the file next to backend/
     and frontend/, stays on this machine, never sent anywhere by this tool. Also mirrors it into
@@ -1287,7 +1326,7 @@ def stream_campaign(
             recorder = _start_recorder(namespace_for(problem), walkthrough_dir(run_id) / "cluster.jsonl")
         env = dict(base_env)
         if picked:
-            env[pool[0]["var"]] = picked[1]["value"]
+            env[pool_target(pool)] = picked[1]["value"]
         if os.environ.get("REACT_V1_LOG_OBS") is None:
             env["REACT_V1_LOG_OBS"] = "on"  # record what each command returned, for the story
         cmd = [

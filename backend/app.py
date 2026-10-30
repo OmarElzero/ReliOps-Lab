@@ -499,7 +499,7 @@ def state():
     """What the server is doing right now. Polled by the header so a run started in another tab (or
     before a page reload) is always visible, with a way to stop it."""
     job = jobs.current()
-    return {"busy": jobs.busy(), "job": job.describe() if job else None}
+    return {"busy": jobs.busy(), "job": job.describe() if job else None, "key_alerts": _key_alerts()}
 
 
 @app.get("/api/job/stream")
@@ -971,15 +971,16 @@ def _key_source(var: str) -> tuple[str, str]:
     return src, f"{val[:4]}… · {len(val)} characters"
 
 
-@app.get("/api/keys")
-def key_health():
-    """The model keys this machine has, with their health. Pool slots (RELIOPS_KEY_POOL) first."""
-    env = runner.merged_env_vars()
-    pool = runner.key_pool(env)
-    states = _key_states()
-    names = [p["var"] for p in pool] or [k for k in runner.KNOWN_PROVIDERS if env.get(k) or os.environ.get(k)]
+def _gemini_vars(env: dict) -> list[str]:
+    names = {k for k in list(env) + list(os.environ) if runner.GEMINI_FAMILY_RE.match(k) and (env.get(k) or os.environ.get(k))}
+    return sorted(names, key=lambda n: (n != "GEMINI_API_KEY", n))
+
+
+def _key_rows(env: dict, pool: list[dict], states: dict) -> list[dict]:
+    in_pool = [p["var"] for p in pool]
+    names = _gemini_vars(env) + [k for k in runner.KNOWN_PROVIDERS if k != "GEMINI_API_KEY" and (env.get(k) or os.environ.get(k))]
     out = []
-    for n in names:
+    for n in dict.fromkeys(in_pool + names):
         st = states.get(n) or {}
         status = st.get("status") or "ok"
         if status == "exhausted" and (st.get("until") or 0) <= __import__("time").time():
@@ -988,10 +989,69 @@ def key_health():
         source, shape = _key_source(n)
         odd = n.startswith("GEMINI") and bool(shape) and not (shape.startswith("AIza") and "39 characters" in shape)
         out.append({"var": n, "owner": owner, "status": status, "until": st.get("until"), "reason": st.get("reason") or "",
-                    "source": source, "shape": shape,
+                    "source": source, "shape": shape, "in_pool": n in in_pool, "rotatable": bool(runner.GEMINI_FAMILY_RE.match(n)),
                     "note": "Gemini keys from AI Studio usually start with AIza and have 39 characters; this one does not." if odd else ""})
-    return {"pool": len(pool) >= 2, "keys": out,
-            "help": "Set RELIOPS_KEY_POOL=GEMINI_API_KEY,GEMINI_API_KEY_2 (and optionally RELIOPS_KEY_OWNERS=name1,name2) in the Lab's .env to rotate. Off by default."}
+    return out
+
+
+@app.get("/api/keys")
+def key_health():
+    """The model keys this machine has, with their health and whether they are in the rotation pool."""
+    env = runner.merged_env_vars()
+    pool = runner.key_pool(env)
+    return {"pool": len(pool) >= 2, "keys": _key_rows(env, pool, _key_states()),
+            "help": "Tick two or more Gemini keys and press Save to rotate between them. Off until you do."}
+
+
+class PoolIn(BaseModel):
+    vars: list[str]
+    owners: dict[str, str] = {}
+
+
+@app.post("/api/keys/pool")
+def key_pool_save(body: PoolIn):
+    """Rotation on/off, from the screen: writes RELIOPS_KEY_POOL / RELIOPS_KEY_OWNERS in this tool's .env."""
+    env = runner.merged_env_vars()
+    have = set(_gemini_vars(env))
+    bad = [v for v in body.vars if v not in have]
+    if bad:
+        return JSONResponse({"error": "not a saved Gemini key: " + ", ".join(bad)}, status_code=400)
+    runner.write_pool(body.vars, body.owners)
+    n = len(body.vars)
+    return {"ok": True, "rotation": n >= 2, "message": f"rotation on for {n} keys" if n >= 2 else "rotation is off (it needs two or more keys)"}
+
+
+class PoolRemoveIn(BaseModel):
+    var: str
+
+
+@app.post("/api/keys/pool/remove")
+def key_pool_remove(body: PoolRemoveIn):
+    env = runner.merged_env_vars()
+    pool = runner.key_pool(env)
+    keep = [p["var"] for p in pool if p["var"] != body.var]
+    runner.write_pool(keep, {p["var"]: p["owner"] for p in pool})
+    return {"ok": True, "rotation": len(keep) >= 2, "left": len(keep)}
+
+
+def _key_alerts() -> list[dict]:
+    """Keys in use that need attention: dead (a person must replace or remove them) or resting (comes back by itself)."""
+    env = runner.merged_env_vars()
+    pool = runner.key_pool(env)
+    states = _key_states()
+    in_use = [p["var"] for p in pool] or [v for v in ("GEMINI_API_KEY",) if env.get(v) or os.environ.get(v)]
+    now = __import__("time").time()
+    out = []
+    for v in in_use:
+        st = states.get(v) or {}
+        status = st.get("status")
+        if status == "exhausted" and (st.get("until") or 0) <= now:
+            continue
+        if status in ("dead", "exhausted"):
+            owner = next((p["owner"] for p in pool if p["var"] == v), v)
+            out.append({"var": v, "owner": owner, "status": status, "until": st.get("until"), "reason": st.get("reason") or "",
+                        "in_pool": v in [p["var"] for p in pool], "pool_size": len(pool)})
+    return out
 
 
 class KeyMarkIn(BaseModel):

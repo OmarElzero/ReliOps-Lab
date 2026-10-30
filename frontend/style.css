@@ -437,3 +437,14 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 
 .key-health { display: flex; flex-direction: column; gap: 6px; }
 .key-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+/* Key alert bar: a dead key needs a person to replace or remove it, so it is shown on every tab */
+.key-alert { position: sticky; top: 0; z-index: 30; display: flex; flex-direction: column; gap: 6px;
+  padding: 8px max(16px, env(safe-area-inset-left, 0px)); background: var(--bad-soft); border-bottom: 1px solid var(--bad); }
+.key-alert .ka-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13.5px; min-width: 0; }
+.key-alert .ka-row strong { color: var(--bad); }
+.key-alert .ka-row.rest strong { color: var(--muted); }
+.key-alert .ka-text { flex: 1 1 280px; min-width: 0; overflow-wrap: anywhere; }
+.key-row input[type="text"] { width: 120px; min-height: 28px; padding: 2px 8px; font-size: 12.5px; }
+.key-row input[type="checkbox"] { width: 16px; height: 16px; }
+.key-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
