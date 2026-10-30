@@ -56,6 +56,18 @@ Rotating several keys is **off** until you turn it on in **Setup & quick run →
 - **Why a run is incomplete.** The Results table has a **Why incomplete** column. New runs store the reason; older runs get it read from their own log when that log is on this machine. It reads SREGym's own wording (nodes or pods not Ready, cleanup not finished, key rejected or out of quota, judge check failed); anything else says whether the agent ever started.
 - **Rejected credentials.** A 401 / AuthenticationError marks the key dead when the request went straight to the provider. When `AGENT_API_BASE` is set it does not, because the gateway rejected the key, not Google.
 
+### Cluster health
+
+Setup & quick run has a **Cluster health** card. **Check now** reads the local kind cluster (nodes, `kube-system` pods that are not Ready or stuck in Terminating, the node containers, free memory and disk) and says in plain words what is wrong. It also refreshes whenever you open the tab. Checking only reads.
+
+Three repair buttons sit under it. Each one shows the exact commands and asks before it does anything, runs as the current job (its output streams in the Queue tab), and is refused while a run or queue is going:
+
+- **Restart the kind nodes**: `docker restart` on the node containers, then waits up to 4 minutes for every node to report Ready. Nothing is deleted. Try this first.
+- **Clear stuck system pods**: force-deletes pods that have been in Terminating for over a minute in `kube-system` only; their controllers create new ones.
+- **Rebuild the cluster**: `kind delete cluster`, then the same setup the Run setup button runs (about 10 minutes). Everything in the cluster is lost. Use it when restarting does not help. Not tested against the cached baseline state SREGym keeps outside the cluster.
+
+There is no free-text command box on purpose: the page sends only the name of a repair, and the server builds the commands from names it reads itself. A box that ran typed commands would let any web page that reaches `127.0.0.1` run commands on this machine.
+
 ## Results
 
 A dashboard computed from exactly the runs the filters leave in view.

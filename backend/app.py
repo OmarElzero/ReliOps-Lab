@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 import audit
 import campaign
+import cluster
 import export
 import firebase_sync
 import jobs
@@ -395,6 +396,34 @@ def get_log(name: str):
     if not log_path.is_file():
         return PlainTextResponse(f"no such log file: {name}", status_code=404)
     return FileResponse(log_path, media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/cluster")
+def cluster_status():
+    """Read-only health of the local kind cluster (see cluster.py): nodes, system pods, node containers, memory, disk."""
+    return cluster.status(busy=jobs.busy())
+
+
+class RepairIn(BaseModel):
+    action: str
+    confirm: bool = False
+
+
+@app.post("/api/cluster/repair")
+def cluster_repair(body: RepairIn):
+    """Starts one of the fixed cluster repairs as the current job. The client sends only the repair's name; the
+    commands are built on the server from names it reads itself, so this is not a way to run arbitrary commands.
+    One job at a time: a run or queue in progress makes this refuse."""
+    if body.action not in cluster.ACTION_IDS:
+        return JSONResponse({"error": "unknown repair"}, status_code=400)
+    if not body.confirm:
+        return JSONResponse({"error": "this repair needs confirmation"}, status_code=400)
+    titles = {"restart_nodes": "Restart the kind nodes", "clear_stuck_pods": "Clear stuck system pods", "rebuild": "Rebuild the cluster"}
+    action = body.action
+    job = jobs.start("cluster", titles[action], lambda: cluster.repair_lines(action), {"action": action})
+    if job is None:
+        return JSONResponse({"error": "A run, queue or other job is running. Wait for it or stop it first."}, status_code=409)
+    return {"ok": True, "job_id": job.id}
 
 
 @app.get("/api/setup")

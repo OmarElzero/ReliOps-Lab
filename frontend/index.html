@@ -221,6 +221,20 @@
       "Shared results" section.</p>
   </section>
 
+  <section class="card" id="cluster-card">
+    <h2>Cluster health</h2>
+    <p class="hint">Looks at the local kind cluster the benchmark runs on: nodes, system pods, node containers, memory and disk. Checking only reads.
+      The three repair buttons each show the exact commands and ask before they do anything, and they are refused while a run or queue is going.</p>
+    <div class="key-actions">
+      <button id="cluster-check" type="button" class="secondary">Check now</button>
+      <span class="hint" id="cluster-checked"></span>
+    </div>
+    <div id="cluster-findings" class="cluster-findings"></div>
+    <div id="cluster-nodes" class="cluster-nodes"></div>
+    <p class="hint" id="cluster-advice"></p>
+    <div id="cluster-actions" class="cluster-actions"></div>
+  </section>
+
   <section class="card actions">
     <h2>Run</h2>
     <label class="checkbox"><input type="checkbox" id="force-build"> force-build (first run of this agent on this machine)</label>

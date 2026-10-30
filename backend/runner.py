@@ -1494,9 +1494,9 @@ def stream_campaign(
             # A broken cluster does not heal between runs, and each attempt costs a long wait (about 27 minutes in a real
             # log), so the queue stops at the first one instead of waiting for the streak limit.
             yield (
-                f"\n[stopped: {incomplete_reason} The next runs would hit the same cluster. Check it with 'kubectl get nodes'; "
-                "if a node stays NotReady, restart the kind node containers (docker restart kind-worker ...) or rebuild with "
-                "'kind delete cluster' and run Setup again. Finished runs are kept and only missing cells run next time. "
+                f"\n[stopped: {incomplete_reason} The next runs would hit the same cluster. Open Setup & quick run, Cluster health, to see "
+                "which node is down and to restart the nodes, clear stuck pods or rebuild (or run 'kubectl get nodes' yourself). "
+                "Finished runs are kept and only missing cells run next time. "
                 "Set RELIOPS_MAX_INCOMPLETE=0 in .env to turn this stop off.]\n"
             )
             return

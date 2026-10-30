@@ -449,3 +449,14 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 .key-row input[type="text"] { width: 120px; min-height: 28px; padding: 2px 8px; font-size: 12.5px; }
 .key-row input[type="checkbox"] { width: 16px; height: 16px; }
 .key-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+
+/* Cluster health card (Setup tab) */
+.cluster-findings { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.cluster-findings .cf { font-size: 13.5px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); min-width: 0; overflow-wrap: anywhere; }
+.cluster-findings .cf.bad { border-color: var(--bad); color: var(--bad); }
+.cluster-findings .cf.warn { color: var(--muted); }
+.cluster-findings .cf.ok { border-color: var(--ok); color: var(--ok); }
+.cluster-nodes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cluster-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.cluster-actions .ca-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.cluster-actions .ca-row .hint { margin: 0; flex: 1 1 260px; min-width: 0; }

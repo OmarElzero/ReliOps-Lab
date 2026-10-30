@@ -616,10 +616,10 @@
     const running = jobBusy();
     const pill = $("job-pill");
     pill.hidden = !running;
-    $("job-stop").hidden = !running;
+    $("job-stop").hidden = !running || job.kind === "cluster";   // a cluster repair has no "after current" point to stop at
     if (running) {
       const p = job.progress || {};
-      const bits = [job.kind === "queue" ? "Queue running" : "Run in progress"];
+      const bits = [job.kind === "queue" ? "Queue running" : job.kind === "cluster" ? "Cluster repair running" : "Run in progress"];
       if (p.step && p.steps) bits.push(`step ${p.step}/${p.steps}`);
       if (job.run_elapsed_s != null) bits.push(fmtDur(job.run_elapsed_s));
       $("job-pill-text").textContent = bits.join(" · ");
@@ -635,7 +635,7 @@
       const t0 = new Date(job.started_at * 1000);
       const when = t0.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
       if (running) {
-        $("q-now-title").textContent = job.kind === "queue" ? `Running "${job.name}"` : "Quick run in progress";
+        $("q-now-title").textContent = job.kind === "queue" ? `Running "${job.name}"` : job.kind === "cluster" ? `Cluster repair: ${job.name}` : "Quick run in progress";
         $("q-now-sub").textContent = `started ${when}`;
         const main = [];
         if (p.step && p.steps) main.push(`Step ${p.step}/${p.steps}: ${p.step_name}`);
@@ -671,7 +671,7 @@
     if (!jobBusy() || job.run_elapsed_s == null) return;
     job.run_elapsed_s += 1;
     const p = job.progress || {};
-    const bits = [job.kind === "queue" ? "Queue running" : "Run in progress"];
+    const bits = [job.kind === "queue" ? "Queue running" : job.kind === "cluster" ? "Cluster repair running" : "Run in progress"];
     if (p.step && p.steps) bits.push(`step ${p.step}/${p.steps}`);
     bits.push(fmtDur(job.run_elapsed_s));
     $("job-pill-text").textContent = bits.join(" · ");
@@ -747,7 +747,44 @@
       bar.append(row);
     });
   }
-  TAB_LOADERS.run = loadKeyHealth;
+  // ---- Cluster health (Setup tab): a read-only check of the local kind cluster, and three fixed repairs. The browser
+  // never sends a command, only the name of a repair; the server builds the commands itself (see backend/cluster.py).
+  async function loadCluster() {
+    const btn = $("cluster-check");
+    btn.disabled = true;
+    $("cluster-checked").textContent = "checking…";
+    let d;
+    try { d = await jsonGet("/api/cluster"); } catch (e) { $("cluster-checked").textContent = "could not check"; btn.disabled = false; return; }
+    btn.disabled = false;
+    $("cluster-checked").textContent = "checked " + new Date(d.checked_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const finds = $("cluster-findings");
+    finds.innerHTML = "";
+    d.findings.forEach((f) => finds.append(h("div", { class: "cf " + f.level, text: f.text })));
+    const nodes = $("cluster-nodes");
+    nodes.innerHTML = "";
+    (d.nodes || []).forEach((n) => nodes.append(h("span", { class: "pill " + (n.status === "Ready" ? "ok" : "warn"), title: n.roles.join(", ") + (n.cordoned ? " · cordoned" : "") },
+      h("span", { class: "dot" }), `${n.name} ${n.status}`)));
+    $("cluster-advice").textContent = d.advice || "";
+    const box = $("cluster-actions");
+    box.innerHTML = "";
+    d.actions.forEach((a) => {
+      const run = async () => {
+        const cmds = a.commands.length ? a.commands.join("\n") : "(none right now)";
+        if (!confirm(`${a.title}?\n\n${a.effect}\n\nThe Lab will run:\n${cmds}\n\nGo ahead?`)) return;
+        const { ok, data } = await jsonPost("/api/cluster/repair", { action: a.id, confirm: true });
+        if (!ok) { alert(data.error || "could not start the repair"); return; }
+        showTab("queue");
+        pollState();
+      };
+      const btn2 = h("button", { type: "button", class: "secondary", text: a.title, onclick: run, title: a.disabled_reason || a.effect });
+      btn2.disabled = !a.enabled;
+      const row = h("div", { class: "ca-row" }, btn2, h("span", { class: "hint", text: a.enabled ? a.effect : a.disabled_reason }));
+      box.append(row);
+    });
+  }
+  $("cluster-check").addEventListener("click", loadCluster);
+
+  TAB_LOADERS.run = () => { loadKeyHealth(); loadCluster(); };
 
   TAB_LOADERS.queue = () => { loadManifests(); refreshPreview(true); };
 
