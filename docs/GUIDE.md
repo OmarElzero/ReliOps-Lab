@@ -42,6 +42,12 @@ The one-off page for setting up a machine and for a single quick run.
 
 Rotating several keys is **off** unless you add `RELIOPS_KEY_POOL=GEMINI_API_KEY,GEMINI_API_KEY_2` (and optionally `RELIOPS_KEY_OWNERS=omar,sara`) to `.env`. Each run then uses the next healthy key, dead and resting keys are skipped, the run records which slot and owner it used, and if every key is resting the queue waits and carries on by itself. If every key is dead it stops and tells you.
 
+### Guards against a broken setup
+
+- **Stops after repeated empty runs.** If 3 runs in a row end incomplete (no result row, or SREGym marks the run incomplete), the queue stops and says why, instead of spending the night on empty runs. Finished runs are kept and only missing cells run on the next start. Change the limit with `RELIOPS_MAX_INCOMPLETE=5` in `.env`; `0` turns the stop off. Incomplete runs are never counted as failures in Results.
+- **Checks before the first run.** The log starts with a `[check]` line if `AGENT_API_BASE` is set (SREGym then lets the agent reach only that host, so a Gemini model sent to a gateway usually fails with 401 "Invalid credential"), or if the agent image looks older than `agent/react_v1/driver.py` (run `scripts/sync_agent.sh` and tick Force-build once).
+- **Rejected credentials.** A 401 / AuthenticationError marks the key dead when the request went straight to the provider. When `AGENT_API_BASE` is set it does not, because the gateway rejected the key, not Google.
+
 ## Results
 
 A dashboard computed from exactly the runs the filters leave in view.

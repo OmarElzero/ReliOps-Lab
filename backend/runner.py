@@ -145,6 +145,9 @@ KEY_STATE_PROVIDER = None
 KEY_EVENT_SINK = None
 
 _DEAD_RE = re.compile(r"PERMISSION_DENIED|API_KEY_INVALID|API key not valid|ACCOUNT_STATE_INVALID|CONSUMER_SUSPENDED|has been suspended", re.I)
+# A rejected credential (HTTP 401) is a different failure from a rate limit. Whether it means "this key is bad" depends on
+# where the request went: through a custom AGENT_API_BASE it is that gateway rejecting the key, not Google.
+_AUTH_RE = re.compile(r"AuthenticationError|Invalid credential|UNAUTHENTICATED", re.I)
 _LIMIT_RE = re.compile(r"RESOURCE_EXHAUSTED|RateLimitError|\b429\b|quota exceeded|exceeded your current quota", re.I)
 _DAILY_RE = re.compile(r"PerDay|per day|daily|RequestsPerDay", re.I)
 _MINUTE_RE = re.compile(r"PerMinute|per minute|RPM", re.I)
@@ -162,7 +165,7 @@ def _next_pacific_midnight(now: float) -> float:
         return now + 24 * 3600
 
 
-def classify_key_problem(text: str, now: float | None = None) -> dict | None:
+def classify_key_problem(text: str, now: float | None = None, via_custom_base: bool = False) -> dict | None:
     """Reads a chunk of a run's output for a key problem. A heuristic on the provider's error wording, not a probe:
     - dead: the provider says the key or its account is invalid or suspended (stays out until a person clears it)
     - exhausted: a rate or quota error. Daily wording rests the key until the next Pacific midnight, per-minute wording
@@ -170,6 +173,8 @@ def classify_key_problem(text: str, now: float | None = None) -> dict | None:
     now = time.time() if now is None else now
     if _DEAD_RE.search(text):
         return {"status": "dead", "until": None, "reason": _DEAD_RE.search(text).group(0)}
+    if not via_custom_base and _AUTH_RE.search(text):
+        return {"status": "dead", "until": None, "reason": _AUTH_RE.search(text).group(0)}
     if _LIMIT_RE.search(text):
         if _DAILY_RE.search(text):
             until = _next_pacific_midnight(now)
@@ -179,6 +184,50 @@ def classify_key_problem(text: str, now: float | None = None) -> dict | None:
             until = now + 3600
         return {"status": "exhausted", "until": until, "reason": _LIMIT_RE.search(text).group(0)}
     return None
+
+
+def run_incomplete(row: dict | None) -> bool:
+    """True when a run produced no usable result: no result row at all, or SREGym marked it incomplete."""
+    return row is None or row.get("run_status") == "incomplete"
+
+
+def max_incomplete_streak(env_vars: dict[str, str]) -> int:
+    """How many incomplete runs in a row stop a queue (RELIOPS_MAX_INCOMPLETE, default 3, 0 turns the stop off).
+    Incomplete runs are never counted as failures in the results; this only protects the night from a broken setup."""
+    try:
+        return max(0, int((env_vars.get("RELIOPS_MAX_INCOMPLETE") or "3").strip()))
+    except ValueError:
+        return 3
+
+
+def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops: Path | None = None) -> list[str]:
+    """Cheap checks before a campaign starts. Warnings only, never a block."""
+    out: list[str] = []
+    base = (env_vars.get("AGENT_API_BASE") or "").strip()
+    if base:
+        host = re.sub(r"^https?://", "", base).split("/")[0]
+        google = host.endswith("googleapis.com")
+        note = ""
+        if model.startswith("gemini/") and not google:
+            note = f" The model is {model}, so the agent will send Gemini requests to {host} with a key that host may not accept (a 401 'Invalid credential' is the usual sign)."
+        out.append(
+            f"[check] AGENT_API_BASE is set ({host}). SREGym then lets the agent reach only that host, and every model call goes there."
+            f"{note} If you did not mean to use a gateway, remove AGENT_API_BASE (and AGENT_API_KEY) from the .env files and from your shell."
+        )
+    try:
+        driver = (reliops or reliops_dir()) / "agent" / "react_v1" / "driver.py"
+        if agent == "reliops_v1" and driver.exists() and shutil.which("docker"):
+            r = subprocess.run(["docker", "image", "inspect", "-f", "{{.Created}}", "sregym-agent-base:latest"],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                from datetime import datetime
+                created = datetime.fromisoformat(r.stdout.strip().replace("Z", "+00:00")[:26].rstrip(".") + "+00:00")
+                if driver.stat().st_mtime > created.timestamp():
+                    out.append("[check] the agent image looks older than agent/react_v1/driver.py. Run scripts/sync_agent.sh and tick "
+                               "'Force-build the agent image' for the next run, or the old driver code runs.")
+    except Exception:  # noqa: BLE001  best effort only
+        pass
+    return out
 
 
 def key_available(var: str, now: float | None = None) -> bool:
@@ -1151,6 +1200,11 @@ def stream_campaign(
         base_env.setdefault(k, v)
 
     pool = key_pool(base_env)
+    for w in preflight_warnings(base_env, model, agent):
+        yield w + "\n"
+    via_base = bool((base_env.get("AGENT_API_BASE") or "").strip())
+    streak_limit = max_incomplete_streak(base_env)
+    incomplete_streak = 0
 
     # `cells` (problem, repeat) pairs override the plain grid: used to run only the missing cells of a
     # frozen campaign, or one machine's slice of it.
@@ -1226,7 +1280,7 @@ def stream_campaign(
                 for line in _stream(cmd, cwd=sregym_dir(), env=env):
                     plog.write(line)
                     if key_var and key_problem is None:
-                        key_problem = classify_key_problem(line)
+                        key_problem = classify_key_problem(line, via_custom_base=via_base)
                     yield line
         finally:
             _stop_recorder(recorder)  # also runs if the browser tab closes mid-run
@@ -1269,6 +1323,16 @@ def stream_campaign(
         found_note = "parsed row found" if row else "no row parsed — check the raw log above"
         repeat_suffix = f" (repeat {rep}/{repeat_n})" if repeat_n > 1 else ""
         yield f"----- recorded result for {problem}: {found_note}{repeat_suffix} -----\n"
+
+        incomplete_streak = incomplete_streak + 1 if run_incomplete(row) else 0
+        if streak_limit and incomplete_streak >= streak_limit and i < total_runs and not _stop_event.is_set():
+            yield (
+                f"\n[stopped: {incomplete_streak} runs in a row ended incomplete, which usually means the setup is broken "
+                "(model credential, stale agent image, cluster). The queue stops here instead of spending the night on empty runs. "
+                "Look at the last log, fix it, then run the queue again; finished runs are kept and only missing cells run. "
+                "Set RELIOPS_MAX_INCOMPLETE=0 in .env to turn this stop off.]\n"
+            )
+            return
 
         if _stop_event.is_set():
             remaining = total_runs - i

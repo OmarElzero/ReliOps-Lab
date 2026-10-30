@@ -368,3 +368,70 @@ class ApiTests(TmpRepoCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SetupGuardTests(unittest.TestCase):
+    """Protections against spending a night on a broken setup (found in the first live queue)."""
+
+    def setUp(self):
+        import runner
+        self.r = runner
+
+    def test_auth_error_marks_key_dead_only_when_going_straight_to_the_provider(self):
+        text = "litellm.AuthenticationError: Vertex_ai_betaException - 401 Upstream request failed: Invalid credential"
+        self.assertEqual(self.r.classify_key_problem(text)["status"], "dead")
+        self.assertIsNone(self.r.classify_key_problem(text, via_custom_base=True))
+
+    def test_preflight_warns_about_a_gateway_base_and_a_gemini_model(self):
+        out = self.r.preflight_warnings({"AGENT_API_BASE": "https://opencode.ai/zen/v1"}, "gemini/gemini-3.5-flash-lite", "other")
+        self.assertEqual(len(out), 1)
+        self.assertIn("opencode.ai", out[0])
+        self.assertIn("401", out[0])
+        self.assertEqual(self.r.preflight_warnings({}, "gemini/x", "other"), [])
+
+    def test_incomplete_helpers(self):
+        self.assertTrue(self.r.run_incomplete(None))
+        self.assertTrue(self.r.run_incomplete({"run_status": "incomplete"}))
+        self.assertFalse(self.r.run_incomplete({"Diagnosis.success": True}))
+        self.assertEqual(self.r.max_incomplete_streak({}), 3)
+        self.assertEqual(self.r.max_incomplete_streak({"RELIOPS_MAX_INCOMPLETE": "0"}), 0)
+        self.assertEqual(self.r.max_incomplete_streak({"RELIOPS_MAX_INCOMPLETE": "x"}), 3)
+
+    def _run(self, rows, env=None):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        r = self.r
+        rows = list(rows)
+        tmp = Path(tempfile.mkdtemp())
+        records = []
+        with mock.patch.object(r, "sregym_dir", return_value=tmp), \
+             mock.patch.object(r, "merged_env_vars", return_value=env or {}), \
+             mock.patch.object(r, "preflight_warnings", return_value=[]), \
+             mock.patch.object(r, "_stream", side_effect=lambda *a, **k: iter(["line\n"])), \
+             mock.patch.object(r, "_latest_result_row", side_effect=lambda *a, **k: rows.pop(0)), \
+             mock.patch.object(r, "_find_transcript", return_value=None), \
+             mock.patch.object(r, "_start_recorder", return_value=None), \
+             mock.patch.object(r, "_stop_recorder"), \
+             mock.patch.object(r, "_git_commit_safe", return_value="abc"), \
+             mock.patch.object(r, "_problem_log_path", side_effect=lambda p, rep, n: tmp / f"{p}-{rep}.log"):
+            log = "".join(r.stream_campaign(agent="reliops_v1", action_space="typed", model="gemini/x", judge_model="gemini/x",
+                                            problems=["p1", "p2", "p3", "p4", "p5"], repeat_n=1, force_build=False,
+                                            on_result=records.append))
+        return log, records
+
+    def test_queue_stops_after_three_incomplete_runs_in_a_row(self):
+        log, records = self._run([{"run_status": "incomplete"}] * 5)
+        self.assertEqual(len(records), 3)
+        self.assertIn("3 runs in a row ended incomplete", log)
+
+    def test_a_good_run_resets_the_streak(self):
+        good = {"Diagnosis.success": True, "Mitigation.success": True}
+        bad = {"run_status": "incomplete"}
+        log, records = self._run([bad, bad, good, bad, bad])
+        self.assertEqual(len(records), 5)
+        self.assertNotIn("in a row ended incomplete", log)
+
+    def test_the_stop_can_be_turned_off(self):
+        log, records = self._run([{"run_status": "incomplete"}] * 5, env={"RELIOPS_MAX_INCOMPLETE": "0"})
+        self.assertEqual(len(records), 5)
