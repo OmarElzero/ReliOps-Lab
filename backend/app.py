@@ -292,8 +292,22 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "reviewed_by": review.get("reviewer") or "",
             **normalized,
         })
+    _apply_external_fault_marks(runs)
     _enrich(runs)
     return source, runs
+
+
+def _apply_external_fault_marks(runs: list[dict]) -> None:
+    """A run a person tagged "external-fault" (a bad key, a broken cluster, a result recorded against the wrong run)
+    says nothing about the agent, so it is not counted as a pass or a fail. The queue then treats its cell as
+    incomplete and runs it again; the run itself stays in the record, tag and note included."""
+    for r in runs:
+        if (r.get("failure_mode_tag") or "").strip() == "external-fault":
+            for k in ("diagnosis_pass", "mitigation_pass", "e2e_pass"):
+                r[k] = None
+            r["run_status"] = "incomplete"
+            note = (r.get("review_note") or "").strip()
+            r["incomplete_reason"] = "Marked as an external fault, so it is not counted" + (f": {note}" if note else ".")
 
 
 def _problem_index() -> dict[str, dict]:
@@ -774,7 +788,7 @@ def card(problem_id: str):
 
 # ---- Failure tags / reviews -----------------------------------------------------------
 FAILURE_TAGS = ["blamed-wrong-service", "wrong-mechanism", "anchored-on-first-claim", "stopped-early", "no-action-fits",
-                "fix-didnt-hold", "tool-error", "timeout", "invented-incident", "other"]
+                "fix-didnt-hold", "tool-error", "timeout", "invented-incident", "external-fault", "other"]
 
 
 class ReviewIn(BaseModel):

@@ -210,11 +210,23 @@ def max_incomplete_streak(env_vars: dict[str, str]) -> int:
         return 3
 
 
+def max_external_retries(env_vars: dict[str, str]) -> int:
+    """How many times one cell is tried again, inside the same pass, when its run died for an outside reason (a rejected or
+    exhausted key, empty replies from the model): RELIOPS_RETRY_EXTERNAL, default 2, 0 turns it off. Such a retry is not
+    counted toward the incomplete-runs-in-a-row stop. Cluster faults and unknown causes are never retried."""
+    try:
+        return max(0, int((env_vars.get("RELIOPS_RETRY_EXTERNAL") or "2").strip()))
+    except ValueError:
+        return 2
+
+
 # Wording SREGym's own output uses when the cluster could not be made ready (read from real logs, see the tests).
 _NODE_TIMEOUT_RE = re.compile(r"Timed out after \d+s waiting for (?:node )?(\S+?) to become Ready")
 _PODS_TIMEOUT_RE = re.compile(r"Not all pods in namespace '([^']+)' reached the Ready state")
 _CLEANUP_RE = re.compile(r"Cleanup failed; refusing to retry|cleanup did not (?:terminate|finish)", re.I)
 _ABORT_RE = re.compile(r"Benchmark campaign aborted: ([\s\S]{0,200})")
+# The agent's own wording when the model returned nothing usable (read from a real log, see the tests).
+_MODEL_EMPTY_RE = re.compile(r"model call unusable|ended without\s+submission:\s+model_failure", re.I)
 _JUDGE_PREFLIGHT_RE = re.compile(r"pre-flight check (?:failed|error)|pre-flight[^\n]{0,40}\bfail", re.I)
 _API_BASE_RE = re.compile(r"agent_api_base:\s*(\S+?),")
 _DEPLOY_FAILED_RE = re.compile(r"start_problem failed|deploy attempts? failed", re.I)
@@ -227,7 +239,8 @@ def classify_incomplete(log_text: str) -> tuple[str, str]:
     """Why a run ended incomplete, read from its own log: (kind, one-line reason).
 
     kind is "cluster" (the app could not be deployed because the cluster was not ready, so nothing more can run until it
-    is fixed), "key" (the model key was rejected or ran out of quota), "judge" (the judge model check failed), or "other".
+    is fixed), "key" (the model key was rejected or ran out of quota), "model" (the model sent empty replies), "judge" (the
+    judge model check failed), or "other".
     The wording of the log lines is SREGym's own; anything not recognised falls under "other"."""
     text = log_text or ""
     if not text.strip():
@@ -261,6 +274,8 @@ def classify_incomplete(log_text: str) -> tuple[str, str]:
         return "key", f"Model key {word} ({key['reason']})."
     if _JUDGE_PREFLIGHT_RE.search(text):
         return "judge", "The judge model check failed before the run started (see the log)."
+    if _MODEL_EMPTY_RE.search(text):
+        return "model", "The model returned empty replies, so the agent gave up (see the log)."
     abort = _ABORT_RE.search(text)
     if abort:
         return "other", "Benchmark aborted: " + re.sub(r"\s+", " ", abort.group(1)).strip()[:140]
@@ -1391,6 +1406,8 @@ def stream_campaign(
         yield w + "\n"
     via_base = bool((base_env.get("AGENT_API_BASE") or "").strip())
     streak_limit = max_incomplete_streak(base_env)
+    retry_limit = max_external_retries(base_env)
+    retries: dict[tuple[str, int], int] = {}
     incomplete_streak = 0
 
     # `cells` (problem, repeat) pairs override the plain grid: used to run only the missing cells of a
@@ -1417,6 +1434,7 @@ def stream_campaign(
             wake = pool_wait_until(pool if len(pool) >= 2 else [{"var": key_var}])
             if wake is None:
                 yield "[key] the key is marked dead. Stopping here; replace it or clear the mark, then run the queue again to resume.\n"
+                _halt("every model key is marked dead")
                 return
             yield f"[key] key quota is used up. Waiting until {time.strftime('%H:%M UTC', time.gmtime(wake))}, then the queue continues by itself.\n"
             while time.time() < wake and not _stop_event.is_set():
@@ -1526,6 +1544,16 @@ def stream_campaign(
         found_note = "parsed row found" if row else "no row parsed — check the raw log above"
         repeat_suffix = f" (repeat {rep}/{repeat_n})" if repeat_n > 1 else ""
         yield f"----- recorded result for {problem}: {found_note}{repeat_suffix} -----\n"
+
+        cell = (problem, rep)
+        if (incomplete_kind in ("key", "model") and retries.get(cell, 0) < retry_limit and not _stop_event.is_set()
+                and (incomplete_kind != "key" or len(pool) >= 2)):  # a single bad key would only fail again
+            retries[cell] = retries.get(cell, 0) + 1
+            runs.insert(i, cell)  # the very next run, with the next key when the pool has one
+            total_runs += 1
+            yield (f"[retry] {incomplete_reason} Trying {problem}{repeat_note} again ({retries[cell]}/{retry_limit}); "
+                   "this run does not count toward the stop. Set RELIOPS_RETRY_EXTERNAL=0 in .env to turn retries off.\n")
+            continue
 
         incomplete_streak = incomplete_streak + 1 if run_incomplete(row) else 0
         if streak_limit and incomplete_kind == "cluster" and i < total_runs and not _stop_event.is_set():

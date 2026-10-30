@@ -437,6 +437,44 @@ class SetupGuardTests(unittest.TestCase):
         log, records = self._run([{"run_status": "incomplete"}] * 5, env={"RELIOPS_MAX_INCOMPLETE": "0"})
         self.assertEqual(len(records), 5)
 
+    # Lines copied from a real log (a typed + shell run on 30 Oct 2026 where the model kept sending empty replies); rich wraps them.
+    MODEL_LOG = (
+        "[10/30/26 15:39:28] WARNING  all.react_v1.driver - model call unusable: empty   \n"
+        "                             model reply                                        \n"
+        "[10/30/26 15:40:02] WARNING  all.react_v1.driver - model call unusable: empty   \n"
+        "                             model reply                                        \n"
+        "                    WARNING  all.react_v1.driver - diagnosis ended without      \n"
+        "                             submission: model_failure                          \n"
+        "[17:40:03] \u26a0\ufe0f  Agent process exited with return code 2                main.py:627\n"
+    )
+
+    def test_empty_model_replies_are_their_own_kind_of_incomplete(self):
+        kind, reason = self.r.classify_incomplete(self.MODEL_LOG)
+        self.assertEqual(kind, "model")
+        self.assertIn("empty replies", reason)
+
+    def test_a_run_that_died_for_an_outside_reason_is_tried_again_at_once_and_not_counted_toward_the_stop(self):
+        good = {"Diagnosis.success": True, "Mitigation.success": True}
+        bad = {"run_status": "incomplete"}
+        log, records = self._run([bad, bad, good, good, good, good, good], stream=(self.MODEL_LOG,))
+        self.assertEqual(len(records), 7)                      # 5 cells + 2 retries of the first one
+        self.assertEqual(log.count("[retry]"), 2)
+        self.assertEqual([x["problem_id"] for x in records][:3], ["p1", "p1", "p1"])
+        self.assertNotIn("in a row ended incomplete", log)
+
+    def test_retries_stop_at_the_limit_and_can_be_turned_off(self):
+        bad = {"run_status": "incomplete"}
+        log, records = self._run([bad] * 15, stream=(self.MODEL_LOG,), env={"RELIOPS_MAX_INCOMPLETE": "0"})
+        self.assertEqual(log.count("[retry]"), 2 * 5)          # each of the 5 cells: 1 run + 2 retries
+        log, records = self._run([bad] * 5, stream=(self.MODEL_LOG,), env={"RELIOPS_RETRY_EXTERNAL": "0"})
+        self.assertEqual(log.count("[retry]"), 0)
+        self.assertEqual(len(records), 3)                      # the stop after 3 in a row still applies
+
+    def test_unknown_causes_and_a_single_key_are_not_retried(self):
+        bad = {"run_status": "incomplete"}
+        log, records = self._run([bad] * 5)                   # a log with no recognised cause
+        self.assertEqual(log.count("[retry]"), 0)
+
     def test_a_campaign_that_stops_itself_leaves_a_halt_reason_and_a_clean_one_clears_it(self):
         self._run([{"run_status": "incomplete"}] * 5)
         self.assertIn("3 runs in a row", self.r.halt_reason())
@@ -627,6 +665,40 @@ class IncompleteReasonInTheTableTests(TmpRepoCase):
         self.assertEqual(app_module._incomplete_reason({"row": None, "log_file": "../x"}), "")
         self.assertEqual(app_module._incomplete_reason({"row": None, "log_file": "missing.log"}), "")
         self.assertEqual(app_module._incomplete_reason({"row": None, "incomplete_reason": "stored", "log_file": "a.log"}), "stored")
+
+
+class ExternalFaultMarkTests(TmpRepoCase):
+    """A run tagged external-fault is not counted, and the queue runs its cell again."""
+
+    def test_a_marked_run_is_incomplete_everywhere_and_its_cell_is_run_again(self):
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        import queueplan
+        run = {"run_id": "a", "problem_id": "gc", "agent_id": "x", "model_id": "m", "judge_model_id": "j", "action_space": "typed",
+               "run_class": "exploration", "repeat_index": 2, "timestamp_utc": "2026-10-30T16:00:00Z", "experiment": "e",
+               "failure_mode_tag": "external-fault", "review_note": "same row as repeat 1",
+               "diagnosis_pass": False, "mitigation_pass": False, "e2e_pass": False}
+        other = dict(run, run_id="b", failure_mode_tag="", repeat_index=1)
+        runs = [run, other]
+        app_module._apply_external_fault_marks(runs)
+        self.assertIsNone(runs[0]["e2e_pass"])
+        self.assertIn("same row as repeat 1", runs[0]["incomplete_reason"])
+        self.assertIs(runs[1]["e2e_pass"], False)               # an untagged run is untouched
+        step = queueplan.clean_queue({"name": "q", "steps": [{"agent_id": "x", "model_id": "m", "judge_model_id": "j",
+                                                              "action_space": "typed", "problems": ["gc"], "repeat_n": 2}]})["steps"][0]
+        cells = {(c["problem"], c["repeat"]): c["status"] for c in queueplan.cells(step, runs, None, "e")}
+        self.assertEqual(cells[("gc", 1)], "fail")
+        self.assertEqual(cells[("gc", 2)], "incomplete")
+        self.assertIn(("gc", 2), queueplan.todo(step, runs, None, "e"))
+
+    def test_the_tag_is_offered_in_the_review_form(self):
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        self.assertIn("external-fault", app_module.FAILURE_TAGS)
 
 
 class ResultFileBelongsToOneRunTests(unittest.TestCase):
