@@ -117,6 +117,17 @@ def kind_containers() -> list[dict] | None:
     return rows
 
 
+def kubelet_log_tail(container: str, lines: int = 30) -> str | None:
+    """The last lines of the kubelet's own log inside one kind node, to show why a node is not Ready. Read-only.
+    Only a name that matches the kind node pattern is ever passed to docker."""
+    if not NODE_CONTAINER_RE.match(container):
+        return None
+    out = _run(["docker", "exec", container, "journalctl", "-u", "kubelet", "--no-pager", "-n", str(lines)], timeout=20)
+    if out is None or out[0] != 0 or not out[1].strip():
+        return None
+    return out[1][-6000:]
+
+
 def host_resources(path) -> dict:
     mem_mb = total_mb = None
     try:
@@ -176,6 +187,13 @@ def status(busy: bool = False, now: float | None = None) -> dict:
     if host["disk_free_gb"] is not None and host["disk_free_gb"] < LOW_DISK_GB:
         add("warn", f"Only {host['disk_free_gb']} GB of disk is free on the drive holding this repo; kubelets report disk pressure when it runs low.")
 
+    kubelet_logs = {}
+    for n in (node_rows or []):
+        if n["status"] != "Ready" and n["name"] in [c["name"] for c in (containers or [])] and len(kubelet_logs) < 3:
+            tail = kubelet_log_tail(n["name"])
+            if tail:
+                kubelet_logs[n["name"]] = tail
+
     verdict = ("problem" if any(f["level"] == "bad" for f in findings)
                else "unknown" if node_rows is None else "ok")
     names = [c["name"] for c in (containers or [])]
@@ -206,7 +224,7 @@ def status(busy: bool = False, now: float | None = None) -> dict:
                   if any("not Ready" in f["text"] or "not running" in f["text"] for f in findings if f["level"] == "bad")
                   else "Try 'Clear stuck system pods', then check again.")
     return {"verdict": verdict, "findings": findings, "nodes": node_rows, "system_pods": pod_rows, "containers": containers,
-            "host": host, "actions": actions, "advice": advice, "checked_at": now}
+            "host": host, "kubelet_logs": kubelet_logs, "actions": actions, "advice": advice, "checked_at": now}
 
 
 # ---- the three repairs (each is a generator of log lines, run as a job so only one thing touches the cluster) ----

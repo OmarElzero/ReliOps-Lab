@@ -760,6 +760,8 @@
     const finds = $("cluster-findings");
     finds.innerHTML = "";
     d.findings.forEach((f) => finds.append(h("div", { class: "cf " + f.level, text: f.text })));
+    Object.entries(d.kubelet_logs || {}).forEach(([name, text]) => finds.append(
+      h("details", { class: "cf-log" }, h("summary", { text: `Last kubelet log lines on ${name}` }), h("pre", { text }))));
     const nodes = $("cluster-nodes");
     nodes.innerHTML = "";
     (d.nodes || []).forEach((n) => nodes.append(h("span", { class: "pill " + (n.status === "Ready" ? "ok" : "warn"), title: n.roles.join(", ") + (n.cordoned ? " · cordoned" : "") },

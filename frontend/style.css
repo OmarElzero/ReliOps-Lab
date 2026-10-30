@@ -460,3 +460,6 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 .cluster-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .cluster-actions .ca-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .cluster-actions .ca-row .hint { margin: 0; flex: 1 1 260px; min-width: 0; }
+.cluster-findings .cf-log { font-size: 12.5px; }
+.cluster-findings .cf-log summary { cursor: pointer; color: var(--muted); }
+.cluster-findings .cf-log pre { max-height: 260px; overflow: auto; margin: 6px 0 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; }

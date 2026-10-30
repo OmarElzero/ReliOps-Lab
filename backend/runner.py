@@ -193,8 +193,12 @@ def classify_key_problem(text: str, now: float | None = None, via_custom_base: b
 
 
 def run_incomplete(row: dict | None) -> bool:
-    """True when a run produced no usable result: no result row at all, or SREGym marked it incomplete."""
-    return row is None or row.get("run_status") == "incomplete"
+    """True when a run produced no usable result: no result row at all, SREGym marked it incomplete or its deploy failed,
+    or the row carries neither a diagnosis nor a mitigation outcome (a real log showed SREGym writing such a row after
+    three failed deploys and still ending with "Benchmark complete")."""
+    if row is None or row.get("run_status") == "incomplete" or _as_bool(row.get("deploy_failed")) is True:
+        return True
+    return _as_bool(row.get("Diagnosis.success")) is None and _as_bool(row.get("Mitigation.success")) is None
 
 
 def max_incomplete_streak(env_vars: dict[str, str]) -> int:
@@ -213,31 +217,42 @@ _CLEANUP_RE = re.compile(r"Cleanup failed; refusing to retry|cleanup did not (?:
 _ABORT_RE = re.compile(r"Benchmark campaign aborted: ([\s\S]{0,200})")
 _JUDGE_PREFLIGHT_RE = re.compile(r"pre-flight check (?:failed|error)|pre-flight[^\n]{0,40}\bfail", re.I)
 _API_BASE_RE = re.compile(r"agent_api_base:\s*(\S+?),")
+_DEPLOY_FAILED_RE = re.compile(r"start_problem failed|deploy attempts? failed", re.I)
+_DEPLOY_ATTEMPT_RE = re.compile(r"deploy attempt (\d+)/(\d+)")
+# A pod listed as blocking with a "deleting=" stamp is stuck in Terminating: "name (phase=Running; node=kind-worker3; ... deleting=...".
+_STUCK_POD_RE = re.compile(r"([a-z0-9][a-z0-9.-]*)\s+\(phase=\w+;\s*node=([\w.-]+);(?:(?!\|)[\s\S])*?deleting=")
 
 
 def classify_incomplete(log_text: str) -> tuple[str, str]:
     """Why a run ended incomplete, read from its own log: (kind, one-line reason).
 
-    kind is "cluster" (the cluster was not ready, so nothing more can run until it is fixed), "key" (the model key was
-    rejected or ran out of quota), "judge" (the judge model check failed), or "other". The wording of the log lines is
-    SREGym's own; anything not recognised falls under "other" with a plain statement of whether the agent ever started."""
+    kind is "cluster" (the app could not be deployed because the cluster was not ready, so nothing more can run until it
+    is fixed), "key" (the model key was rejected or ran out of quota), "judge" (the judge model check failed), or "other".
+    The wording of the log lines is SREGym's own; anything not recognised falls under "other"."""
     text = log_text or ""
     if not text.strip():
         return "other", "No log was recorded for this run."
-    agent_started = "Starting agent now" in text
-    if not agent_started:
+    if _DEPLOY_FAILED_RE.search(text) or _CLEANUP_RE.search(text):
         parts = []
-        if _NODE_TIMEOUT_RE.search(text):
-            nodes = sorted({n for n in _NODE_TIMEOUT_RE.findall(text) if n != "nodes"})
-            parts.append(f"node{'s' if len(nodes) > 1 else ''} {', '.join(nodes)} did not become Ready" if nodes
-                         else "the nodes did not become Ready")
-        namespaces = sorted(set(_PODS_TIMEOUT_RE.findall(text)))
-        if namespaces:
-            parts.append("pods in " + ", ".join(namespaces) + " did not become Ready")
+        nodes = sorted({n for n in _NODE_TIMEOUT_RE.findall(text) if n != "nodes"})
+        if nodes:
+            parts.append(f"node{'s' if len(nodes) > 1 else ''} {', '.join(nodes)} did not become Ready")
+        elif _NODE_TIMEOUT_RE.search(text):
+            parts.append("the nodes did not become Ready")
+        stuck = {(pod, node) for pod, node in _STUCK_POD_RE.findall(text)}
+        if stuck:
+            where = sorted({node for _, node in stuck})
+            parts.append(f"{len(stuck)} kube-system pod{'s' if len(stuck) > 1 else ''} stuck in Terminating on {', '.join(where)}")
+        elif _PODS_TIMEOUT_RE.search(text):
+            parts.append("pods in " + ", ".join(sorted(set(_PODS_TIMEOUT_RE.findall(text)))) + " did not become Ready")
+        tries = [int(k) for k, _ in _DEPLOY_ATTEMPT_RE.findall(text)]
+        if tries:
+            parts.append(f"the app failed to deploy {max(tries)} time{'s' if max(tries) > 1 else ''}")
         if _CLEANUP_RE.search(text):
             parts.append("cleanup did not finish, so the benchmark refused to go on with an uncertain cluster")
-        if parts:
+        if nodes or stuck or _PODS_TIMEOUT_RE.search(text) or _CLEANUP_RE.search(text):
             return "cluster", "Cluster not ready: " + "; ".join(parts) + "."
+        return "other", "The app failed to deploy (see the log)."
     base = _API_BASE_RE.search(text)
     via_base = bool(base) and base.group(1).lower() not in ("unset", "none")
     key = classify_key_problem(text, via_custom_base=via_base)
@@ -249,9 +264,7 @@ def classify_incomplete(log_text: str) -> tuple[str, str]:
     abort = _ABORT_RE.search(text)
     if abort:
         return "other", "Benchmark aborted: " + re.sub(r"\s+", " ", abort.group(1)).strip()[:140]
-    if agent_started:
-        return "other", "The agent started but the run ended without a result (see the log)."
-    return "other", "The run ended before the agent started (see the log)."
+    return "other", "The run ended without a result (see the log)."
 
 
 def cluster_node_problems(timeout: int = 15) -> list[str] | None:

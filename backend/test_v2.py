@@ -457,18 +457,70 @@ class SetupGuardTests(unittest.TestCase):
         self.assertIn("kube-system", why)
         self.assertIn("cleanup did not finish", why)
 
-    def test_cluster_timeouts_after_the_agent_started_are_not_called_a_cluster_problem(self):
-        kind, why = self.r.classify_incomplete("Starting agent now: reliops_v1\n" + "".join(self.CLUSTER_LOG))
-        self.assertNotEqual(kind, "cluster")
+    # The 12:47 run on 30 Oct, trimmed to the lines that matter: three failed deploys, four pods stuck in Terminating on two nodes.
+    STUCK_PODS_LOG = (
+        "[12:47:57] Starting agent now: reliops_v1                            main.py:297\n"
+        "Timed out after 120s waiting for nodes to become Ready.\n"
+        "Timed out after 120s waiting for kind-worker2 to become Ready.\n"
+        "Timed out after 120s waiting for kind-worker3 to become Ready.\n"
+        "[13:04:36] start_problem failed for 'storage_user_unregistered-2' (deploy attempt 1/3): Timeout: Not all pods in namespace\n"
+        "           'kube-system' reached the Ready state within 600 seconds.\n"
+        "           Blocking pods: calico-kube-controllers-79949b87d-5w5lr\n"
+        "           (phase=Running; node=kind-worker3;\n"
+        "           condition=Ready/ContainersNotReady: containers with unready status: ;\n"
+        "           container/calico-kube-controllers=terminated/Error;\n"
+        "           deleting=2026-10-30 10:54:10+00:00) |\n"
+        "           calico-node-7ntjb (phase=Running;\n"
+        "           node=kind-worker3) | coredns-d5ff7974-5prnl (phase=Running; node=kind-worker2;\n"
+        "           container/coredns=terminated/Unknown; deleting=2026-10-30\n"
+        "           10:53:59+00:00) | coredns-d5ff7974-fgqmx (phase=Running;\n"
+        "           node=kind-worker3;\n"
+        "           container/coredns=terminated/Unknown; deleting=2026-10-30\n"
+        "           10:54:10+00:00) | coredns-d5ff7974-fz7hj (phase=Running;\n"
+        "           node=kind-control-plane) | metrics-server-676dc447b9-z76jc (phase=Running;\n"
+        "           node=kind-worker2; container/metrics-server=terminated/Unknown;\n"
+        "           deleting=2026-10-30 10:53:59+00:00)\n"
+        "[13:51:21] start_problem failed for 'storage_user_unregistered-2' (deploy attempt 3/3): Timeout\n"
+        "           All 3 deploy attempts failed for 'storage_user_unregistered-2', skipping this attempt\n"
+        "Benchmark complete! Results for reliops_v1 written to results/1030_1247/reliops_v1_ALL_results.csv\n"
+    )
+
+    def test_reason_for_a_run_whose_app_never_deployed(self):
+        kind, why = self.r.classify_incomplete(self.STUCK_PODS_LOG)
+        self.assertEqual(kind, "cluster")
+        self.assertIn("kind-worker2, kind-worker3 did not become Ready", why)
+        self.assertIn("4 kube-system pods stuck in Terminating on kind-worker2, kind-worker3", why)
+        self.assertIn("failed to deploy 3 times", why)
+
+    def test_a_line_saying_the_agent_is_starting_does_not_mean_the_app_deployed(self):
+        # "Starting agent now" is printed before the problem is even deployed, so it proves nothing about the cluster.
+        self.assertEqual(self.r.classify_incomplete(self.STUCK_PODS_LOG)[0], "cluster")
+
+    def test_node_timeouts_alone_do_not_blame_the_cluster_when_the_app_deployed(self):
+        log = "Timed out after 120s waiting for kind-worker3 to become Ready.\n[STAGE] diagnosis\nsomething odd\n"
+        self.assertEqual(self.r.classify_incomplete(log), ("other", "The run ended without a result (see the log)."))
+
+    def test_a_deploy_failure_with_no_known_cause_is_still_named(self):
+        kind, why = self.r.classify_incomplete("start_problem failed for 'p' (deploy attempt 1/1): boom\n")
+        self.assertEqual((kind, why), ("other", "The app failed to deploy (see the log)."))
+
+    def test_a_row_without_any_outcome_or_with_a_failed_deploy_counts_as_incomplete(self):
+        self.assertTrue(self.r.run_incomplete({"deploy_failed": True}))
+        self.assertTrue(self.r.run_incomplete({"deploy_failed": "True"}))
+        self.assertTrue(self.r.run_incomplete({}))
+        self.assertFalse(self.r.run_incomplete({"Diagnosis.success": False, "Mitigation.success": False}))
+        self.assertFalse(self.r.run_incomplete({"Diagnosis.success": True}))   # diagnosis-only problems are complete
+
+    def test_the_queue_stops_after_a_run_whose_row_shows_no_outcome(self):
+        log, records = self._run([{"Some.metric": 1}] * 5, stream=self.STUCK_PODS_LOG.splitlines(True))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["incomplete_kind"], "cluster")
 
     def test_reason_for_a_rejected_key_and_for_an_unknown_ending(self):
         kind, why = self.r.classify_incomplete("litellm.BadRequestError: API key not valid. Please pass a valid API key.")
         self.assertEqual(kind, "key")
         self.assertIn("rejected", why)
-        kind, why = self.r.classify_incomplete("Starting agent now: reliops_v1\nsomething odd\n")
-        self.assertEqual((kind, "agent started" in why), ("other", True))
-        kind, why = self.r.classify_incomplete("some output\n")
-        self.assertEqual((kind, "before the agent started" in why), ("other", True))
+        self.assertEqual(self.r.classify_incomplete("some output\n"), ("other", "The run ended without a result (see the log)."))
         self.assertEqual(self.r.classify_incomplete("")[0], "other")
 
     def test_key_problem_through_a_gateway_is_not_read_as_a_dead_key(self):
@@ -561,7 +613,7 @@ class IncompleteReasonInTheTableTests(TmpRepoCase):
             self.skipTest(f"fastapi not available: {e}")
         logs = self.tmp / "results" / "gui_logs"
         logs.mkdir(parents=True)
-        (logs / "a.log").write_text("Timed out after 120s waiting for kind-worker3 to become Ready.\n", encoding="utf-8")
+        (logs / "a.log").write_text("Timed out after 120s waiting for kind-worker3 to become Ready.\nstart_problem failed for 'p' (deploy attempt 1/3): Timeout\n", encoding="utf-8")
         reason = app_module._incomplete_reason({"row": None, "log_file": "a.log"})
         self.assertIn("kind-worker3", reason)
         self.assertEqual(app_module._incomplete_reason({"row": {"Diagnosis.success": True}, "log_file": "a.log"}), "")

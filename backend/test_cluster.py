@@ -40,6 +40,8 @@ def fake_run(nodes_items, pods_items, containers=None, kubectl=True):
         if cmd[0] == "docker":
             if containers is None:
                 return None
+            if cmd[1] == "exec":
+                return 0, f"{cmd[2]} kubelet[1]: failed to run Kubelet: disk pressure\n"
             return 0, "".join(f"{n}\t{s}\tUp 2 hours\n" for n, s in containers)
         return None
     return _run
@@ -87,6 +89,15 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(len(by_id["clear_stuck_pods"]["commands"]), 2)
         self.assertIn("docker restart kind-control-plane kind-worker kind-worker2 kind-worker3", by_id["restart_nodes"]["commands"][0])
         self.assertIn("Restart the kind nodes", s["advice"])
+
+    def test_a_node_that_is_not_ready_comes_with_its_kubelet_log_and_a_bad_name_never_reaches_docker(self):
+        nodes_ = self.HEALTHY_NODES + [node("kind-worker3", "Unknown")]
+        s = self._status(fake_run(nodes_, [], self.ALL_UP + [("kind-worker3", "running")]))
+        self.assertEqual(list(s["kubelet_logs"]), ["kind-worker3"])
+        self.assertIn("disk pressure", s["kubelet_logs"]["kind-worker3"])
+        with mock.patch.object(cluster, "_run") as run:
+            self.assertIsNone(cluster.kubelet_log_tail("kind-worker3; rm -rf /"))
+        run.assert_not_called()
 
     def test_a_pod_deleted_a_few_seconds_ago_is_not_stuck(self):
         s = self._status(fake_run(self.HEALTHY_NODES, [pod("coredns-1", "kind-worker", ready="False", deleted_ago=5)], self.ALL_UP))
