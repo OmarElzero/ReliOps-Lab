@@ -77,11 +77,30 @@
     sel.disabled = !saved.length;
     $("q-delete").disabled = !Q.queue_id || !saved.some((q) => q.queue_id === Q.queue_id);
   }
+  // ---- experiment name: what the runs belong to, typed in the run bar, remembered per queue -----------------
+  const expKey = () => "lab_exp_" + (Q && Q.queue_id ? Q.queue_id : "new");
+  const expName = () => ($("q-exp") ? $("q-exp").value.trim() : "");
+  const roundOf = (label) => { const m = /^(.*?)(?: \(restart (\d+)\))?$/.exec(label || ""); return { base: (m && m[1]) || "", n: m && m[2] ? Number(m[2]) : 1 }; };
+  function loadExpName() { $("q-exp").value = pref.get(expKey(), pref.get("lab_exp_last", "")); }
+  function renderExperiments() {
+    const dl = $("q-exp-list");
+    dl.innerHTML = "";
+    ((preview && preview.experiments) || []).forEach((e) => dl.append(h("option", { value: e.name, label: `${plural(e.runs, "run")} recorded` })));
+    const note = $("q-exp-note");
+    const name = expName();
+    if (!name) { note.textContent = "Give this experiment a name; every run is recorded under it."; return; }
+    const known = ((preview && preview.experiments) || []).find((e) => e.name === name);
+    const r = roundOf(preview && preview.experiment_label);
+    note.textContent = !known ? "New name: nothing recorded under it yet, so every cell is to do."
+      : `${plural(known.runs, "run")} already recorded${r.n > 1 ? ` (counting round ${r.n})` : ""}. Same name continues; a new name starts fresh.`;
+  }
+
   function openQueue(q) {
     Q = q ? JSON.parse(JSON.stringify({ queue_id: q.queue_id, name: q.name, steps: q.steps || [] })) : blankQueue();
     dirty = false;
     pref.set("lab_queue_id", Q.queue_id || "");
     $("q-name").value = Q.name;
+    loadExpName();
     renderAll(); refreshPreview(true); renderOpen();
   }
   function markDirty() { dirty = true; renderHead(); renderTotals(); refreshPreview(); }
@@ -110,9 +129,9 @@
     clearTimeout(previewTimer);
     if (!Q.steps.length) { preview = null; renderSteps(); renderTotals(); return; }
     previewTimer = setTimeout(async () => {
-      const { ok, data } = await jsonPost("/api/queue/preview", { queue_id: Q.queue_id, name: Q.name, steps: Q.steps });
+      const { ok, data } = await jsonPost("/api/queue/preview", { queue_id: Q.queue_id, name: Q.name, steps: Q.steps, experiment: expName() });
       preview = ok ? data : null;
-      renderSteps(); renderTotals();
+      renderSteps(); renderTotals(); renderExperiments();
     }, now ? 0 : 350);
   }
   const stepPreview = (s) => (preview && preview.steps.find((p) => p.step_id === s.step_id)) || null;
@@ -216,9 +235,13 @@
     const eta = $("q-eta");
     if (eta) eta.textContent = left ? "≈ " + fmtDur(left * minPerRun() * 60) : "nothing left to run";
     const busy = jobBusy();
-    $("q-run").disabled = busy || !on.length || (!!preview && left === 0);
-    $("q-run").title = busy ? "Another job is running" : (preview && left === 0 ? "Every cell already has a result" : "");
+    const named = !!expName();
+    $("q-run").disabled = busy || !on.length || !named || (!!preview && left === 0);
+    $("q-run").title = busy ? "Another job is running" : (!named ? "Give the experiment a name first" : (preview && left === 0 ? "Every cell already has a result under this name" : ""));
     $("q-stop").disabled = !busy;
+    const hasRuns = !!preview && ((preview.experiments || []).some((e) => e.name === expName()));
+    $("q-restart").disabled = busy || !on.length || !named || !hasRuns;
+    $("q-restart").title = busy ? "Another job is running" : (!named ? "Give the experiment a name first" : (!hasRuns ? "Nothing is recorded under this name yet; use Run queue" : "Start the whole queue again from step 1 as a new round of this experiment"));
   }
 
   function moveStep(i, d) { const j = i + d; if (j < 0 || j >= Q.steps.length) return; [Q.steps[i], Q.steps[j]] = [Q.steps[j], Q.steps[i]]; markDirty(); renderSteps(); }
@@ -499,7 +522,7 @@
     const body = $("rd-body");
     body.innerHTML = "";
     const on = Q.steps.filter((s) => s.enabled !== false);
-    body.append(h("p", { class: "hint", text: `"${Q.name}" will run ${plural(on.length, "step")} in this order. Cells that already have a result are skipped.` }));
+    body.append(h("p", { class: "hint", text: `"${Q.name}" will run ${plural(on.length, "step")} in this order, recorded under the experiment "${(preview && preview.experiment_label) || expName()}". Cells that already have a result under that name are skipped.` }));
     const list = h("ol", { class: "q-steps", style: "margin-top:12px" });
     let issue = false;
     Q.steps.forEach((s) => {
@@ -522,10 +545,29 @@
   $("rd-ok").addEventListener("click", (e) => {
     e.preventDefault(); rd.close();
     $("q-log").textContent = ""; lastId = 0; lastRecorded = -1;
-    const p = new URLSearchParams({ queue_id: Q.queue_id });
+    startQueue(false);
+  });
+  function startQueue(restart) {
+    $("q-log").textContent = ""; lastId = 0; lastRecorded = -1;
+    const p = new URLSearchParams({ queue_id: Q.queue_id, experiment: expName() });
+    if (restart) p.set("restart", "true");
     if (who()) p.set("run_by", who());
     openStream("/api/queue/run?" + p.toString());
     setTimeout(pollState, 600);
+  }
+  $("q-restart").addEventListener("click", async () => {
+    if (!(await saveQueue(true))) return;
+    const r = roundOf(preview && preview.experiment_label);
+    const next = r.n + 1;
+    const msg = `Restart "${Q.name}" from scratch?\n\n`
+      + `Every step runs again from the beginning, recorded as "${r.base || expName()} (restart ${next})".\n`
+      + `Results already recorded are kept; nothing is deleted.\n\nOnly press OK if you really mean to run it all again.`;
+    if (!confirm(msg)) return;
+    startQueue(true);
+  });
+  $("q-exp").addEventListener("input", () => {
+    pref.set(expKey(), expName()); pref.set("lab_exp_last", expName());
+    renderTotals(); refreshPreview();
   });
 
   async function requestStop() {

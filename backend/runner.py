@@ -513,7 +513,7 @@ _RUN_LOG_HEADER_FALLBACK = [
 # has (and skipped if the template already lists them), so the template stays the single source of truth
 # and this tool never silently drops the diagnosis text again.
 LAB_EXTRA_COLUMNS = [
-    "judge_model_id", "run_by", "run_class", "config_label",
+    "judge_model_id", "run_by", "run_class", "config_label", "experiment",
     "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel", "manifest_id",
 ]
 
@@ -687,6 +687,7 @@ def append_csv_run(record: dict) -> Path:
         "run_by": record.get("run_by", ""),
         "run_class": record.get("run_class", ""),
         "config_label": record.get("config_label", ""),
+        "experiment": record.get("experiment", ""),
         "diagnosis_text": record.get("diagnosis_text"),
         "judge_reasoning": record.get("judge_reasoning"),
         "judge_checklist": record.get("judge_checklist"),
@@ -1177,6 +1178,7 @@ def stream_campaign(
     record_walkthrough: bool = True,
     cells: list[tuple[str, int]] | None = None,
     manifest_id: str | None = None,
+    experiment: str | None = None,
     on_result=None,
 ) -> Iterator[str]:
     """Runs one problem at a time (SREGym itself is single-run per process) and yields log lines
@@ -1309,6 +1311,8 @@ def stream_campaign(
             # for a measured campaign. The results tables keep the two apart so they are never averaged.
             "run_class": run_class if run_class in ("exploration", "frozen") else "exploration",
             "config_label": (config_label or "").strip(),
+            # What this run belongs to, in the person's own words (one experiment can hold many runs and queue starts).
+            "experiment": (experiment or "").strip(),
             "transcript_rel": transcript_rel,
             "manifest_id": manifest_id,
             "git_commit": commit,

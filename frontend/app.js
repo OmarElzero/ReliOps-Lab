@@ -458,6 +458,8 @@ document.getElementById("run-test").addEventListener("click", async () => {
     if (runBy) params.set("run_by", runBy);
     const configLabel = configLabelEl.value.trim();
     if (configLabel) params.set("config_label", configLabel);
+    const expEl = document.getElementById("experiment-name");
+    if (expEl && expEl.value.trim()) params.set("experiment", expEl.value.trim());
     params.set("run_class", runClassEl.value);
     params.set("record_walkthrough", document.getElementById("record-walkthrough").checked ? "true" : "false");
 

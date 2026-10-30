@@ -22,6 +22,7 @@ FIELDS = {
     "agent_id": "agent_id", "model_id": "model_id", "action_space": "action_space", "config_label": "config_label",
     "judge_model_id": "judge_model_id", "run_class": "run_class", "purpose": "purpose", "category": "category",
     "app": "app", "problem_id": "problem_id", "run_by": "run_by", "manifest_id": "manifest_id",
+    "experiment": "experiment",
 }
 RUN_LIMIT = 3000
 
@@ -80,7 +81,7 @@ def apply_filters(runs: list[dict], f: dict, metric: str = "e2e_pass") -> list[d
         if (d0 and day < d0) or (d1 and day > d1):
             continue
         if q:
-            hay = " ".join(str(r.get(x) or "") for x in ("problem_id", "config_label", "run_by", "review_note",
+            hay = " ".join(str(r.get(x) or "") for x in ("problem_id", "config_label", "experiment", "run_by", "review_note",
                                                         "diagnosis_text", "failure_mode_tag", "model_id")).lower()
             if q not in hay:
                 continue
@@ -212,7 +213,7 @@ def build(all_runs: list[dict], f: dict, metric: str, manifests: list[dict], lab
 
     trim = sorted(runs, key=lambda r: r.get("timestamp_utc") or "", reverse=True)[:RUN_LIMIT]
     cols = ("run_id", "timestamp_utc", "problem_id", "category", "app", "purpose", "purpose_source", "agent_id", "model_id",
-            "action_space", "config_label", "judge_model_id", "run_class", "repeat_index", "e2e_pass", "diagnosis_pass",
+            "action_space", "config_label", "experiment", "judge_model_id", "run_class", "repeat_index", "e2e_pass", "diagnosis_pass",
             "mitigation_pass", "ttd_s", "ttm_s", "failure_mode_tag", "first_bad_step", "review_note", "run_by", "manifest_id",
             "git_commit", "key_slot", "has_story", "log_file", "total_tokens")
     rows = []

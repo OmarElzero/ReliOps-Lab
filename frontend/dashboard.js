@@ -11,7 +11,7 @@
   const FIELDS = [
     ["category", "Category"], ["problem_id", "Problem"], ["agent_id", "Agent"], ["action_space", "Action space"],
     ["model_id", "Model"], ["config_label", "Config label"], ["judge_model_id", "Judge"], ["run_class", "Run class"],
-    ["outcome", "Outcome"], ["failure_tag", "Failure tag"], ["app", "App"], ["run_by", "Run by"], ["manifest_id", "Frozen campaign"],
+    ["outcome", "Outcome"], ["failure_tag", "Failure tag"], ["app", "App"], ["run_by", "Run by"], ["manifest_id", "Frozen campaign"], ["experiment", "Experiment"],
   ];
   const PURPOSES = [
     ["", "All runs", "every recorded run"],
@@ -532,6 +532,7 @@
       tr.appendChild(purposeCell(r));
       tr.appendChild(el("td", `${r.agent_id || "—"}${r.action_space ? " · " + r.action_space : ""}`));
       tr.appendChild(el("td", r.model_id || "—"));
+      tr.appendChild(el("td", r.experiment || "—"));
       const lab = el("td", (r.config_label || "—") + (r.run_class === "frozen" ? " ❄" : ""));
       lab.title = r.run_class === "frozen" ? "frozen run" : "exploration run";
       tr.appendChild(lab);

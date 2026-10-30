@@ -5,6 +5,7 @@ that was stopped, crashed or interrupted resumes where it left off."""
 
 from __future__ import annotations
 
+import re
 import uuid
 
 import campaign
@@ -78,6 +79,51 @@ def clean_queue(raw: dict) -> dict:
             "created_by": raw.get("created_by") or "unknown"}
 
 
+_ROUND_RE = re.compile(r"^(?P<base>.*?)(?: \(restart (?P<n>\d+)\))?$")
+
+
+def parse_label(label: str) -> tuple[str, int]:
+    """'name' -> ('name', 1); 'name (restart 3)' -> ('name', 3)."""
+    m = _ROUND_RE.match((label or "").strip())
+    return (m.group("base").strip(), int(m.group("n")) if m.group("n") else 1) if m else ((label or "").strip(), 1)
+
+
+def make_label(base: str, round_n: int) -> str:
+    return base if round_n <= 1 else f"{base} (restart {round_n})"
+
+
+def current_round(base: str, runs: list[dict]) -> int:
+    """The newest round recorded for this experiment name (1 when it has none yet)."""
+    best = 1
+    for r in runs:
+        b, n = parse_label(r.get("experiment") or "")
+        if b and b == base:
+            best = max(best, n)
+    return best
+
+
+def experiment_label(base: str, runs: list[dict], restart: bool = False) -> str:
+    """The label runs are stamped with: the newest round of this name, or the next one when restarting."""
+    base = (base or "").strip()
+    n = current_round(base, runs)
+    if restart and any(parse_label(r.get("experiment") or "")[0] == base for r in runs):
+        n += 1
+    return make_label(base, n)
+
+
+def experiment_names(runs: list[dict]) -> list[dict]:
+    """Experiment names seen on recorded runs, newest first: [{name, runs, last}]."""
+    seen: dict[str, dict] = {}
+    for r in runs:
+        b, _ = parse_label(r.get("experiment") or "")
+        if not b:
+            continue
+        e = seen.setdefault(b, {"name": b, "runs": 0, "last": ""})
+        e["runs"] += 1
+        e["last"] = max(e["last"], r.get("timestamp_utc") or "")
+    return sorted(seen.values(), key=lambda e: e["last"], reverse=True)
+
+
 def _matches(step: dict, run: dict) -> bool:
     return ((run.get("agent_id") or "") == step["agent_id"]
             and (run.get("model_id") or "") == step["model_id"]
@@ -88,7 +134,7 @@ def _matches(step: dict, run: dict) -> bool:
             and (not step["manifest_id"] or run.get("manifest_id") == step["manifest_id"]))
 
 
-def cells(step: dict, runs: list[dict], manifest: dict | None = None) -> list[dict]:
+def cells(step: dict, runs: list[dict], manifest: dict | None = None, experiment: str | None = None) -> list[dict]:
     """[{problem, repeat, status}] for every cell of the step: pass / fail / incomplete (ran, no
     known outcome) / missing. Latest matching run per cell wins."""
     if step["manifest_id"] and manifest:
@@ -98,6 +144,8 @@ def cells(step: dict, runs: list[dict], manifest: dict | None = None) -> list[di
     for r in runs:
         if not _matches(step, r):
             continue
+        if experiment is not None and (r.get("experiment") or "") != experiment:
+            continue  # a step's progress is counted per experiment label (frozen campaigns are counted by manifest)
         cell = (r.get("problem_id") or "?", int(r.get("repeat_index") or 1))
         if cell not in latest or (r.get("timestamp_utc") or "") >= (latest[cell].get("timestamp_utc") or ""):
             latest[cell] = r
@@ -114,22 +162,25 @@ def cells(step: dict, runs: list[dict], manifest: dict | None = None) -> list[di
     return out
 
 
-def todo(step: dict, runs: list[dict], manifest: dict | None = None) -> list[tuple[str, int]]:
+def todo(step: dict, runs: list[dict], manifest: dict | None = None, experiment: str | None = None) -> list[tuple[str, int]]:
     """Cells this step still has to run now."""
-    cs = cells(step, runs, manifest)
+    cs = cells(step, runs, manifest, experiment)
     if step["only_missing"] or step["manifest_id"]:
         cs = [c for c in cs if c["status"] in ("missing", "incomplete")]
     return [(c["problem"], c["repeat"]) for c in cs]
 
 
-def preview(queue: dict, runs: list[dict], manifests: list[dict]) -> dict:
+def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: str | None = None) -> dict:
+    """`experiment` is the name typed in the run bar (or None). Progress is counted for its newest round."""
+    base = (experiment or "").strip()
+    label = experiment_label(base, runs) if base else None
     by_id = {m.get("manifest_id"): m for m in manifests}
     out, total, left = [], 0, 0
     for s in queue["steps"]:
         manifest = by_id.get(s["manifest_id"]) if s["manifest_id"] else None
-        cs = cells(s, runs, manifest)
+        cs = cells(s, runs, manifest, label)
         counts = {k: sum(1 for c in cs if c["status"] == k) for k in ("pass", "fail", "incomplete", "missing")}
-        n_todo = len(todo(s, runs, manifest)) if s["enabled"] else 0
+        n_todo = len(todo(s, runs, manifest, label)) if s["enabled"] else 0
         total += len(cs) if s["enabled"] else 0
         left += n_todo
         issue = None
@@ -137,4 +188,5 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict]) -> dict:
             issue = "frozen campaign not found (was it created on another machine that is not synced?)"
         out.append({"step_id": s["step_id"], "cells": cs, "counts": counts, "total": len(cs), "todo": n_todo,
                     "issue": issue})
-    return {"steps": out, "total_runs": total, "runs_left": left}
+    return {"steps": out, "total_runs": total, "runs_left": left, "experiment_label": label,
+            "experiments": experiment_names(runs)}

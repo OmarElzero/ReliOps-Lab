@@ -21,6 +21,39 @@ def step(**kw):
     return base
 
 
+class ExperimentLabelTests(unittest.TestCase):
+    def test_labels_rounds_and_progress_per_experiment(self):
+        q = queueplan
+        self.assertEqual(q.parse_label("Night one"), ("Night one", 1))
+        self.assertEqual(q.parse_label("Night one (restart 3)"), ("Night one", 3))
+        self.assertEqual(q.make_label("A", 1), "A")
+        self.assertEqual(q.make_label("A", 2), "A (restart 2)")
+        runs = [dict(run(1, "p1", 1, True), experiment="A"), dict(run(2, "p1", 2, True), experiment="A")]
+        self.assertEqual(q.experiment_label("A", runs), "A")
+        self.assertEqual(q.experiment_label("A", runs, restart=True), "A (restart 2)")
+        self.assertEqual(q.experiment_label("B", runs, restart=True), "B")   # nothing to restart from
+        runs.append(dict(run(3, "p1", 1, True), experiment="A (restart 2)"))
+        self.assertEqual(q.experiment_label("A", runs), "A (restart 2)")
+        self.assertEqual(q.experiment_label("A", runs, restart=True), "A (restart 3)")
+        s = q.clean_step(step())
+        by = lambda lab: {(c["problem"], c["repeat"]): c["status"] for c in q.cells(s, runs, None, lab)}
+        self.assertEqual(by("A")[("p1", 1)], "pass")
+        self.assertEqual(by("A (restart 2)")[("p1", 2)], "missing")
+        self.assertEqual(by("B")[("p1", 1)], "missing")
+        self.assertEqual(q.cells(s, runs)[0]["status"], "pass")      # no experiment given: old behaviour
+        names = q.experiment_names(runs)
+        self.assertEqual([n["name"] for n in names], ["A"])
+        self.assertEqual(names[0]["runs"], 3)
+
+    def test_preview_counts_the_typed_name(self):
+        s = queueplan.clean_step(step())
+        queue = {"queue_id": "x", "name": "q", "steps": [s]}
+        runs = [dict(run(1, "p1", 1, True), experiment="A")]
+        self.assertEqual(queueplan.preview(queue, runs, [], "A")["runs_left"], 3)
+        self.assertEqual(queueplan.preview(queue, runs, [], "B")["runs_left"], 4)
+        self.assertEqual(queueplan.preview(queue, runs, [], "B")["experiment_label"], "B")
+
+
 class PlanTests(unittest.TestCase):
     def test_step_validation(self):
         self.assertEqual(queueplan.clean_step(step())["repeat_n"], 2)
@@ -194,14 +227,19 @@ class QueueApiTests(TmpRepoCase):
                                  "problem_id": p, "repeat_index": rep, "agent_id": kw["agent"],
                                  "model_id": kw["model"], "judge_model_id": kw["judge_model"],
                                  "action_space": kw["action_space"], "config_label": kw["config_label"] or "",
-                                 "run_class": kw["run_class"], "row": {"Diagnosis.success": "True", "Mitigation.success": "True"}})
+                                 "run_class": kw["run_class"], "experiment": kw.get("experiment") or "",
+                                 "row": {"Diagnosis.success": "True", "Mitigation.success": "True"}})
                 yield f"\n===== [1/1] problem={p} repeat={rep}/2 agent=a action_space=x =====\n"
                 yield f"----- recorded result for {p}: parsed row found -----\n"
 
         with mock.patch.object(runner, "stream_campaign", side_effect=fake_campaign), \
                 mock.patch.object(self.app_module, "_on_result", side_effect=lambda rec: self._record(rec)):
             r = c.get("/api/queue/run", params={"queue_id": q["queue_id"]})
+            self.assertIn("Give this experiment a name", r.text)   # every run is recorded under a name
+            self.assertEqual(seen, [])
+            r = c.get("/api/queue/run", params={"queue_id": q["queue_id"], "experiment": "Night one"})
             self.assertIn("[[DONE]]", r.text)
+            self.assertIn("experiment: Night one", r.text)
             self.assertIn("step 1/3 start: typed | runs 4 to do", r.text)
             self.assertIn("step 3/3 skipped", r.text)
             self.assertIn("finished", r.text)
@@ -210,9 +248,18 @@ class QueueApiTests(TmpRepoCase):
             self.assertEqual(len(seen[0][2]), 4)
             # second go: everything is done, nothing runs again
             seen.clear()
-            r = c.get("/api/queue/run", params={"queue_id": q["queue_id"]})
+            r = c.get("/api/queue/run", params={"queue_id": q["queue_id"], "experiment": "Night one"})
             self.assertEqual(seen, [])
             self.assertEqual(r.text.count("nothing to do"), 2)
+            # a new name starts fresh; the old runs stay but do not count for it
+            r = c.get("/api/queue/run", params={"queue_id": q["queue_id"], "experiment": "Night two"})
+            self.assertEqual(len(seen), 2)
+            self.assertEqual({s[1] for s in seen}, {"typed", "typed+shell"})
+            # restart: same name, new round, everything runs again and is stamped with the round
+            seen.clear()
+            r = c.get("/api/queue/run", params={"queue_id": q["queue_id"], "experiment": "Night one", "restart": "true"})
+            self.assertIn("experiment: Night one (restart 2)", r.text)
+            self.assertEqual(len(seen), 2)
             pv = c.get("/api/queue/preview", params={"queue_id": q["queue_id"]}).json()
             self.assertEqual(pv["runs_left"], 0)
             self.assertEqual(pv["steps"][0]["counts"]["pass"], 4)
@@ -237,9 +284,9 @@ class QueueApiTests(TmpRepoCase):
             gate.wait(5)
 
         with mock.patch.object(runner, "stream_campaign", side_effect=slow_campaign):
-            job = jobs.start("queue", "q", lambda: self.app_module._queue_lines(self.app_module._find_queue(q["queue_id"]), None))
+            job = jobs.start("queue", "q", lambda: self.app_module._queue_lines(self.app_module._find_queue(q["queue_id"]), None, "x"))
             time.sleep(0.2)
-            r = c.get("/api/queue/run", params={"queue_id": q["queue_id"]})
+            r = c.get("/api/queue/run", params={"queue_id": q["queue_id"], "experiment": "x"})
             self.assertIn("already running", r.text)
             self.assertTrue(c.get("/api/state").json()["busy"])
             c.post("/api/stop")

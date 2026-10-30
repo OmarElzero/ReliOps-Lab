@@ -240,6 +240,7 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "judge_model_id": r.get("judge_model_id"),
             "action_space": r.get("action_space"),
             "config_label": r.get("config_label") or "",
+            "experiment": r.get("experiment") or "",
             "run_class": r.get("run_class") or "exploration",
             "repeat_index": r.get("repeat_index"),
             "repeat_n": r.get("repeat_n"),
@@ -406,7 +407,8 @@ def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str],
                force_build: bool = False, repeat_n: int = 1, run_by: Optional[str] = None,
                config_label: Optional[str] = None, run_class: str = "exploration", record_walkthrough: bool = True,
                manifest_id: Optional[str] = None, slice_k: int = 1, slice_n: int = 1,
-               cells: Optional[list[tuple[str, int]]] = None, purpose: Optional[str] = None):
+               cells: Optional[list[tuple[str, int]]] = None, purpose: Optional[str] = None,
+               experiment: Optional[str] = None):
     """The lines of one run: refusals first (frozen runs must match their manifest), then
     runner.stream_campaign. Shared by /api/run and the queue."""
     problem_list = list(problems)
@@ -451,7 +453,8 @@ def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str],
     yield from runner.stream_campaign(
         agent=agent, action_space=action_space, model=model, judge_model=judge_model, problems=problem_list,
         repeat_n=repeat_n, force_build=force_build, run_by=run_by, config_label=config_label, run_class=run_class,
-        record_walkthrough=record_walkthrough, cells=cell_list, manifest_id=manifest_id, on_result=on_result,
+        record_walkthrough=record_walkthrough, cells=cell_list, manifest_id=manifest_id, experiment=experiment,
+        on_result=on_result,
     )
 
 
@@ -473,6 +476,7 @@ def run(
     slice_n: int = 1,
     cells: Optional[str] = None,  # explicit "problem:repeat,problem:repeat" list
     purpose: Optional[str] = None,  # experiment | dev | final; empty = decided automatically from the pinned sets
+    experiment: Optional[str] = None,  # the person's name for what this run belongs to (optional for a quick run)
 ):
     problem_list = [p.strip() for p in problems.split(",") if p.strip()]
     cell_list = None
@@ -484,7 +488,8 @@ def run(
     kwargs = dict(agent=agent, model=model, judge_model=judge_model, problems=problem_list, action_space=action_space,
                   force_build=force_build, repeat_n=repeat_n, run_by=run_by, config_label=config_label,
                   run_class=run_class, record_walkthrough=record_walkthrough, manifest_id=manifest_id,
-                  slice_k=slice_k, slice_n=slice_n, cells=cell_list, purpose=purpose or None)
+                  slice_k=slice_k, slice_n=slice_n, cells=cell_list, purpose=purpose or None,
+                  experiment=(experiment or "").strip() or None)
     return _job_sse(lambda: _run_lines(**kwargs), "run", f"{agent} · {len(problem_list)} problem(s)")
 
 
@@ -579,6 +584,7 @@ class QueueIn(BaseModel):
     name: str
     steps: list[dict]
     created_by: str = ""
+    experiment: str = ""       # only used by the preview: the name typed in the run bar
 
 
 def _queues() -> list[dict]:
@@ -614,12 +620,12 @@ def delete_queue(queue_id: str):
 
 
 @app.get("/api/queue/preview")
-def queue_preview(queue_id: str):
+def queue_preview(queue_id: str, experiment: Optional[str] = None):
     q = _find_queue(queue_id)
     if q is None:
         return JSONResponse({"error": "unknown queue"}, status_code=404)
     _, runs = _collect_runs(5000)
-    return queueplan.preview(q, runs, store.read("manifests"))
+    return queueplan.preview(q, runs, store.read("manifests"), experiment)
 
 
 @app.post("/api/queue/preview")
@@ -633,14 +639,17 @@ def queue_preview_draft(body: QueueIn):
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     _, runs = _collect_runs(5000)
-    return queueplan.preview(q, runs, store.read("manifests"))
+    return queueplan.preview(q, runs, store.read("manifests"), body.experiment)
 
 
-def _queue_lines(queue: dict, run_by: Optional[str]):
+def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: bool = False):
     steps = queue["steps"]
     manifests = store.read("manifests")
     runner._stop_event.clear()
+    _, all_runs = _collect_runs(5000)
+    label = queueplan.experiment_label(experiment, all_runs, restart=restart)
     yield f"##### [QUEUE] {queue['name']}: {len(steps)} step(s) #####\n"
+    yield f"##### [QUEUE] experiment: {label}{' (restarted from scratch)' if restart else ''} #####\n"
     for i, step in enumerate(steps, start=1):
         if runner._stop_event.is_set():
             yield f"\n##### [QUEUE] stopped before step {i}/{len(steps)}; the rest was not started #####\n"
@@ -654,7 +663,7 @@ def _queue_lines(queue: dict, run_by: Optional[str]):
             yield f"##### [QUEUE] step {i}/{len(steps)} cannot run: frozen campaign {step['manifest_id']} not found #####\n"
             continue
         _, runs = _collect_runs(5000)
-        cell_list = queueplan.todo(step, runs, manifest)
+        cell_list = queueplan.todo(step, runs, manifest, label)
         yield f"\n##### [QUEUE] step {i}/{len(steps)} start: {step['name']} | runs {len(cell_list)} to do #####\n"
         if not cell_list:
             yield f"##### [QUEUE] step {i}/{len(steps)} nothing to do: every cell already has a result #####\n"
@@ -665,19 +674,23 @@ def _queue_lines(queue: dict, run_by: Optional[str]):
             repeat_n=step["repeat_n"], run_by=run_by, config_label=step.get("config_label") or None,
             run_class=step["run_class"], record_walkthrough=bool(step.get("record_walkthrough", True)),
             manifest_id=step.get("manifest_id"), cells=None if step.get("manifest_id") else cell_list,
-            purpose=step.get("purpose") or None)
+            purpose=step.get("purpose") or None, experiment=label)
         yield f"##### [QUEUE] step {i}/{len(steps)} end #####\n"
     yield "\n##### [QUEUE] finished #####\n"
 
 
 @app.get("/api/queue/run")
-def queue_run(queue_id: str, run_by: Optional[str] = None):
+def queue_run(queue_id: str, run_by: Optional[str] = None, experiment: str = "", restart: bool = False):
     q = _find_queue(queue_id)
     if q is None:
         return _refusal(["unknown queue\n"])
     if not q.get("steps"):
         return _refusal(["this queue has no steps\n"])
-    return _job_sse(lambda: _queue_lines(q, run_by), "queue", q["name"], {"queue_id": queue_id})
+    experiment = (experiment or "").strip()
+    if not experiment:
+        return _refusal(["Give this experiment a name first (the box next to Run queue). Every run is recorded under it.\n"])
+    return _job_sse(lambda: _queue_lines(q, run_by, experiment, restart), "queue", q["name"],
+                    {"queue_id": queue_id, "experiment": experiment})
 
 
 # ---- Problem cards ------------------------------------------------------------------
