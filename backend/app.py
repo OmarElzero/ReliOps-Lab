@@ -29,6 +29,8 @@ import jobs
 import queueplan
 import runner
 import stats
+import pins
+import dashboard
 import store
 
 app = FastAPI(title="ReliOps Lab")
@@ -94,6 +96,11 @@ def queue_js():
     return _static("queue.js")
 
 
+@app.get("/dashboard.js")
+def dashboard_js():
+    return _static("dashboard.js")
+
+
 @app.get("/style.css")
 def style_css():
     return _static("style.css")
@@ -105,7 +112,10 @@ def config():
         "environments": [{"id": "sregym", "label": "SREGym (live Kubernetes faults)"}],
         "agents": runner.AGENTS,
         "model_presets": runner.MODEL_PRESETS,
-        "problem_sets": _all_problem_sets(),
+        "problem_sets": _with_pins(_all_problem_sets()),
+        "pins": [{k: v for k, v in p.items() if k != "problems"} for p in pins.load()],
+        "pin_overlap": pins.overlap(),
+        "purposes": [{"id": k, "help": v} for k, v in dashboard.PURPOSE_HELP.items()],
         "firebase_status": firebase_sync.status(),
         "reliops_dir": str(runner.reliops_dir()),
         "default_firebase_key_path": str(runner.default_firebase_key_path()),
@@ -240,6 +250,7 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "has_story": bool(r.get("transcript_rel") or r.get("story_shared")),
             "manifest_id": r.get("manifest_id"),
             "git_commit": r.get("git_commit"),
+            "key_slot": r.get("key_slot"),
             "total_tokens": r.get("total_tokens"),
             "prompt_tokens": r.get("prompt_tokens"),
             "completion_tokens": r.get("completion_tokens"),
@@ -251,7 +262,32 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "reviewed_by": review.get("reviewer") or "",
             **normalized,
         })
+    _enrich(runs)
     return source, runs
+
+
+def _problem_index() -> dict[str, dict]:
+    idx: dict[str, dict] = {}
+    for s in runner.problem_sets():
+        for p in s["problems"]:
+            idx.setdefault(p["id"], {"category": p.get("category") or "", "app": p.get("app") or "",
+                                     "difficulty": p.get("difficulty") or ""})
+    return idx
+
+
+def _enrich(runs: list[dict]) -> None:
+    """Adds category, app and purpose to every run. The purpose is a person's mark when there is one,
+    otherwise it follows from the pinned sets (see dashboard.purpose_of)."""
+    idx = _problem_index()
+    roles = pins.roles()
+    marks = {m["run_id"]: m for m in store.read("marks") if m.get("run_id") and not m.get("deleted")}
+    for r in runs:
+        info = idx.get(r.get("problem_id") or "") or {}
+        r["category"] = info.get("category") or "Uncategorized"
+        r["app"] = info.get("app") or ""
+        mark = marks.get(r.get("run_id"))
+        r["purpose"], r["purpose_source"] = dashboard.purpose_of(r, mark, roles)
+        r["mark_note"] = (mark or {}).get("note") or ""
 
 
 @app.get("/api/results")
@@ -282,6 +318,16 @@ def compare(a: str, b: str, metric: str = "e2e_pass", limit: int = 5000):
         return JSONResponse({"error": f"metric must be one of {stats.METRICS}"}, status_code=400)
     _, runs = _collect_runs(limit)
     return stats.compare(runs, a, b, metric)
+
+
+@app.get("/api/run/{run_id}")
+def one_run(run_id: str):
+    """One run with everything stored for it (diagnosis text, judge reasoning and checklist, tags, purpose)."""
+    _, runs = _collect_runs(100000)
+    r = next((x for x in runs if x.get("run_id") == run_id), None)
+    if r is None:
+        return JSONResponse({"error": "no such run"}, status_code=404)
+    return r
 
 
 @app.get("/api/story/{run_id}")
@@ -360,7 +406,7 @@ def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str],
                force_build: bool = False, repeat_n: int = 1, run_by: Optional[str] = None,
                config_label: Optional[str] = None, run_class: str = "exploration", record_walkthrough: bool = True,
                manifest_id: Optional[str] = None, slice_k: int = 1, slice_n: int = 1,
-               cells: Optional[list[tuple[str, int]]] = None):
+               cells: Optional[list[tuple[str, int]]] = None, purpose: Optional[str] = None):
     """The lines of one run: refusals first (frozen runs must match their manifest), then
     runner.stream_campaign. Shared by /api/run and the queue."""
     problem_list = list(problems)
@@ -396,10 +442,16 @@ def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str],
                "it was measured with are recorded and enforced.\n")
         return
 
+    def on_result(record: dict) -> None:
+        _on_result(record)
+        if purpose in dashboard.PURPOSES:       # the person said what this run is for; record it as a mark
+            store.append("marks", {"run_id": record.get("run_id"), "purpose": purpose, "note": "set when the run was started",
+                                   "marked_by": run_by or "unknown"})
+
     yield from runner.stream_campaign(
         agent=agent, action_space=action_space, model=model, judge_model=judge_model, problems=problem_list,
         repeat_n=repeat_n, force_build=force_build, run_by=run_by, config_label=config_label, run_class=run_class,
-        record_walkthrough=record_walkthrough, cells=cell_list, manifest_id=manifest_id, on_result=_on_result,
+        record_walkthrough=record_walkthrough, cells=cell_list, manifest_id=manifest_id, on_result=on_result,
     )
 
 
@@ -420,6 +472,7 @@ def run(
     slice_k: int = 1,  # this machine's share of the missing cells: k of n
     slice_n: int = 1,
     cells: Optional[str] = None,  # explicit "problem:repeat,problem:repeat" list
+    purpose: Optional[str] = None,  # experiment | dev | final; empty = decided automatically from the pinned sets
 ):
     problem_list = [p.strip() for p in problems.split(",") if p.strip()]
     cell_list = None
@@ -431,7 +484,7 @@ def run(
     kwargs = dict(agent=agent, model=model, judge_model=judge_model, problems=problem_list, action_space=action_space,
                   force_build=force_build, repeat_n=repeat_n, run_by=run_by, config_label=config_label,
                   run_class=run_class, record_walkthrough=record_walkthrough, manifest_id=manifest_id,
-                  slice_k=slice_k, slice_n=slice_n, cells=cell_list)
+                  slice_k=slice_k, slice_n=slice_n, cells=cell_list, purpose=purpose or None)
     return _job_sse(lambda: _run_lines(**kwargs), "run", f"{agent} · {len(problem_list)} problem(s)")
 
 
@@ -483,6 +536,22 @@ def _all_problem_sets() -> list[dict]:
                       "problems": rows, "saved": True, "name": rec["name"]})
     custom = [s for s in base if s["id"] == "custom"]
     return [s for s in base if s["id"] != "custom"] + saved + custom
+
+
+def _with_pins(sets: list[dict]) -> list[dict]:
+    """Tags the sets that are pinned for the phase: role (frozen / dev), and whether the file still
+    matches what was pinned."""
+    by_set = {p["set_id"]: p for p in pins.load()}
+    out = []
+    for s in sets:
+        p = by_set.get(s["id"])
+        if p:
+            tag = {"frozen": "frozen set", "dev": "dev set"}[p["role"]]
+            warn = "" if p["status"] == "ok" else " — CHANGED since pinned" if p["status"] == "changed" else " — file missing"
+            s = {**s, "pin": {"role": p["role"], "status": p["status"], "pinned_on": p["pinned_on"], "hash": p["pinned_hash"]},
+                 "label": f"{s['label']} · pinned {tag}{warn}"}
+        out.append(s)
+    return out
 
 
 @app.post("/api/problem_set")
@@ -595,7 +664,8 @@ def _queue_lines(queue: dict, run_by: Optional[str]):
             problems=step["problems"], action_space=step.get("action_space"), force_build=bool(step.get("force_build")),
             repeat_n=step["repeat_n"], run_by=run_by, config_label=step.get("config_label") or None,
             run_class=step["run_class"], record_walkthrough=bool(step.get("record_walkthrough", True)),
-            manifest_id=step.get("manifest_id"), cells=None if step.get("manifest_id") else cell_list)
+            manifest_id=step.get("manifest_id"), cells=None if step.get("manifest_id") else cell_list,
+            purpose=step.get("purpose") or None)
         yield f"##### [QUEUE] step {i}/{len(steps)} end #####\n"
     yield "\n##### [QUEUE] finished #####\n"
 
@@ -777,3 +847,120 @@ def export_summary_svg(metric: str = "e2e_pass", run_class: Optional[str] = None
         runs = [r for r in runs if r["run_class"] == run_class]
     return PlainTextResponse(export.summary_svg(stats.summarize(runs, metric), metric), media_type="image/svg+xml",
                              headers={"Content-Disposition": f"attachment; filename=reliops_summary_{metric}.svg"})
+
+
+# ---- Run purposes (marks) and the Results dashboard -------------------------------------
+class MarkIn(BaseModel):
+    run_ids: list[str]
+    purpose: Optional[str] = None      # experiment | dev | final; empty clears the mark (back to automatic)
+    note: Optional[str] = None
+    marked_by: Optional[str] = None
+
+
+@app.post("/api/marks")
+def set_marks(body: MarkIn):
+    """Marks runs as experiment (just look), dev (analyse, may tune on) or final (a frozen-set run that is
+    reported). A mark overrides the automatic purpose; clearing it restores the automatic one."""
+    ids = list(dict.fromkeys(i.strip() for i in body.run_ids if i and i.strip()))
+    if not ids:
+        return JSONResponse({"error": "no runs given"}, status_code=400)
+    if body.purpose and body.purpose not in dashboard.PURPOSES:
+        return JSONResponse({"error": f"purpose must be one of {list(dashboard.PURPOSES)} or empty"}, status_code=400)
+    for rid in ids:
+        store.append("marks", {"run_id": rid, "purpose": body.purpose or None, "deleted": not body.purpose,
+                               "note": (body.note or "").strip(), "marked_by": body.marked_by or "unknown"})
+    return {"ok": True, "marked": len(ids), "purpose": body.purpose or "automatic"}
+
+
+class DashboardIn(BaseModel):
+    filters: dict = {}
+    metric: str = "e2e_pass"
+
+
+def _dashboard(filters: dict, metric: str) -> dict:
+    if metric not in stats.METRICS:
+        raise ValueError(f"metric must be one of {stats.METRICS}")
+    source, runs = _collect_runs(100000)
+    return dashboard.build(runs, filters, metric, store.read("manifests"), store.read("labels"),
+                           store.read("rejudges"), source)
+
+
+@app.post("/api/dashboard")
+def dashboard_view(body: DashboardIn):
+    """Everything the Results tab shows, computed from exactly the runs the filters leave in view."""
+    try:
+        return _dashboard(body.filters, body.metric)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/report.md")
+def dashboard_report(body: DashboardIn):
+    try:
+        d = _dashboard(body.filters, body.metric)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return PlainTextResponse(dashboard.report_markdown(d), media_type="text/markdown; charset=utf-8",
+                             headers={"Content-Disposition": "attachment; filename=reliops_results_report.md"})
+
+
+# ---- API key health (names and owners only; the secret never leaves .env) -------------------
+def _machine() -> str:
+    import socket
+    return socket.gethostname()
+
+
+def _key_states() -> dict:
+    """{var: {status, until, owner, reason}} for this machine. Keys are per person, so each laptop tracks its own."""
+    me = _machine()
+    return {r["var"]: r for r in store.read("key_status") if r.get("owner_machine") == me and r.get("var")}
+
+
+def _record_key_event(var: str, owner: str | None, status: str, until: float | None, reason: str | None) -> None:
+    store.append("key_status", {"owner_machine": _machine(), "var": var, "owner": owner or var, "status": status,
+                                "until": until, "reason": reason or "", "marked_by": "lab"})
+
+
+runner.KEY_STATE_PROVIDER = _key_states
+runner.KEY_EVENT_SINK = _record_key_event
+
+
+@app.get("/api/keys")
+def key_health():
+    """The model keys this machine has, with their health. Pool slots (RELIOPS_KEY_POOL) first."""
+    env = runner.merged_env_vars()
+    pool = runner.key_pool(env)
+    states = _key_states()
+    names = [p["var"] for p in pool] or [k for k in runner.KNOWN_PROVIDERS if env.get(k)]
+    out = []
+    for n in names:
+        st = states.get(n) or {}
+        status = st.get("status") or "ok"
+        if status == "exhausted" and (st.get("until") or 0) <= __import__("time").time():
+            status = "ok"
+        owner = next((p["owner"] for p in pool if p["var"] == n), n)
+        out.append({"var": n, "owner": owner, "status": status, "until": st.get("until"), "reason": st.get("reason") or ""})
+    return {"pool": len(pool) >= 2, "keys": out,
+            "help": "Set RELIOPS_KEY_POOL=GEMINI_API_KEY,GEMINI_API_KEY_2 (and optionally RELIOPS_KEY_OWNERS=name1,name2) in the Lab's .env to rotate. Off by default."}
+
+
+class KeyMarkIn(BaseModel):
+    var: str
+    status: str            # ok | dead | exhausted
+    by: Optional[str] = None
+
+
+@app.post("/api/keys/mark")
+def key_mark(body: KeyMarkIn):
+    if body.status not in ("ok", "dead", "exhausted"):
+        return JSONResponse({"error": "status must be ok, dead or exhausted"}, status_code=400)
+    env = runner.merged_env_vars()
+    if body.var not in runner.KNOWN_PROVIDERS and body.var not in [p["var"] for p in runner.key_pool(env)]:
+        return JSONResponse({"error": "unknown key variable"}, status_code=400)
+    until = None
+    if body.status == "exhausted":
+        until = runner._next_pacific_midnight(__import__("time").time())
+    owner = next((p["owner"] for p in runner.key_pool(env) if p["var"] == body.var), body.var)
+    store.append("key_status", {"owner_machine": _machine(), "var": body.var, "owner": owner, "status": body.status,
+                                "until": until, "reason": "set by hand", "marked_by": body.by or "unknown"})
+    return {"ok": True}

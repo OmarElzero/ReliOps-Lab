@@ -118,6 +118,119 @@ def merged_env_vars() -> dict[str, str]:
     return merged
 
 
+_key_counter = 0
+
+
+def key_pool(env_vars: dict[str, str]) -> list[dict]:
+    """Optional round-robin over several API keys. Off unless the .env names a pool:
+
+        RELIOPS_KEY_POOL=GEMINI_API_KEY,GEMINI_API_KEY_2,GEMINI_API_KEY_3
+        RELIOPS_KEY_OWNERS=omar,sara,ahmed        (optional, same order; shown in the log and stored on each run)
+
+    The first name is the variable the agent reads; each run gets the next key in the list copied into it.
+    Returns [{var, owner, value}] for the listed variables that have a value. The secret is never logged or stored;
+    a run records only its slot and owner."""
+    names = [n.strip() for n in (env_vars.get("RELIOPS_KEY_POOL") or "").split(",") if n.strip()]
+    owners = [o.strip() for o in (env_vars.get("RELIOPS_KEY_OWNERS") or "").split(",")]
+    pool = []
+    for i, n in enumerate(names):
+        if env_vars.get(n):
+            pool.append({"var": n, "owner": owners[i] if i < len(owners) and owners[i] else n, "value": env_vars[n]})
+    return pool
+
+
+# Key health. The app wires these in (it owns the store): a function returning {var: {"status", "until"}} and a
+# function that records a change. Only variable names and owners are ever stored, never the secret.
+KEY_STATE_PROVIDER = None
+KEY_EVENT_SINK = None
+
+_DEAD_RE = re.compile(r"PERMISSION_DENIED|API_KEY_INVALID|API key not valid|ACCOUNT_STATE_INVALID|CONSUMER_SUSPENDED|has been suspended", re.I)
+_LIMIT_RE = re.compile(r"RESOURCE_EXHAUSTED|RateLimitError|\b429\b|quota exceeded|exceeded your current quota", re.I)
+_DAILY_RE = re.compile(r"PerDay|per day|daily|RequestsPerDay", re.I)
+_MINUTE_RE = re.compile(r"PerMinute|per minute|RPM", re.I)
+
+
+def _next_pacific_midnight(now: float) -> float:
+    """Gemini's daily quota resets at midnight Pacific time; fall back to +24h where tz data is missing."""
+    try:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        la = datetime.fromtimestamp(now, ZoneInfo("America/Los_Angeles"))
+        nxt = (la + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
+        return nxt.timestamp()
+    except Exception:  # noqa: BLE001
+        return now + 24 * 3600
+
+
+def classify_key_problem(text: str, now: float | None = None) -> dict | None:
+    """Reads a chunk of a run's output for a key problem. A heuristic on the provider's error wording, not a probe:
+    - dead: the provider says the key or its account is invalid or suspended (stays out until a person clears it)
+    - exhausted: a rate or quota error. Daily wording rests the key until the next Pacific midnight, per-minute wording
+      for 2 minutes, anything else for an hour."""
+    now = time.time() if now is None else now
+    if _DEAD_RE.search(text):
+        return {"status": "dead", "until": None, "reason": _DEAD_RE.search(text).group(0)}
+    if _LIMIT_RE.search(text):
+        if _DAILY_RE.search(text):
+            until = _next_pacific_midnight(now)
+        elif _MINUTE_RE.search(text):
+            until = now + 120
+        else:
+            until = now + 3600
+        return {"status": "exhausted", "until": until, "reason": _LIMIT_RE.search(text).group(0)}
+    return None
+
+
+def key_available(var: str, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    st = (KEY_STATE_PROVIDER() if KEY_STATE_PROVIDER else {}).get(var)
+    if not st or st.get("status") in (None, "ok"):
+        return True
+    if st["status"] == "dead":
+        return False
+    return (st.get("until") or 0) <= now
+
+
+def next_key(pool: list[dict]) -> tuple[int, dict] | None:
+    """The next usable slot in the pool, advancing a counter that lives for the whole server session so every queue step
+    and every run continues the rotation instead of starting again at the first key. Dead and resting keys are skipped.
+    Returns None when there is nothing to rotate (fewer than two keys); raises KeyPoolEmpty when none is usable."""
+    global _key_counter
+    if len(pool) < 2:
+        return None
+    for _ in range(len(pool)):
+        slot = _key_counter % len(pool)
+        _key_counter += 1
+        if key_available(pool[slot]["var"]):
+            return slot, pool[slot]
+    raise KeyPoolEmpty()
+
+
+class KeyPoolEmpty(Exception):
+    pass
+
+
+def pool_wait_until(pool: list[dict]) -> float | None:
+    """When the first resting key is usable again, or None if every key is dead."""
+    st = KEY_STATE_PROVIDER() if KEY_STATE_PROVIDER else {}
+    times = [(st.get(k["var"]) or {}).get("until") for k in pool if (st.get(k["var"]) or {}).get("status") == "exhausted"]
+    times = [t for t in times if t]
+    return min(times) if times else None
+
+
+def normalize_category(raw: str) -> str:
+    """The CSVs label some types with a suffix: ' [our label]' (the team's own class where SREGym has none),
+    '(OS level)' (a qualifier) and a trailing ' Failure'. Grouping and filtering should treat
+    'Misconfiguration Failure', 'Misconfiguration [our label]' and 'Misconfiguration Failure (OS level)'
+    as one category, so strip those."""
+    t = re.sub(r"\s*\[[^\]]*\]", "", raw or "")
+    t = re.sub(r"\s*\([^)]*\)", "", t).strip()
+    t = re.sub(r"\s+Failure$", "", t).strip()
+    if t == "Cloud Management System":
+        t = "Cloud Management"
+    return t or "Uncategorized"
+
+
 def _read_problems(csv_path: Path) -> list[dict]:
     """Reads a problem-set CSV into a list of {id, n, category, difficulty}. Only `problem_id` is
     required — `n` (testing order), `type` (category) and `expected_difficulty` are used when the
@@ -134,7 +247,8 @@ def _read_problems(csv_path: Path) -> list[dict]:
                 rows.append({
                     "id": pid,
                     "n": (row.get("n") or "").strip() or str(i),
-                    "category": (row.get("type") or "").strip() or "Uncategorized",
+                    "category": normalize_category((row.get("type") or "").strip()),
+                    "type": (row.get("type") or "").strip(),
                     "difficulty": (row.get("expected_difficulty") or "").strip(),
                     "app": (row.get("app") or "").strip(),  # used to guess the namespace to record
                 })
@@ -1036,6 +1150,8 @@ def stream_campaign(
     for k, v in merged_env_vars().items():
         base_env.setdefault(k, v)
 
+    pool = key_pool(base_env)
+
     # `cells` (problem, repeat) pairs override the plain grid: used to run only the missing cells of a
     # frozen campaign, or one machine's slice of it.
     runs = list(cells) if cells else [(problem, rep) for problem in problems for rep in range(1, repeat_n + 1)]
@@ -1043,6 +1159,35 @@ def stream_campaign(
     commit = _git_commit_safe()
     for i, (problem, rep) in enumerate(runs, start=1):
         repeat_note = f" repeat={rep}/{repeat_n}" if repeat_n > 1 else ""
+        key_slot = None
+        key_var, key_owner = ("GEMINI_API_KEY", "you") if base_env.get("GEMINI_API_KEY") else (None, None)
+        picked = None
+        while True:
+            usable = True
+            if len(pool) >= 2:
+                try:
+                    picked = next_key(pool)
+                except KeyPoolEmpty:
+                    usable = False
+            elif key_var and not key_available(key_var):
+                usable = False
+            if usable:
+                break
+            wake = pool_wait_until(pool if len(pool) >= 2 else [{"var": key_var}])
+            if wake is None:
+                yield "[key] the key is marked dead. Stopping here; replace it or clear the mark, then run the queue again to resume.\n"
+                return
+            yield f"[key] key quota is used up. Waiting until {time.strftime('%H:%M UTC', time.gmtime(wake))}, then the queue continues by itself.\n"
+            while time.time() < wake and not _stop_event.is_set():
+                time.sleep(5)
+            if _stop_event.is_set():
+                return
+        if picked:
+            slot, k = picked
+            key_slot = f"{slot + 1}/{len(pool)} {k['owner']}"
+            key_var, key_owner = k["var"], k["owner"]
+            yield f"[key] this run uses key {key_slot}\n"
+        key_problem = None
         yield (
             f"\n===== [{i}/{total_runs}] problem={problem}{repeat_note} agent={agent} "
             f"action_space={action_space or '-'} =====\n"
@@ -1054,6 +1199,8 @@ def stream_campaign(
             # Cluster timeline for this run's story; read-only kubectl polling, see scripts/cluster_recorder.py.
             recorder = _start_recorder(namespace_for(problem), walkthrough_dir(run_id) / "cluster.jsonl")
         env = dict(base_env)
+        if picked:
+            env[pool[0]["var"]] = picked[1]["value"]
         if os.environ.get("REACT_V1_LOG_OBS") is None:
             env["REACT_V1_LOG_OBS"] = "on"  # record what each command returned, for the story
         cmd = [
@@ -1078,9 +1225,15 @@ def stream_campaign(
             with problem_log_path.open("w", encoding="utf-8") as plog:
                 for line in _stream(cmd, cwd=sregym_dir(), env=env):
                     plog.write(line)
+                    if key_var and key_problem is None:
+                        key_problem = classify_key_problem(line)
                     yield line
         finally:
             _stop_recorder(recorder)  # also runs if the browser tab closes mid-run
+        if key_problem and key_var and KEY_EVENT_SINK:
+            KEY_EVENT_SINK(key_var, key_owner, key_problem["status"], key_problem["until"], key_problem["reason"])
+            when = "" if not key_problem["until"] else " until " + time.strftime("%H:%M UTC", time.gmtime(key_problem["until"]))
+            yield f"[key] marked {key_owner} ({key_var}) {key_problem['status']}{when}: {key_problem['reason']}\n"
         row = _latest_result_row(problem, started_at)
         diagnosis = extract_diagnosis(row)
         transcript_rel = _find_transcript(problem, started_at)
@@ -1105,6 +1258,7 @@ def stream_campaign(
             "transcript_rel": transcript_rel,
             "manifest_id": manifest_id,
             "git_commit": commit,
+            "key_slot": key_slot,
             **transcript_stats(transcript_rel),
             **diagnosis,  # diagnosis_text, judge_reasoning, diagnosis_d1..d3, diagnosis_composite
             "row": row,  # SREGym's own metrics.md-shaped row, or None if we couldn't locate it

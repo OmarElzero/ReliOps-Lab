@@ -48,6 +48,17 @@ yourself; Setup does it. The one thing to know because of this: **this project's
   reloading, or a sleeping screen does not stop them; reopening the Lab re-attaches to the live log.
   One job at a time (one cluster). A status pill in the header shows what is running on every tab,
   with a stop button (it finishes the run in progress, records it, then stops).
+- **Pinned sets and run purposes.** `experiments/pins.json` in the ReliOps repo pins the frozen 30 and the
+  dev 12 by hash; the Lab warns if a set file changed. Every run has a purpose (experiment, dev or
+  final), set automatically from the pins or marked by hand, and the Results tab never mixes them
+  without saying so. Problems can be selected by fault category.
+- **Results dashboard.** Filter by anything (purpose, category, person, agent, model, judge, tag,
+  dates, ...) and get the summary with intervals, a category table, a problem × configuration
+  matrix, failure tags, a per-person view and a "what these numbers are based on" panel, plus a
+  Markdown report of the current view.
+- **Key health and optional rotation.** The Lab marks a key dead or resting when a run shows the
+  provider's error. Rotating several keys is off by default (`RELIOPS_KEY_POOL` in `.env`); the team
+  rule is still one key per person from their own account, see the note under Prerequisites.
 - **One form, one run.** Pick environment → agent → model → problem set, paste a key, hit Run.
 - **Live log streaming** over SSE — no refreshing a page or tailing a file to see what the agent
   is doing right now.
@@ -108,6 +119,8 @@ yourself; Setup does it. The one thing to know because of this: **this project's
   `ReliOps/docs/plan/01-review-and-answers.md` §3.4).
 - Optional: a Firebase service-account JSON (Firebase console → Project settings → Service
   accounts → Generate new private key) if you want results mirrored to Firestore.
+
+A tab-by-tab guide, with where everything is saved, is in [`docs/GUIDE.md`](docs/GUIDE.md).
 
 ## Run it
 

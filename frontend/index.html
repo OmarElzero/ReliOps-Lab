@@ -186,6 +186,10 @@
       read.</p>
     <p class="hint" id="key-status"></p>
 
+    <label>Key health</label>
+    <div id="key-health" class="key-health"></div>
+    <p class="hint" id="key-health-help"></p>
+
     <label>Firebase (shared results)</label>
     <p class="hint">Read straight from this project's own <code>.env</code> (same file as the
       model key above, <em>not</em> any <code>.env</code> inside the separately-cloned ReliOps
@@ -228,44 +232,116 @@
   </div>
 
   <div id="tab-results" class="tab-panel" hidden>
-    <section class="card">
+    <section class="card dash-head">
       <div class="row log-head">
-        <h2>Summary — pass rate per configuration</h2>
-        <label class="inline-label" for="sum-metric">Metric</label>
-        <select id="sum-metric">
-          <option value="e2e_pass">end-to-end</option>
-          <option value="diagnosis_pass">diagnosis</option>
-          <option value="mitigation_pass">mitigation</option>
-        </select>
-        <label class="inline-label" for="sum-class">Class</label>
-        <select id="sum-class">
-          <option value="">all</option>
-          <option value="exploration">exploration</option>
-          <option value="frozen">frozen</option>
-        </select>
-        <a id="export-summary-csv" class="log-link" href="#" download>CSV</a>
-        <a id="export-summary-svg" class="log-link" href="#" download>chart (SVG)</a>
-        <a class="log-link" href="/api/export/runs.csv" download>all runs (CSV)</a>
+        <h2>Results dashboard</h2>
+        <div class="row dash-tools">
+          <label class="inline-label" for="sum-metric">Metric</label>
+          <select id="sum-metric">
+            <option value="e2e_pass">end-to-end</option>
+            <option value="diagnosis_pass">diagnosis</option>
+            <option value="mitigation_pass">mitigation</option>
+          </select>
+          <button id="dash-refresh" class="secondary small" type="button" title="Reload the runs and recompute">Refresh</button>
+          <button id="dash-report" class="secondary small" type="button" title="Markdown report of exactly this view, with what it is based on">Report (.md)</button>
+          <a class="log-link" href="/api/export/runs.csv" download title="Every recorded run, unfiltered">All runs (CSV)</a>
+        </div>
       </div>
-      <p class="hint">One row per agent + model + action space + config label + judge + class. The
-        <strong>95% Wilson</strong> interval is for the run-level pass rate; the
-        <strong>problem bootstrap</strong> resamples problems, so repeats of one problem do not
-        count as independent evidence. Runs that crashed or never finished are shown as
-        <em>incomplete</em> and are <strong>not</strong> counted as failures.</p>
+      <p class="hint" id="dash-source"></p>
+      <div class="purpose-chips" id="dash-purpose" role="group" aria-label="Run purpose"></div>
+      <div class="filter-bar" id="dash-filters"></div>
+      <div class="filter-active" id="dash-active"></div>
+    </section>
+
+    <section class="kpis" id="dash-kpis"></section>
+    <section class="dash-notes" id="dash-notes" hidden></section>
+
+    <section class="card">
+      <h2>People</h2>
+      <p class="hint">What each person ran, using the name they typed in the header. Click a name to see only their runs.</p>
+      <div class="results-table-wrap"><div id="dash-people"></div></div>
+    </section>
+
+    <section class="card">
+      <h2>What these numbers are based on</h2>
+      <p class="hint">Everything below is computed from the runs the filters leave in view, and nothing else.</p>
+      <div id="dash-prov"></div>
+    </section>
+
+    <section class="card">
+      <h2>Summary per configuration</h2>
+      <p class="hint">One row per agent + model + action space + label + judge + class. The <strong>95% Wilson</strong>
+        interval is for the run-level pass rate; the <strong>problem bootstrap</strong> resamples problems, so repeats of one
+        problem do not count as independent evidence. Runs with no known outcome are <em>incomplete</em>, never failures.</p>
       <div class="results-table-wrap">
         <table class="results-table">
-          <thead>
-            <tr>
-              <th>Configuration</th><th>Pass / n</th><th>Rate</th><th>95% Wilson</th>
-              <th>Problem bootstrap</th><th>Problems</th><th>Incomplete</th><th>Cost</th><th>Failure tags</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Configuration</th><th>Pass / n</th><th>Rate</th><th>95% Wilson</th><th>Problem bootstrap</th>
+            <th>Problems</th><th>Incomplete</th><th>Cost</th><th>Failure tags</th></tr></thead>
           <tbody id="summary-tbody"></tbody>
         </table>
       </div>
-      <p class="hint" id="summary-empty" hidden>No runs recorded yet.</p>
+      <p class="hint" id="summary-empty" hidden>No runs match these filters.</p>
     </section>
 
+    <section class="card">
+      <h2>By fault category</h2>
+      <p class="hint">Pass / n per category and configuration. Use it to see where an agent is weak, or to try one category on its own.</p>
+      <div class="results-table-wrap"><div id="dash-cats"></div></div>
+    </section>
+
+    <section class="card">
+      <h2>Problem × configuration</h2>
+      <p class="hint">Click a problem to filter to it. Green means every known run passed, red means every one failed, amber means mixed.</p>
+      <div class="results-table-wrap"><div id="dash-matrix"></div></div>
+    </section>
+
+    <section class="card two-col">
+      <div><h2>Failure tags</h2><div id="dash-tags"></div></div>
+      <div><h2>Runs per day</h2><div id="dash-timeline"></div></div>
+    </section>
+
+    <section class="card">
+      <div class="row log-head">
+        <h2>Runs <span class="tag" id="runs-count"></span></h2>
+        <div class="row" id="bulk-bar">
+          <span class="tag" id="bulk-count">none selected</span>
+          <label class="inline-label" for="bulk-purpose">Mark as</label>
+          <select id="bulk-purpose">
+            <option value="experiment">experiment — just look</option>
+            <option value="dev">dev — analyse, may tune on</option>
+            <option value="final">final — frozen-set result</option>
+            <option value="">automatic (clear the mark)</option>
+          </select>
+          <button id="bulk-apply" class="secondary small" type="button" disabled>Apply</button>
+        </div>
+      </div>
+      <p class="hint">Purpose is set automatically from the pinned sets (a dev-set problem is <em>dev</em>; a frozen-set problem run inside a frozen campaign is
+        <em>final</em>; anything else is an <em>experiment</em>). A mark you set always wins. Column <strong>Text</strong> opens the stored diagnosis and judge verdict,
+        <strong>Story</strong> the step-by-step run, <strong>Log</strong> the raw output.</p>
+      <div class="results-table-wrap">
+        <table class="results-table" id="runs-table">
+          <thead><tr><th><input type="checkbox" id="runs-all" aria-label="Select all shown"></th><th>When</th><th>By</th><th>Problem</th><th>Category</th><th>Purpose</th>
+            <th>Agent</th><th>Model</th><th>Label</th><th>Diag</th><th>Mit</th><th>E2E</th><th>TTD</th><th>TTM</th>
+            <th>Tag</th><th>Text</th><th>Story</th><th>Log</th></tr></thead>
+          <tbody id="results-tbody"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="results-empty" hidden>No runs match these filters.</p>
+      <p class="hint" id="runs-more" hidden></p>
+    </section>
+
+    <section class="card" id="run-detail" hidden>
+      <div class="row log-head">
+        <h2 id="detail-title">Detail</h2>
+        <button id="detail-close" class="secondary small" type="button">Close</button>
+      </div>
+      <div id="detail-extra"></div>
+      <pre id="detail-body" class="detail-body"></pre>
+    </section>
+
+    <details class="classic">
+      <summary>More tools: paired comparison, standing audit, coverage</summary>
+      <div class="classic-body">
     <section class="card">
       <h2>Compare two configurations (paired)</h2>
       <p class="hint">Matches the same problem and repeat number in both configurations and tests the
@@ -279,7 +355,6 @@
       </div>
       <div id="cmp-out" hidden></div>
     </section>
-
     <section class="card">
       <h2>Standing audit — does it beat the floor?</h2>
       <p class="hint">Each configuration against the <code>dumb-baseline</code> runs (give the near-zero-LLM
@@ -294,7 +369,6 @@
       </div>
       <p class="hint" id="audit-notes"></p>
     </section>
-
     <section class="card">
       <div class="row log-head">
         <h2>Coverage — what's been tested</h2>
@@ -315,43 +389,10 @@
       </div>
       <p class="hint" id="coverage-empty" hidden>No runs recorded yet.</p>
     </section>
-
-    <section class="card">
-      <div class="row log-head">
-        <h2>All runs</h2>
-        <button id="refresh-results" class="secondary small" type="button">Refresh</button>
       </div>
-      <p class="hint" id="results-source"></p>
-      <p class="hint">Pass/fail and timing come straight from SREGym's own result row
-        (<code>Diagnosis.success</code>, <code>Mitigation.success</code>, <code>TTL</code>,
-        <code>TTM</code>) — verified against its source, not guessed. The <strong>Log</strong>
-        column is that exact run's own raw output, saved under <code>results/gui_logs/</code>, for
-        when a number looks off and you want to see what actually happened (and whether something
-        outside the test — a flaky image pull, a slow namespace teardown — affected it).</p>
-      <div class="results-table-wrap">
-        <table class="results-table">
-          <thead>
-            <tr>
-              <th>When</th><th>By</th><th>Problem</th><th>Agent</th><th>Model</th><th>Label</th>
-              <th>Diagnosis</th><th>Mitigation</th><th>E2E</th><th>TTD</th><th>TTM</th>
-              <th>Tag</th><th>Text</th><th>Story</th><th>Log</th>
-            </tr>
-          </thead>
-          <tbody id="results-tbody"></tbody>
-        </table>
-      </div>
-      <p class="hint" id="results-empty" hidden>No runs recorded yet — run a test from the Run tab first.</p>
-    </section>
-
-    <section class="card" id="run-detail" hidden>
-      <div class="row log-head">
-        <h2 id="detail-title">Detail</h2>
-        <button id="detail-close" class="secondary small" type="button">Close</button>
-      </div>
-      <div id="detail-extra"></div>
-      <pre id="detail-body" class="detail-body"></pre>
-    </section>
+    </details>
   </div>
+
   <div id="tab-campaigns" class="tab-panel" hidden>
     <section class="card">
       <h2>Freeze a campaign</h2>
@@ -496,13 +537,23 @@
       <label for="sd-label">Config label <span class="tag">(names this variant in the Results tab)</span></label>
       <input id="sd-label" list="config-label-presets" placeholder="e.g. baseline-v1-typed" autocomplete="off">
 
+      <label for="sd-purpose">Run purpose <span class="tag">(how these results will be treated)</span></label>
+      <select id="sd-purpose">
+        <option value="">Automatic — from the pinned sets</option>
+        <option value="experiment">Experiment — just look at the result</option>
+        <option value="dev">Dev — analyse it, may tune on it</option>
+      </select>
+      <p class="hint" id="sd-purpose-note"></p>
+
       <label for="sd-set">Problems</label>
       <select id="sd-set"></select>
+      <p class="hint set-note" id="sd-set-note" hidden></p>
       <div class="pick-summary">
         <strong id="sd-pick-count">0 of 0</strong> <span class="tag">selected</span>
         <button type="button" class="secondary small" id="sd-pick-toggle">Choose individual problems</button>
         <button type="button" class="ghost small" id="sd-save-set-btn">Save selection as a set…</button>
       </div>
+      <div class="cat-chips" id="sd-cats" role="group" aria-label="Select by category"></div>
       <div class="save-set" id="sd-save-set" hidden>
         <input id="sd-set-name" placeholder="Set name, e.g. Dev 12" autocomplete="off" aria-label="Set name">
         <button type="button" class="primary small" id="sd-set-save">Save set</button>
@@ -549,5 +600,6 @@
 <script src="/app.js"></script>
 <script src="/v2.js"></script>
 <script src="/queue.js"></script>
+  <script src="/dashboard.js"></script>
 </body>
 </html>

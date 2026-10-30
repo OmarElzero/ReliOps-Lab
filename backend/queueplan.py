@@ -34,7 +34,12 @@ def clean_step(raw: dict) -> dict:
     run_class = raw.get("run_class") or "exploration"
     if run_class not in RUN_CLASSES:
         raise ValueError("run class must be exploration or frozen")
+    purpose = (raw.get("purpose") or "").strip() or None
+    if purpose not in (None, "experiment", "dev", "final"):
+        raise ValueError("purpose must be experiment, dev, final or empty (automatic)")
     manifest_id = (raw.get("manifest_id") or "").strip() or None
+    if purpose == "final" and run_class != "frozen":
+        raise ValueError("purpose ‘final’ is for frozen-campaign steps; an exploration run is an experiment or dev")
     if run_class == "frozen" and not manifest_id:
         raise ValueError("a frozen step needs a frozen campaign (manifest): freeze one in the Campaigns tab")
     try:
@@ -49,7 +54,7 @@ def clean_step(raw: dict) -> dict:
         "action_space": (raw.get("action_space") or None),
         "model_id": model_id, "judge_model_id": judge,
         "config_label": (raw.get("config_label") or "").strip(),
-        "run_class": run_class, "manifest_id": manifest_id,
+        "run_class": run_class, "manifest_id": manifest_id, "purpose": purpose,
         "problems": problems, "set_label": raw.get("set_label") or "",
         "repeat_n": repeat_n,
         "only_missing": bool(raw.get("only_missing", True)),

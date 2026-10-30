@@ -21,6 +21,8 @@ KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "manifests": ("gui_manifests.jsonl", ("manifest_id",)),
     "queues": ("gui_queues.jsonl", ("queue_id",)),
     "problem_sets": ("gui_problem_sets.jsonl", ("set_id",)),
+    "marks": ("gui_marks.jsonl", ("run_id",)),
+    "key_status": ("gui_key_status.jsonl", ("owner_machine", "var")),
 }
 
 

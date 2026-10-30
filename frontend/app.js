@@ -499,10 +499,6 @@ let resultsLoadedOnce = false;
 function showTab(name) {
   document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab-panel").forEach((p) => { p.hidden = p.id !== "tab-" + name; });
-  if (name === "results" && !resultsLoadedOnce) {
-    resultsLoadedOnce = true;
-    loadResults();
-  }
   if (TAB_LOADERS[name]) TAB_LOADERS[name]();
 }
 document.querySelectorAll(".tab-btn").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
@@ -651,52 +647,15 @@ function groupName(g) {
   return `${g.config_label !== "-" ? g.config_label : "(no label)"} · ${g.agent_id} · ${g.model_id} · ${g.action_space} · judge ${g.judge_model_id} · ${g.run_class}`;
 }
 
-async function loadSummary() {
-  const metric = document.getElementById("sum-metric").value;
-  const runClass = document.getElementById("sum-class").value;
-  const tbody = document.getElementById("summary-tbody");
-  const emptyEl = document.getElementById("summary-empty");
-  let data;
-  try {
-    const q = new URLSearchParams({ metric });
-    if (runClass) q.set("run_class", runClass);
-    data = await (await fetch("/api/summary?" + q.toString())).json();
-  } catch (e) { return; }
-  SUMMARY_GROUPS = data.groups || [];
-  const exportQ = new URLSearchParams({ metric });
-  if (runClass) exportQ.set("run_class", runClass);
-  document.getElementById("export-summary-csv").href = "/api/export/summary.csv?" + exportQ.toString();
-  document.getElementById("export-summary-svg").href = "/api/export/summary.svg?" + exportQ.toString();
+// Called by the dashboard with the groups it computed, so Compare and Standing audit use the same keys.
+function applyGroups(groups, metric) {
+  SUMMARY_GROUPS = groups || [];
   if (window.loadStanding) window.loadStanding(metric);
-  tbody.innerHTML = "";
-  emptyEl.hidden = SUMMARY_GROUPS.length > 0;
-  SUMMARY_GROUPS.forEach((g) => {
-    const tr = document.createElement("tr");
-    const cfg = document.createElement("td");
-    cfg.className = "r-config";
-    cfg.appendChild(el("div", g.config_label !== "-" ? g.config_label : "(no label)", "cfg-label"));
-    cfg.appendChild(el("div", `${g.agent_id} · ${g.model_id} · ${g.action_space}`, "cfg-sub"));
-    cfg.appendChild(el("div", `judge ${g.judge_model_id} · ${g.run_class}`, "cfg-sub"));
-    tr.appendChild(cfg);
-    const cells = [
-      `${g.passes} / ${g.n}`, pct(g.rate), interval(g.wilson_lo, g.wilson_hi),
-      interval(g.boot_lo, g.boot_hi), String(g.problems), g.incomplete ? String(g.incomplete) : "0",
-      costText(g), tagText(g),
-    ];
-    cells.forEach((text, i) => {
-      const td = document.createElement("td");
-      td.textContent = text;
-      if (i === 2 || i === 3) td.className = "r-interval";
-      if (i >= 6) td.className = "r-wrap";
-      tr.appendChild(td);
-    });
-    tbody.appendChild(tr);
-  });
   ["cmp-a", "cmp-b"].forEach((id, idx) => {
     const sel = document.getElementById(id);
     const prev = sel.value;
     sel.innerHTML = "";
-    SUMMARY_GROUPS.forEach((g, i) => {
+    SUMMARY_GROUPS.forEach((g) => {
       const o = document.createElement("option");
       o.value = g.key; o.textContent = groupName(g);
       sel.appendChild(o);
@@ -705,8 +664,7 @@ async function loadSummary() {
     else if (SUMMARY_GROUPS[idx]) sel.value = SUMMARY_GROUPS[idx].key;
   });
 }
-document.getElementById("sum-metric").addEventListener("change", loadSummary);
-document.getElementById("sum-class").addEventListener("change", loadSummary);
+window.applyGroups = applyGroups;
 
 function el(tag, text, cls) {
   const e = document.createElement(tag);
@@ -824,63 +782,13 @@ function renderCoverage(runs) {
     });
 }
 
+// Coverage and the config-label suggestions use every recorded run, not the filtered view.
 async function loadResults() {
-  const sourceEl = document.getElementById("results-source");
-  const tbody = document.getElementById("results-tbody");
-  const emptyEl = document.getElementById("results-empty");
-  sourceEl.textContent = "loading…";
   let data;
-  try {
-    const res = await fetch("/api/results");
-    data = await res.json();
-  } catch (e) {
-    sourceEl.textContent = "couldn't load results — is the server running?";
-    return;
-  }
-  sourceEl.textContent = data.source === "firestore"
-    ? "Showing the whole team's runs (via Firestore)."
-    : "Showing this machine's own runs only — Firebase isn't connected, see the Run tab's Keys & Firebase section.";
-
-  tbody.innerHTML = "";
-  emptyEl.hidden = data.runs.length > 0;
-  data.runs.forEach((r) => {
-    const tr = document.createElement("tr");
-    const when = document.createElement("td"); when.textContent = fmtWhen(r.timestamp_utc); tr.appendChild(when);
-    const by = document.createElement("td"); by.textContent = r.run_by || "unknown"; tr.appendChild(by);
-    const problem = document.createElement("td");
-    problem.className = "r-problem";
-    const problemLabel = r.repeat_n > 1 ? `${r.problem_id} (${r.repeat_index}/${r.repeat_n})` : (r.problem_id || "—");
-    if (r.problem_id) {
-      problem.appendChild(linkButton(problemLabel, () => { if (window.openProblem) window.openProblem(r.problem_id); },
-        "open this problem's card and attempt log"));
-    } else {
-      problem.textContent = problemLabel;
-    }
-    tr.appendChild(problem);
-    const agent = document.createElement("td"); agent.textContent = r.agent_id || "—"; tr.appendChild(agent);
-    const model = document.createElement("td"); model.textContent = r.model_id || "—"; tr.appendChild(model);
-    const label = document.createElement("td");
-    label.textContent = (r.config_label || "—") + (r.run_class === "frozen" ? " ❄" : "");
-    label.title = r.run_class === "frozen" ? "frozen run" : "exploration run";
-    tr.appendChild(label);
-    tr.appendChild(passCell(r.diagnosis_pass));
-    tr.appendChild(passCell(r.mitigation_pass));
-    tr.appendChild(passCell(r.e2e_pass));
-    tr.appendChild(timeCell(r.ttd_s));
-    tr.appendChild(timeCell(r.ttm_s));
-    const tagTd = document.createElement("td");
-    tagTd.textContent = r.failure_mode_tag ? r.failure_mode_tag + (r.first_bad_step ? ` @${r.first_bad_step}` : "") : "—";
-    tr.appendChild(tagTd);
-    tr.appendChild(textCell(r));
-    tr.appendChild(storyCell(r));
-    tr.appendChild(logCell(r.log_file));
-    tbody.appendChild(tr);
-  });
-
+  try { data = await (await fetch("/api/results?limit=5000")).json(); } catch (e) { return; }
   renderCoverage(data.runs);
   fillLabelPresets(data.runs);
-  loadSummary();
 }
-document.getElementById("refresh-results").addEventListener("click", loadResults);
+document.querySelector("details.classic").addEventListener("toggle", (e) => { if (e.target.open) loadResults(); });
 
 loadConfig();

@@ -158,6 +158,56 @@ class TmpRepoCase(unittest.TestCase):
             self.addCleanup(p.stop)
 
 
+class KeyPoolTests(unittest.TestCase):
+    def test_off_by_default_and_round_robin_when_named(self):
+        import runner
+        self.assertEqual(runner.key_pool({"GEMINI_API_KEY": "a"}), [])
+        runner._key_counter = 0
+        self.assertIsNone(runner.next_key(runner.key_pool({"RELIOPS_KEY_POOL": "K1", "K1": "a"})))   # one key: nothing to rotate
+        env = {"RELIOPS_KEY_POOL": "K1,K2,K3", "RELIOPS_KEY_OWNERS": "omar,sara", "K1": "a", "K2": "b", "K3": "c"}
+        pool = runner.key_pool(env)
+        got = [runner.next_key(pool) for _ in range(4)]
+        self.assertEqual([g[0] for g in got], [0, 1, 2, 0])
+        self.assertEqual([g[1]["owner"] for g in got], ["omar", "sara", "K3", "omar"])
+        self.assertEqual(len(runner.key_pool({**env, "K2": ""})), 2)         # a listed key with no value is skipped
+
+
+class KeyHealthTests(unittest.TestCase):
+    def setUp(self):
+        import runner
+        self.r = runner
+        self.state = {}
+        runner.KEY_STATE_PROVIDER = lambda: self.state
+        runner._key_counter = 0
+        self.addCleanup(lambda: setattr(runner, "KEY_STATE_PROVIDER", None))
+
+    def test_classification(self):
+        c = self.r.classify_key_problem
+        self.assertEqual(c("429 RESOURCE_EXHAUSTED: quota exceeded for RequestsPerDay")["status"], "exhausted")
+        daily = c("RESOURCE_EXHAUSTED GenerateRequestsPerDayPerProjectPerModel", now=0)
+        self.assertGreater(daily["until"], 3600)
+        self.assertEqual(c("RateLimitError 429 requests per minute", now=0)["until"], 120)
+        self.assertEqual(c("PERMISSION_DENIED: API key not valid")["status"], "dead")
+        self.assertEqual(c("status ACCOUNT_STATE_INVALID")["until"], None)
+        self.assertIsNone(c("everything fine, 4290 files"))
+
+    def test_rotation_skips_dead_and_resting_then_raises(self):
+        import time
+        env = {"RELIOPS_KEY_POOL": "K1,K2,K3", "K1": "a", "K2": "b", "K3": "c"}
+        pool = self.r.key_pool(env)
+        self.state = {"K2": {"status": "dead"}, "K1": {"status": "exhausted", "until": time.time() + 600}}
+        self.assertEqual(self.r.next_key(pool)[1]["var"], "K3")
+        self.assertEqual(self.r.next_key(pool)[1]["var"], "K3")
+        self.state["K3"] = {"status": "dead"}
+        with self.assertRaises(self.r.KeyPoolEmpty):
+            self.r.next_key(pool)
+        self.assertAlmostEqual(self.r.pool_wait_until(pool), self.state["K1"]["until"])
+        self.state["K1"] = {"status": "exhausted", "until": time.time() - 1}     # rested
+        self.assertEqual(self.r.next_key(pool)[1]["var"], "K1")
+        self.state = {"K1": {"status": "dead"}, "K2": {"status": "dead"}, "K3": {"status": "dead"}}
+        self.assertIsNone(self.r.pool_wait_until(pool))
+
+
 class StoreTests(TmpRepoCase):
     def test_latest_wins_and_history_is_kept(self):
         store.append("labels", {"run_id": "r1", "correct": True})

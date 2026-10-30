@@ -30,6 +30,11 @@ class PlanTests(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 queueplan.clean_step(step(**bad))
             self.assertIn(msg, str(cm.exception))
+        self.assertEqual(queueplan.clean_step(step(purpose="dev"))["purpose"], "dev")
+        self.assertIsNone(queueplan.clean_step(step())["purpose"])
+        for bad in ("final", "weird"):
+            with self.assertRaises(ValueError):
+                queueplan.clean_step(step(purpose=bad))
         s = queueplan.clean_step(step(problems=["a", " a ", "b"], repeat_n="0"))
         self.assertEqual(s["problems"], ["a", "b"])
         self.assertEqual(s["repeat_n"], 1)

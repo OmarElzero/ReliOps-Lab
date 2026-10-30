@@ -139,6 +139,7 @@
     ];
     if (s.config_label) chips.push(h("span", { class: "chip mono", text: s.config_label, title: "config label" }));
     chips.push(h("span", { class: "chip" + (s.run_class === "frozen" ? " frozen" : ""), text: s.run_class === "frozen" ? "frozen campaign" : "exploration" }));
+    if (s.purpose) chips.push(h("span", { class: "chip", text: "purpose: " + s.purpose, title: "set for every run this step records" }));
     return chips;
   }
 
@@ -260,6 +261,8 @@
     $("sd-pick-count").textContent = custom ? String(n) : `${n} of ${set.problems.length}`;
     const groups = $("sd-pick-groups");
     groups.innerHTML = "";
+    renderCats(set, custom);
+    renderSetNote(set);
     if (custom) return;
     const q = $("sd-pick-filter").value.trim().toLowerCase();
     const by = new Map();
@@ -282,6 +285,39 @@
       groups.append(fs);
     });
     if (!by.size) groups.append(h("p", { class: "hint", text: "No problem matches this filter." }));
+  }
+  // One chip per fault category in the chosen set: click to add the whole category to the selection, click again
+  // to remove it. "None" then a chip gives a single category on its own.
+  function renderCats(set, custom) {
+    const box = $("sd-cats");
+    box.innerHTML = "";
+    box.hidden = custom || pickLocked();
+    if (box.hidden) return;
+    const by = new Map();
+    set.problems.forEach((p) => { if (!by.has(p.category)) by.set(p.category, []); by.get(p.category).push(p.id); });
+    if (by.size < 2) { box.hidden = true; return; }
+    box.append(h("span", { class: "tag", text: "By category:" }));
+    by.forEach((ids, cat) => {
+      const on = ids.filter((id) => D.selected.has(id)).length;
+      const state = on === ids.length ? "on" : on ? "part" : "";
+      box.append(h("button", { type: "button", class: "chip pick " + state, title: on === ids.length ? "remove this category from the selection" : "add this category to the selection",
+        onclick: () => { ids.forEach((id) => (on === ids.length ? D.selected.delete(id) : D.selected.add(id))); renderPick(); } },
+        cat, h("span", { class: "chip-n", text: on === ids.length || !on ? String(ids.length) : `${on}/${ids.length}` })));
+    });
+    box.append(h("button", { type: "button", class: "ghost small", text: "Clear", onclick: () => { D.selected.clear(); renderPick(); } }));
+  }
+  const pickLocked = () => isFrozen() && !!chosenManifest();
+  function renderSetNote(set) {
+    const n = $("sd-set-note");
+    const pin = set.pin;
+    n.hidden = !pin;
+    if (!pin) return;
+    n.className = "hint set-note " + (pin.status === "ok" ? "pin-" + pin.role : "pin-bad");
+    n.textContent = pin.status !== "ok"
+      ? (pin.status === "changed" ? "This file no longer matches what was pinned. Do not measure with it until the change is deliberate and re-pinned." : "The pinned file is missing.")
+      : pin.role === "frozen"
+        ? "Pinned frozen set. Measure it once per configuration, in a frozen campaign. Outside a campaign these runs count as experiments, and failures here must not be read to choose agent changes."
+        : "Pinned dev set. Run it freely, read the failures and tune on it. It does not overlap the frozen set.";
   }
   function chooseSet(idx, keepSelection) {
     D.setIdx = idx; $("sd-set").value = idx;
@@ -315,6 +351,10 @@
     $("sd-locked").hidden = !m;
     $("sd-agent-desc").textContent = agentOf() && agentOf().desc ? agentOf().desc : "";
     $("sd-ok").disabled = frozen && !m;
+    $("sd-purpose").disabled = frozen;
+    $("sd-purpose-note").textContent = frozen
+      ? "A frozen campaign is the reported measurement; its results are final when the problems are the pinned frozen set."
+      : "Automatic: a dev-set problem is dev, anything else is an experiment. You can change the purpose of any run later in Results.";
   }
 
   function openStepDialog(index) {
@@ -343,6 +383,7 @@
     $("sd-build").checked = !!src.force_build;
     $("sd-walk").checked = src.record_walkthrough !== false;
     document.querySelector(`input[name="sd-class"][value="${src.run_class || "exploration"}"]`).checked = true;
+    $("sd-purpose").value = src.purpose || "";
     dlg.dataset.manifest = src.manifest_id || "";
 
     // problems: start from the first real set, or the step's own list
@@ -390,7 +431,7 @@
       agent_id: a.id, agent_label: a.label, action_space: a.action_space || null,
       model_id: model, judge_model_id: judge, config_label: $("sd-label").value.trim(),
       run_class: frozen ? "frozen" : "exploration", manifest_id: m ? m.manifest_id : null,
-      problems, set_label: setLabel, repeat_n: repeat,
+      problems, set_label: setLabel, repeat_n: repeat, purpose: frozen ? null : ($("sd-purpose").value || null),
       only_missing: $("sd-missing").checked, force_build: $("sd-build").checked, record_walkthrough: $("sd-walk").checked,
       enabled: editing != null ? Q.steps[editing].enabled !== false : true,
     };
@@ -599,6 +640,30 @@
     origShowTab(name);
     try { history.replaceState(null, "", "#" + name); } catch (e) { /* ignore */ }
   };
+
+  // ---- Key health (Setup tab): the Lab marks a key dead or resting when a run shows the provider's error,
+  // and a rotation pool skips such keys. You can also set a mark by hand. Only names are shown, never the secret.
+  async function loadKeyHealth() {
+    let d;
+    try { d = await jsonGet("/api/keys"); } catch (e) { return; }
+    const box = $("key-health");
+    box.innerHTML = "";
+    if (!d.keys.length) box.append(h("p", { class: "hint", text: "No model key saved yet." }));
+    d.keys.forEach((k) => {
+      const until = k.status === "exhausted" && k.until ? " until " + new Date(k.until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+      const row = h("div", { class: "key-row" },
+        h("code", { text: k.var }), h("span", { class: "tag", text: k.owner !== k.var ? k.owner : "" }),
+        h("span", { class: "pill " + (k.status === "ok" ? "ok" : "warn"), title: k.reason || "" }, h("span", { class: "dot" }), k.status === "ok" ? "ok" : k.status === "dead" ? "dead" : "resting" + until));
+      const set = (status) => async () => { await jsonPost("/api/keys/mark", { var: k.var, status, by: who() }); loadKeyHealth(); };
+      row.append(h("button", { type: "button", class: "ghost small", text: "Mark dead", onclick: set("dead") }),
+                 h("button", { type: "button", class: "ghost small", text: "Mark resting for today", onclick: set("exhausted") }),
+                 h("button", { type: "button", class: "ghost small", text: "Clear", onclick: set("ok") }));
+      box.append(row);
+    });
+    $("key-health-help").textContent = d.pool ? "Rotation is on: each run uses the next healthy key." : d.help;
+  }
+  TAB_LOADERS.run = loadKeyHealth;
+
   TAB_LOADERS.queue = () => { loadManifests(); refreshPreview(true); };
 
   // ---- boot ------------------------------------------------------------------------------------
