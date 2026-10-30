@@ -468,13 +468,16 @@ class EnvFileTests(unittest.TestCase):
         self.assertEqual(o["PEM"], "line one\n\nline two")
         self.assertEqual(o["NEXT"], "1")
 
-    def test_key_shape_warning_before_a_gemini_run(self):
+    def test_both_google_key_formats_pass_and_a_garbled_value_warns(self):
         import runner
+        # An 'AIza' key (39 characters) and a longer 'AQ.' key are both valid and must not warn.
         self.assertEqual(runner.preflight_warnings({"GEMINI_API_KEY": "AIza" + "x" * 35}, "gemini/x", "other"), [])
-        w = runner.preflight_warnings({"GEMINI_API_KEY": "AQ.Ab8" + "x" * 10}, "gemini/x", "other")
+        self.assertEqual(runner.preflight_warnings({"GEMINI_API_KEY": "AQ.Ab8" + "x" * 47}, "gemini/x", "other"), [])
+        # Extra text on the line (a space, a quote, a '#') is never part of a key.
+        w = runner.preflight_warnings({"GEMINI_API_KEY": 'AQ.Ab8xxxxxxxx" # note'}, "gemini/x", "other")
         self.assertEqual(len(w), 1)
         self.assertIn("AQ.A", w[0])
-        self.assertNotIn("x" * 10, w[0])   # only the first 4 characters and the length are shown
+        self.assertNotIn("xxxxxxxx", w[0])   # only the first 4 characters and the length are shown
 
 
 class KeyMarkFollowsTheValueTests(TmpRepoCase):

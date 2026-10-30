@@ -206,6 +206,15 @@ def max_incomplete_streak(env_vars: dict[str, str]) -> int:
         return 3
 
 
+def key_looks_garbled(value: str) -> bool:
+    """True when a key value carries text that is never part of a key (whitespace, quotes, '#').
+
+    The length and the first characters are not checked: Google issues more than one key format
+    (an 'AIza' key of 39 characters, and longer 'AQ.' keys), and both work.
+    """
+    return bool(value) and bool(re.search(r"""[\s"'#]""", value))
+
+
 def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops: Path | None = None) -> list[str]:
     """Cheap checks before a campaign starts. Warnings only, never a block."""
     out: list[str] = []
@@ -221,9 +230,9 @@ def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops
             f"{note} If you did not mean to use a gateway, remove AGENT_API_BASE (and AGENT_API_KEY) from the .env files and from your shell."
         )
     gk = (env_vars.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY") or "").strip()
-    if model.startswith("gemini/") and gk and not (gk.startswith("AIza") and len(gk) == 39):
-        out.append(f"[check] GEMINI_API_KEY does not look like an AI Studio key (those usually start with AIza and have 39 characters; this one "
-                   f"starts with {gk[:4]}... and has {len(gk)}). If Google rejects it, look for extra text on that line or a different kind of key.")
+    if model.startswith("gemini/") and key_looks_garbled(gk):
+        out.append(f"[check] GEMINI_API_KEY contains a space, a quote or a '#' (it starts with {gk[:4]}... and has {len(gk)} characters). "
+                   f"A key never contains those, so the line in the .env probably carries extra text. Google will reject it.")
     try:
         driver = (reliops or reliops_dir()) / "agent" / "react_v1" / "driver.py"
         if agent == "reliops_v1" and driver.exists() and shutil.which("docker"):

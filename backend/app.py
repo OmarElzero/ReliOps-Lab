@@ -956,8 +956,10 @@ runner.KEY_STATE_PROVIDER = _key_states
 runner.KEY_EVENT_SINK = _record_key_event
 
 
-def _key_source(var: str) -> tuple[str, str]:
-    """(where the value comes from, its shape). The shape is the first 4 characters and the length, never the key."""
+def _key_source(var: str) -> tuple[str, str, bool]:
+    """(where the value comes from, its shape, whether it carries text a key never has).
+
+    The shape is the first 4 characters and the length, never the key."""
     lab = runner.read_env_file(runner.lab_env_path())
     clone = runner.read_env_file(runner.reliops_dir() / ".env")
     if lab.get(var):
@@ -967,8 +969,8 @@ def _key_source(var: str) -> tuple[str, str]:
     elif os.environ.get(var):
         src, val = "shell environment (not in any .env)", os.environ[var]
     else:
-        return "not set", ""
-    return src, f"{val[:4]}… · {len(val)} characters"
+        return "not set", "", False
+    return src, f"{val[:4]}… · {len(val)} characters", runner.key_looks_garbled(val)
 
 
 def _gemini_vars(env: dict) -> list[str]:
@@ -986,11 +988,10 @@ def _key_rows(env: dict, pool: list[dict], states: dict) -> list[dict]:
         if status == "exhausted" and (st.get("until") or 0) <= __import__("time").time():
             status = "ok"
         owner = next((p["owner"] for p in pool if p["var"] == n), n)
-        source, shape = _key_source(n)
-        odd = n.startswith("GEMINI") and bool(shape) and not (shape.startswith("AIza") and "39 characters" in shape)
+        source, shape, garbled = _key_source(n)
         out.append({"var": n, "owner": owner, "status": status, "until": st.get("until"), "reason": st.get("reason") or "",
                     "source": source, "shape": shape, "in_pool": n in in_pool, "rotatable": bool(runner.GEMINI_FAMILY_RE.match(n)),
-                    "note": "Gemini keys from AI Studio usually start with AIza and have 39 characters; this one does not." if odd else ""})
+                    "note": "This value contains a space, a quote or a '#', which a key never has; check the line in the .env." if garbled else ""})
     return out
 
 
