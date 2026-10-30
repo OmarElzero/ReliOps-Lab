@@ -700,6 +700,7 @@
       row.append(h("button", { type: "button", class: "ghost small", text: "Mark dead", onclick: set("dead") }),
                  h("button", { type: "button", class: "ghost small", text: "Mark resting for today", onclick: set("exhausted") }),
                  h("button", { type: "button", class: "ghost small", text: "Clear", onclick: set("ok") }));
+      if (k.source) row.append(h("span", { class: "hint", style: "flex-basis:100%;margin:0", text: `from ${k.source}${k.shape ? " · " + k.shape : ""}${k.note ? ". " + k.note : ""}` }));
       box.append(row);
     });
     $("key-health-help").textContent = d.pool ? "Rotation is on: each run uses the next healthy key." : d.help;

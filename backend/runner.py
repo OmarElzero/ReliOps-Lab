@@ -214,6 +214,10 @@ def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops
             f"[check] AGENT_API_BASE is set ({host}). SREGym then lets the agent reach only that host, and every model call goes there."
             f"{note} If you did not mean to use a gateway, remove AGENT_API_BASE (and AGENT_API_KEY) from the .env files and from your shell."
         )
+    gk = (env_vars.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY") or "").strip()
+    if model.startswith("gemini/") and gk and not (gk.startswith("AIza") and len(gk) == 39):
+        out.append(f"[check] GEMINI_API_KEY does not look like an AI Studio key (those usually start with AIza and have 39 characters; this one "
+                   f"starts with {gk[:4]}... and has {len(gk)}). If Google rejects it, look for extra text on that line or a different kind of key.")
     try:
         driver = (reliops or reliops_dir()) / "agent" / "react_v1" / "driver.py"
         if agent == "reliops_v1" and driver.exists() and shutil.which("docker"):
@@ -432,15 +436,37 @@ def ensure_clone() -> Iterator[str]:
 KNOWN_PROVIDERS = ["GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"]
 
 
+def _env_value(lines: list[str]) -> str:
+    """The value of one KEY=... entry. A single line is read the way dotenv reads it: a quoted value ends at its closing
+    quote (anything after it, such as `# note`, is dropped) and an unquoted one stops at whitespace followed by `#`.
+    A value spanning several lines (a pasted JSON blob) is kept whole."""
+    if len(lines) == 1:
+        v = lines[0].strip()
+        if len(v) > 1 and v[0] in "\"'":
+            end = v.find(v[0], 1)
+            if end != -1:
+                return v[1:end]
+        if v[:1] not in ("{", "["):
+            m = re.search(r"\s+#", v)
+            if m:
+                v = v[:m.start()]
+        return v.strip().strip('"').strip("'")
+    return "\n".join(lines).strip().strip('"').strip("'")
+
+
 def read_env_file(env_path: Path) -> dict[str, str]:
     """Parses a .env file into a dict. Values can be a single line or span many lines (a pasted
     JSON blob, e.g. a Firebase service-account key) — anything from a `KEY=` line up to the next
-    `KEY=` line or end of file belongs to that key, not just the first line."""
+    `KEY=` line or end of file belongs to that key, not just the first line. Comment and blank lines
+    between entries are not part of any value (they used to be glued onto the previous one, which broke
+    the Firebase JSON), and a trailing `# comment` on a key line is dropped (it used to end up inside
+    the API key). `export KEY=value` is accepted."""
     if not env_path.exists():
         return {}
     out: dict[str, str] = {}
     current_key: str | None = None
     buf: list[str] = []
+    pending: list[str] = []   # comment/blank lines seen since the last value line; kept only if the value continues
 
     def _is_key(candidate: str) -> bool:
         c = candidate.strip()
@@ -448,21 +474,26 @@ def read_env_file(env_path: Path) -> dict[str, str]:
 
     def _flush() -> None:
         if current_key is not None:
-            out[current_key] = "\n".join(buf).strip().strip('"').strip("'")
+            out[current_key] = _env_value(buf)
 
     for line in env_path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             if current_key is not None:
-                buf.append(line)
+                pending.append(line)
             continue
         head = line.split("=", 1)[0]
+        head = head[len("export "):] if head.startswith("export ") else head
         if "=" in line and not line.startswith((" ", "\t")) and _is_key(head):
             _flush()
             current_key, _, rest = line.partition("=")
             current_key = current_key.strip()
+            current_key = current_key[len("export "):].strip() if current_key.startswith("export ") else current_key
             buf = [rest]
+            pending = []
         elif current_key is not None:
+            buf.extend(pending)
+            pending = []
             buf.append(line)
     _flush()
     return out

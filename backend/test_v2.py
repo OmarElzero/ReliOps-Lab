@@ -435,3 +435,70 @@ class SetupGuardTests(unittest.TestCase):
     def test_the_stop_can_be_turned_off(self):
         log, records = self._run([{"run_status": "incomplete"}] * 5, env={"RELIOPS_MAX_INCOMPLETE": "0"})
         self.assertEqual(len(records), 5)
+
+
+class EnvFileTests(unittest.TestCase):
+    """The first live run failed because `KEY="value" # note` put the note inside the API key."""
+
+    def _read(self, text):
+        import tempfile
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp()) / ".env"
+        d.write_text(text, encoding="utf-8")
+        import runner
+        return runner.read_env_file(d)
+
+    def test_inline_comments_quotes_and_export(self):
+        o = self._read('GEMINI_API_KEY="AIzaX" # ReliOps -> active\nK2=\'abc\'\nexport K3=plain   # note\nK4=\nURL=https://x/y#frag\n')
+        self.assertEqual(o["GEMINI_API_KEY"], "AIzaX")
+        self.assertEqual(o["K2"], "abc")
+        self.assertEqual(o["K3"], "plain")
+        self.assertEqual(o["K4"], "")
+        self.assertEqual(o["URL"], "https://x/y#frag")
+
+    def test_comments_after_a_json_value_are_not_part_of_it(self):
+        import json
+        blob = json.dumps({"type": "service_account", "client_email": "a@b"}, indent=2)
+        o = self._read(f"FIREBASE_SERVICE_ACCOUNT_JSON={blob}\n\n# keys below\nGEMINI_API_KEY=AIzaX\n# trailing note\n")
+        self.assertEqual(json.loads(o["FIREBASE_SERVICE_ACCOUNT_JSON"])["client_email"], "a@b")
+        self.assertEqual(o["GEMINI_API_KEY"], "AIzaX")
+
+    def test_blank_lines_inside_a_multiline_value_are_kept(self):
+        o = self._read("PEM=line one\n\nline two\nNEXT=1\n")
+        self.assertEqual(o["PEM"], "line one\n\nline two")
+        self.assertEqual(o["NEXT"], "1")
+
+    def test_key_shape_warning_before_a_gemini_run(self):
+        import runner
+        self.assertEqual(runner.preflight_warnings({"GEMINI_API_KEY": "AIza" + "x" * 35}, "gemini/x", "other"), [])
+        w = runner.preflight_warnings({"GEMINI_API_KEY": "AQ.Ab8" + "x" * 10}, "gemini/x", "other")
+        self.assertEqual(len(w), 1)
+        self.assertIn("AQ.A", w[0])
+        self.assertNotIn("x" * 10, w[0])   # only the first 4 characters and the length are shown
+
+
+class KeyMarkFollowsTheValueTests(TmpRepoCase):
+    def test_a_dead_mark_clears_when_the_key_value_changes(self):
+        import json
+        try:
+            from fastapi.testclient import TestClient
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi/httpx not available: {e}")
+        self.app_module = app_module
+        (self.tmp / "results").mkdir(exist_ok=True)
+        env = self.tmp / "lab.env"
+        import runner
+        with mock.patch.object(runner, "lab_env_path", return_value=env):
+            env.write_text("GEMINI_API_KEY=AIza" + "a" * 35 + "\n")
+            c = TestClient(self.app_module.app)
+            self.app_module._record_key_event("GEMINI_API_KEY", "you", "dead", None, "AuthenticationError")
+            k = c.get("/api/keys").json()["keys"][0]
+            self.assertEqual(k["status"], "dead")
+            self.assertEqual(k["source"], "Lab .env")
+            self.assertTrue(k["shape"].startswith("AIza"))
+            self.assertNotIn("a" * 10, json.dumps(k))
+            env.write_text("GEMINI_API_KEY=AIza" + "b" * 35 + "\n")     # the person replaced the key
+            k = c.get("/api/keys").json()["keys"][0]
+            self.assertEqual(k["status"], "ok")
+            self.assertTrue(runner.key_available("GEMINI_API_KEY"))

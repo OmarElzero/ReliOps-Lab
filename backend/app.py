@@ -923,19 +923,52 @@ def _machine() -> str:
     return socket.gethostname()
 
 
+def _fp(var: str, env: dict) -> str:
+    """A short fingerprint of a key's value, so a mark can tell the key was replaced. One-way; the secret is not stored."""
+    import hashlib
+    v = env.get(var) or os.environ.get(var) or ""
+    return hashlib.sha256(f"{var}:{v}".encode()).hexdigest()[:10] if v else ""
+
+
 def _key_states() -> dict:
-    """{var: {status, until, owner, reason}} for this machine. Keys are per person, so each laptop tracks its own."""
+    """{var: {status, until, owner, reason}} for this machine. Keys are per person, so each laptop tracks its own.
+    A mark made against an earlier value of the key no longer applies once the value in .env has changed."""
     me = _machine()
-    return {r["var"]: r for r in store.read("key_status") if r.get("owner_machine") == me and r.get("var")}
+    env = runner.merged_env_vars()
+    out = {}
+    for r in store.read("key_status"):
+        if r.get("owner_machine") != me or not r.get("var"):
+            continue
+        out[r["var"]] = r
+    for var, r in list(out.items()):
+        if r.get("fp") and r["fp"] != _fp(var, env) and r.get("status") != "ok":
+            out[var] = {**r, "status": "ok", "until": None, "reason": "the key value changed since it was marked", "stale_mark": True}
+    return out
 
 
 def _record_key_event(var: str, owner: str | None, status: str, until: float | None, reason: str | None) -> None:
     store.append("key_status", {"owner_machine": _machine(), "var": var, "owner": owner or var, "status": status,
-                                "until": until, "reason": reason or "", "marked_by": "lab"})
+                                "until": until, "reason": reason or "", "marked_by": "lab",
+                                "fp": _fp(var, runner.merged_env_vars())})
 
 
 runner.KEY_STATE_PROVIDER = _key_states
 runner.KEY_EVENT_SINK = _record_key_event
+
+
+def _key_source(var: str) -> tuple[str, str]:
+    """(where the value comes from, its shape). The shape is the first 4 characters and the length, never the key."""
+    lab = runner.read_env_file(runner.lab_env_path())
+    clone = runner.read_env_file(runner.reliops_dir() / ".env")
+    if lab.get(var):
+        src, val = "Lab .env", lab[var]
+    elif clone.get(var):
+        src, val = "ReliOps clone .env", clone[var]
+    elif os.environ.get(var):
+        src, val = "shell environment (not in any .env)", os.environ[var]
+    else:
+        return "not set", ""
+    return src, f"{val[:4]}… · {len(val)} characters"
 
 
 @app.get("/api/keys")
@@ -944,7 +977,7 @@ def key_health():
     env = runner.merged_env_vars()
     pool = runner.key_pool(env)
     states = _key_states()
-    names = [p["var"] for p in pool] or [k for k in runner.KNOWN_PROVIDERS if env.get(k)]
+    names = [p["var"] for p in pool] or [k for k in runner.KNOWN_PROVIDERS if env.get(k) or os.environ.get(k)]
     out = []
     for n in names:
         st = states.get(n) or {}
@@ -952,7 +985,11 @@ def key_health():
         if status == "exhausted" and (st.get("until") or 0) <= __import__("time").time():
             status = "ok"
         owner = next((p["owner"] for p in pool if p["var"] == n), n)
-        out.append({"var": n, "owner": owner, "status": status, "until": st.get("until"), "reason": st.get("reason") or ""})
+        source, shape = _key_source(n)
+        odd = n.startswith("GEMINI") and bool(shape) and not (shape.startswith("AIza") and "39 characters" in shape)
+        out.append({"var": n, "owner": owner, "status": status, "until": st.get("until"), "reason": st.get("reason") or "",
+                    "source": source, "shape": shape,
+                    "note": "Gemini keys from AI Studio usually start with AIza and have 39 characters; this one does not." if odd else ""})
     return {"pool": len(pool) >= 2, "keys": out,
             "help": "Set RELIOPS_KEY_POOL=GEMINI_API_KEY,GEMINI_API_KEY_2 (and optionally RELIOPS_KEY_OWNERS=name1,name2) in the Lab's .env to rotate. Off by default."}
 
@@ -975,5 +1012,6 @@ def key_mark(body: KeyMarkIn):
         until = runner._next_pacific_midnight(__import__("time").time())
     owner = next((p["owner"] for p in runner.key_pool(env) if p["var"] == body.var), body.var)
     store.append("key_status", {"owner_machine": _machine(), "var": body.var, "owner": owner, "status": body.status,
-                                "until": until, "reason": "set by hand", "marked_by": body.by or "unknown"})
+                                "until": until, "reason": "set by hand", "marked_by": body.by or "unknown",
+                                "fp": _fp(body.var, env)})
     return {"ok": True}
