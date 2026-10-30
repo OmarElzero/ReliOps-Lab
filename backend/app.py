@@ -273,6 +273,10 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "diagnosis_text": r.get("diagnosis_text") or diag["diagnosis_text"],
             "judge_reasoning": r.get("judge_reasoning") or diag["judge_reasoning"],
             "judge_checklist": r.get("judge_checklist") or diag["judge_checklist"],
+            # The judge's D1-D3 and composite were stored with the run but never sent to the page, so the
+            # detail panel showed "D1=? D2=? D3=?". Older records get them from SREGym's own row.
+            **{k: (r.get(k) if r.get(k) is not None else diag[k])
+               for k in ("diagnosis_d1", "diagnosis_d2", "diagnosis_d3", "diagnosis_composite")},
             "has_story": bool(r.get("transcript_rel") or r.get("story_shared")),
             "manifest_id": r.get("manifest_id"),
             "git_commit": r.get("git_commit"),

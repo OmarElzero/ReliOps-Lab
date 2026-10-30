@@ -622,6 +622,39 @@ class IncompleteReasonInTheTableTests(TmpRepoCase):
         self.assertEqual(app_module._incomplete_reason({"row": None, "incomplete_reason": "stored", "log_file": "a.log"}), "stored")
 
 
+class JudgeScoresReachThePageTests(TmpRepoCase):
+    """The detail panel read D1-D3 from the run list, which never carried them ("D1=? D2=? D3=?")."""
+
+    DIMENSIONS = ("{'D1': {'name': 'Fault Localization', 'score': 1.0}, "
+                  "'D2': {'name': 'Fault Characterization', 'score': 0.5}, "
+                  "'D3': {'name': 'Scope Precision', 'score': 1.0}}")  # the shape in a real SREGym CSV cell
+
+    def _runs(self, records):
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        from unittest import mock
+        with mock.patch.object(app_module.firebase_sync, "list_runs", return_value=records):
+            return app_module._collect_runs(50)[1]
+
+    def test_scores_are_sent_whether_stored_with_the_run_or_recovered_from_its_row(self):
+        row = {"Diagnosis.dimensions": self.DIMENSIONS, "Diagnosis.composite_score": "0.83"}
+        runs = self._runs([
+            {"run_id": "a", "problem_id": "p", "row": row},  # older record: only the raw row
+            {"run_id": "b", "problem_id": "p", "row": row, "diagnosis_d1": 0.0, "diagnosis_composite": 0.1},
+        ])
+        a, b = {r["run_id"]: r for r in runs}["a"], {r["run_id"]: r for r in runs}["b"]
+        self.assertEqual((a["diagnosis_d1"], a["diagnosis_d2"], a["diagnosis_d3"], a["diagnosis_composite"]),
+                         (1.0, 0.5, 1.0, 0.83))
+        # A stored value wins over the row, and a stored 0.0 is a real score, not "missing".
+        self.assertEqual((b["diagnosis_d1"], b["diagnosis_d2"], b["diagnosis_composite"]), (0.0, 0.5, 0.1))
+
+    def test_a_run_without_a_row_has_no_scores_rather_than_made_up_ones(self):
+        runs = self._runs([{"run_id": "c", "problem_id": "p", "row": None}])
+        self.assertIsNone(runs[0]["diagnosis_d1"])
+
+
 class KeyMarkFollowsTheValueTests(TmpRepoCase):
     def test_a_dead_mark_clears_when_the_key_value_changes(self):
         import json
