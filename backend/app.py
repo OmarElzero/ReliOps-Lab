@@ -25,6 +25,8 @@ import audit
 import campaign
 import export
 import firebase_sync
+import jobs
+import queueplan
 import runner
 import stats
 import store
@@ -67,24 +69,34 @@ async def local_only_guard(request, call_next):
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 
+def _static(name: str, media_type: str | None = None) -> FileResponse:
+    # no-cache: after a `git pull` the browser must pick up the new screens, not a stale copy
+    return FileResponse(FRONTEND_DIR / name, media_type=media_type, headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/")
 def index():
-    return FileResponse(FRONTEND_DIR / "index.html")
+    return _static("index.html")
 
 
 @app.get("/app.js")
 def app_js():
-    return FileResponse(FRONTEND_DIR / "app.js")
+    return _static("app.js")
 
 
 @app.get("/v2.js")
 def v2_js():
-    return FileResponse(FRONTEND_DIR / "v2.js")
+    return _static("v2.js")
+
+
+@app.get("/queue.js")
+def queue_js():
+    return _static("queue.js")
 
 
 @app.get("/style.css")
 def style_css():
-    return FileResponse(FRONTEND_DIR / "style.css")
+    return _static("style.css")
 
 
 @app.get("/api/config")
@@ -93,7 +105,7 @@ def config():
         "environments": [{"id": "sregym", "label": "SREGym (live Kubernetes faults)"}],
         "agents": runner.AGENTS,
         "model_presets": runner.MODEL_PRESETS,
-        "problem_sets": runner.problem_sets(),
+        "problem_sets": _all_problem_sets(),
         "firebase_status": firebase_sync.status(),
         "reliops_dir": str(runner.reliops_dir()),
         "default_firebase_key_path": str(runner.default_firebase_key_path()),
@@ -123,19 +135,61 @@ def firebase_status():
     return {"status": firebase_sync.status()}
 
 
+def _data(line: str) -> str:
+    return f"data: {json.dumps(line)}\n\n"
+
+
+def _tail(job: jobs.Job, offset: int = 0):
+    """Server-Sent Events view of a job's output, from `offset` (negative = last N lines). Ends
+    with [[DONE]] once the job has finished and everything has been sent."""
+    def gen():
+        pos = offset
+        while True:
+            lines, pos, finished = job.read(pos, wait=15.0)
+            first = pos - len(lines)
+            for i, line in enumerate(lines, start=1):
+                yield f"id: {first + i}\n" + _data(line)   # id = absolute line count, so a client can resume
+            if finished:
+                break
+            if not lines:
+                yield ": keep-alive\n\n"   # SSE comment: keeps proxies and the browser from timing out
+        yield "data: [[DONE]]\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+def _refusal(lines: list[str]) -> StreamingResponse:
+    def gen():
+        for line in lines:
+            yield _data(line)
+        yield "data: [[DONE]]\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+def _job_sse(gen_factory, kind: str, name: str, meta: dict | None = None) -> StreamingResponse:
+    """Runs and queues are driven by a server thread (jobs.py), so closing the tab does not stop
+    them; this starts the job and streams its output. Only one job at a time (one cluster)."""
+    job = jobs.start(kind, name, gen_factory, meta)
+    if job is None:
+        cur = jobs.current()
+        return _refusal([f"Another job is already running ({cur.kind}: {cur.name}). Open the Queue tab to watch it, "
+                         "or stop it first.\n"])
+    return _tail(job)
+
+
 def _sse(gen, log_kind: str) -> StreamingResponse:
     """Streams `gen`'s lines to the browser as Server-Sent Events, and tees every line into a
     timestamped file under results/gui_logs/ at the same time — so the full output survives a
-    closed tab or a cleared log panel, for debugging after the fact."""
+    closed tab or a cleared log panel, for debugging after the fact. (Setup and demo; runs and
+    queues use _job_sse so they outlive the tab.)"""
     def wrap():
         log_path = runner.new_log_file(log_kind)
         with log_path.open("w", encoding="utf-8") as logf:
             logf.write(f"[log file: {log_path}]\n")
-            yield f"data: {json.dumps(f'[saving full output to {log_path}]')}\n\n"
+            yield _data(f"[saving full output to {log_path}]")
             for line in gen:
                 logf.write(line)
                 logf.flush()
-                yield f"data: {json.dumps(line)}\n\n"
+                yield _data(line)
         yield "data: [[DONE]]\n\n"
 
     return StreamingResponse(wrap(), media_type="text/event-stream")
@@ -282,6 +336,73 @@ def demo():
     return _sse(runner.stream_demo(), "demo")
 
 
+def _on_result(record: dict) -> None:
+    """Called after every individual run with the record we could recover: share the story with
+    teammates, mirror the row to Firestore, and append it to the local raw backup and the CSV."""
+    # Share the story with teammates before the run record goes out, so the flag travels with it.
+    try:
+        record["story_shared"] = firebase_sync.write_story(record["run_id"], runner.render_story(record)).startswith("written")
+    except (FileNotFoundError, ValueError, OSError):
+        record["story_shared"] = False
+    outcome = firebase_sync.write_run(record)
+    record["_firebase"] = outcome
+    # Full record, every field, nothing dropped — the raw backup.
+    results_path = runner.reliops_dir() / "results" / "gui_runs.jsonl"
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    with results_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, default=str) + "\n")
+    # Same row, trimmed to the team's canonical results/*.csv schema — see
+    # runner.append_csv_run's docstring for why both files exist.
+    runner.append_csv_run(record)
+
+
+def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str], action_space: Optional[str] = None,
+               force_build: bool = False, repeat_n: int = 1, run_by: Optional[str] = None,
+               config_label: Optional[str] = None, run_class: str = "exploration", record_walkthrough: bool = True,
+               manifest_id: Optional[str] = None, slice_k: int = 1, slice_n: int = 1,
+               cells: Optional[list[tuple[str, int]]] = None):
+    """The lines of one run: refusals first (frozen runs must match their manifest), then
+    runner.stream_campaign. Shared by /api/run and the queue."""
+    problem_list = list(problems)
+    cell_list = cells
+    if manifest_id:
+        manifest = next((m for m in store.read("manifests") if m.get("manifest_id") == manifest_id), None)
+        if manifest is None:
+            yield f"unknown manifest {manifest_id}\n"
+            return
+        problem_list = list(manifest["problems"])
+        wrong = campaign.verify_run(manifest, agent_id=agent, model_id=model, action_space=action_space,
+                                    judge_model_id=judge_model, config_label=config_label or "", problems=problem_list)
+        if wrong:
+            yield "REFUSED: this run does not match the frozen manifest:\n"
+            for w in wrong:
+                yield f"  - {w}\n"
+            yield "Fix the settings above (or freeze a new manifest) and run again.\n"
+            return
+        _, all_runs = _collect_runs(5000)
+        todo = campaign.grid(manifest, all_runs)["todo"]
+        try:
+            cell_list = campaign.slice_cells(todo, slice_k, slice_n)
+        except ValueError as e:
+            yield f"{e}\n"
+            return
+        run_class = "frozen"
+        repeat_n = manifest["repeat_n"]
+        if not cell_list:
+            yield "nothing left to run for this slice: every cell has a result\n"
+            return
+    elif run_class == "frozen":
+        yield ("A frozen run needs a manifest: freeze one in the Campaigns tab first, so the settings "
+               "it was measured with are recorded and enforced.\n")
+        return
+
+    yield from runner.stream_campaign(
+        agent=agent, action_space=action_space, model=model, judge_model=judge_model, problems=problem_list,
+        repeat_n=repeat_n, force_build=force_build, run_by=run_by, config_label=config_label, run_class=run_class,
+        record_walkthrough=record_walkthrough, cells=cell_list, manifest_id=manifest_id, on_result=_on_result,
+    )
+
+
 @app.get("/api/run")
 def run(
     agent: str,
@@ -306,67 +427,187 @@ def run(
         try:
             cell_list = [(c.rsplit(":", 1)[0], int(c.rsplit(":", 1)[1])) for c in cells.split(",") if c.strip()]
         except (ValueError, IndexError):
-            return _sse(iter(["invalid cells list, expected problem:repeat,problem:repeat\n"]), "run")
+            return _refusal(["invalid cells list, expected problem:repeat,problem:repeat\n"])
+    kwargs = dict(agent=agent, model=model, judge_model=judge_model, problems=problem_list, action_space=action_space,
+                  force_build=force_build, repeat_n=repeat_n, run_by=run_by, config_label=config_label,
+                  run_class=run_class, record_walkthrough=record_walkthrough, manifest_id=manifest_id,
+                  slice_k=slice_k, slice_n=slice_n, cells=cell_list)
+    return _job_sse(lambda: _run_lines(**kwargs), "run", f"{agent} · {len(problem_list)} problem(s)")
 
-    if manifest_id:
-        manifest = next((m for m in store.read("manifests") if m.get("manifest_id") == manifest_id), None)
-        if manifest is None:
-            return _sse(iter([f"unknown manifest {manifest_id}\n"]), "run")
-        problem_list = list(manifest["problems"])
-        wrong = campaign.verify_run(manifest, agent_id=agent, model_id=model, action_space=action_space,
-                                    judge_model_id=judge_model, config_label=config_label or "", problems=problem_list)
-        if wrong:
-            return _sse(iter(["REFUSED: this run does not match the frozen manifest:\n"] +
-                             [f"  - {w}\n" for w in wrong] +
-                             ["Fix the settings above (or freeze a new manifest) and run again.\n"]), "run")
-        _, all_runs = _collect_runs(5000)
-        todo = campaign.grid(manifest, all_runs)["todo"]
-        try:
-            cell_list = campaign.slice_cells(todo, slice_k, slice_n)
-        except ValueError as e:
-            return _sse(iter([f"{e}\n"]), "run")
-        run_class = "frozen"
-        repeat_n = manifest["repeat_n"]
+
+# ---- Job state, saved problem sets, run queues ----------------------------------------------
+@app.get("/api/state")
+def state():
+    """What the server is doing right now. Polled by the header so a run started in another tab (or
+    before a page reload) is always visible, with a way to stop it."""
+    job = jobs.current()
+    return {"busy": jobs.busy(), "job": job.describe() if job else None}
+
+
+@app.get("/api/job/stream")
+def job_stream(offset: int = -300):
+    """Re-attach to the current (or last) job's output: the last `offset` lines, then live."""
+    job = jobs.current()
+    if job is None:
+        return _refusal(["no job has run since the server started\n"])
+    return _tail(job, offset)
+
+
+class ProblemSetIn(BaseModel):
+    name: str
+    problems: list[str]
+    created_by: str = ""
+
+
+def _slug(text: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60]
+
+
+def _all_problem_sets() -> list[dict]:
+    """The CSV sets from the ReliOps clone plus sets saved from the Lab (for example a dev set),
+    placed before the 'custom' pseudo-set. Saved sets borrow category and difficulty from the CSV
+    rows when the problem is in one."""
+    base = runner.problem_sets()
+    known = {p["id"]: p for s in base for p in s["problems"]}
+    saved = []
+    for rec in sorted(store.read("problem_sets"), key=lambda r: r.get("name", "")):
+        if rec.get("deleted") or not rec.get("problems"):
+            continue
+        rows = []
+        for i, pid in enumerate(rec["problems"], start=1):
+            k = known.get(pid) or {}
+            rows.append({"id": pid, "n": str(i), "category": k.get("category") or "Saved set",
+                         "difficulty": k.get("difficulty") or "", "app": k.get("app") or ""})
+        saved.append({"id": "saved:" + rec["set_id"], "label": f"{rec['name']} ({len(rows)} problems, saved set)",
+                      "problems": rows, "saved": True, "name": rec["name"]})
+    custom = [s for s in base if s["id"] == "custom"]
+    return [s for s in base if s["id"] != "custom"] + saved + custom
+
+
+@app.post("/api/problem_set")
+def save_problem_set(body: ProblemSetIn):
+    name = body.name.strip()
+    problems = list(dict.fromkeys(p.strip() for p in body.problems if p.strip()))
+    if not name or not problems:
+        return JSONResponse({"error": "a set needs a name and at least one problem"}, status_code=400)
+    rec = store.append("problem_sets", {"set_id": _slug(name), "name": name, "problems": problems,
+                                        "created_by": body.created_by or "unknown"})
+    return {"ok": True, "set": rec}
+
+
+@app.delete("/api/problem_set/{set_id}")
+def delete_problem_set(set_id: str):
+    rec = next((r for r in store.read("problem_sets") if r.get("set_id") == set_id), None)
+    if rec is None:
+        return JSONResponse({"error": "unknown set"}, status_code=404)
+    store.append("problem_sets", {**rec, "deleted": True})
+    return {"ok": True}
+
+
+class QueueIn(BaseModel):
+    queue_id: Optional[str] = None
+    name: str
+    steps: list[dict]
+    created_by: str = ""
+
+
+def _queues() -> list[dict]:
+    return sorted((q for q in store.read("queues") if not q.get("deleted")),
+                  key=lambda q: q.get("updated_at", ""), reverse=True)
+
+
+def _find_queue(queue_id: str) -> Optional[dict]:
+    return next((q for q in _queues() if q.get("queue_id") == queue_id), None)
+
+
+@app.get("/api/queues")
+def queues():
+    return {"queues": _queues()}
+
+
+@app.post("/api/queue")
+def save_queue(body: QueueIn):
+    try:
+        q = queueplan.clean_queue(body.model_dump())
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"ok": True, "queue": store.append("queues", q)}
+
+
+@app.delete("/api/queue/{queue_id}")
+def delete_queue(queue_id: str):
+    q = _find_queue(queue_id)
+    if q is None:
+        return JSONResponse({"error": "unknown queue"}, status_code=404)
+    store.append("queues", {**q, "deleted": True})
+    return {"ok": True}
+
+
+@app.get("/api/queue/preview")
+def queue_preview(queue_id: str):
+    q = _find_queue(queue_id)
+    if q is None:
+        return JSONResponse({"error": "unknown queue"}, status_code=404)
+    _, runs = _collect_runs(5000)
+    return queueplan.preview(q, runs, store.read("manifests"))
+
+
+@app.post("/api/queue/preview")
+def queue_preview_draft(body: QueueIn):
+    """Same as the GET preview but for a queue that has not been saved yet, so the screen can show
+    live cell counts while a queue is being edited."""
+    draft = body.model_dump()
+    draft["name"] = draft["name"].strip() or "draft"
+    try:
+        q = queueplan.clean_queue(draft)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    _, runs = _collect_runs(5000)
+    return queueplan.preview(q, runs, store.read("manifests"))
+
+
+def _queue_lines(queue: dict, run_by: Optional[str]):
+    steps = queue["steps"]
+    manifests = store.read("manifests")
+    runner._stop_event.clear()
+    yield f"##### [QUEUE] {queue['name']}: {len(steps)} step(s) #####\n"
+    for i, step in enumerate(steps, start=1):
+        if runner._stop_event.is_set():
+            yield f"\n##### [QUEUE] stopped before step {i}/{len(steps)}; the rest was not started #####\n"
+            return
+        if not step.get("enabled", True):
+            yield f"##### [QUEUE] step {i}/{len(steps)} skipped (switched off): {step['name']} #####\n"
+            continue
+        manifest = next((m for m in manifests if m.get("manifest_id") == step.get("manifest_id")), None) \
+            if step.get("manifest_id") else None
+        if step.get("manifest_id") and manifest is None:
+            yield f"##### [QUEUE] step {i}/{len(steps)} cannot run: frozen campaign {step['manifest_id']} not found #####\n"
+            continue
+        _, runs = _collect_runs(5000)
+        cell_list = queueplan.todo(step, runs, manifest)
+        yield f"\n##### [QUEUE] step {i}/{len(steps)} start: {step['name']} | runs {len(cell_list)} to do #####\n"
         if not cell_list:
-            return _sse(iter(["nothing left to run for this slice: every cell has a result\n"]), "run")
-    elif run_class == "frozen":
-        return _sse(iter(["A frozen run needs a manifest: freeze one in the Campaigns tab first, so the settings "
-                          "it was measured with are recorded and enforced.\n"]), "run")
+            yield f"##### [QUEUE] step {i}/{len(steps)} nothing to do: every cell already has a result #####\n"
+            continue
+        yield from _run_lines(
+            agent=step["agent_id"], model=step["model_id"], judge_model=step["judge_model_id"],
+            problems=step["problems"], action_space=step.get("action_space"), force_build=bool(step.get("force_build")),
+            repeat_n=step["repeat_n"], run_by=run_by, config_label=step.get("config_label") or None,
+            run_class=step["run_class"], record_walkthrough=bool(step.get("record_walkthrough", True)),
+            manifest_id=step.get("manifest_id"), cells=None if step.get("manifest_id") else cell_list)
+        yield f"##### [QUEUE] step {i}/{len(steps)} end #####\n"
+    yield "\n##### [QUEUE] finished #####\n"
 
-    def on_result(record: dict) -> None:
-        # Share the story with teammates before the run record goes out, so the flag travels with it.
-        try:
-            record["story_shared"] = firebase_sync.write_story(record["run_id"], runner.render_story(record)).startswith("written")
-        except (FileNotFoundError, ValueError, OSError):
-            record["story_shared"] = False
-        outcome = firebase_sync.write_run(record)
-        record["_firebase"] = outcome
-        # Full record, every field, nothing dropped — the raw backup.
-        results_path = runner.reliops_dir() / "results" / "gui_runs.jsonl"
-        results_path.parent.mkdir(parents=True, exist_ok=True)
-        with results_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, default=str) + "\n")
-        # Same row, trimmed to the team's canonical results/*.csv schema — see
-        # runner.append_csv_run's docstring for why both files exist.
-        runner.append_csv_run(record)
 
-    gen = runner.stream_campaign(
-        agent=agent,
-        action_space=action_space,
-        model=model,
-        judge_model=judge_model,
-        problems=problem_list,
-        repeat_n=repeat_n,
-        force_build=force_build,
-        run_by=run_by,
-        config_label=config_label,
-        run_class=run_class,
-        record_walkthrough=record_walkthrough,
-        cells=cell_list,
-        manifest_id=manifest_id,
-        on_result=on_result,
-    )
-    return _sse(gen, "run")
+@app.get("/api/queue/run")
+def queue_run(queue_id: str, run_by: Optional[str] = None):
+    q = _find_queue(queue_id)
+    if q is None:
+        return _refusal(["unknown queue\n"])
+    if not q.get("steps"):
+        return _refusal(["this queue has no steps\n"])
+    return _job_sse(lambda: _queue_lines(q, run_by), "queue", q["name"], {"queue_id": queue_id})
 
 
 # ---- Problem cards ------------------------------------------------------------------

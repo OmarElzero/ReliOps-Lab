@@ -7,25 +7,90 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header>
-  <h1>ReliOps Lab <span class="tag">v1 · local</span></h1>
-  <div class="row header-name">
-    <label for="run-by" class="inline-label">Your name</label>
-    <input id="run-by" placeholder="your name" autocomplete="off">
+<header class="top">
+  <div class="top-inner">
+    <h1 class="brand">ReliOps Lab <span class="tag">local</span></h1>
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button id="tab-btn-queue" class="tab-btn active" data-tab="queue" type="button" role="tab">Queue</button>
+      <button id="tab-btn-run" class="tab-btn" data-tab="run" type="button" role="tab">Setup &amp; quick run</button>
+      <button id="tab-btn-results" class="tab-btn" data-tab="results" type="button" role="tab">Results</button>
+      <button id="tab-btn-campaigns" class="tab-btn" data-tab="campaigns" type="button" role="tab">Campaigns</button>
+      <button id="tab-btn-audit" class="tab-btn" data-tab="audit" type="button" role="tab">Judge audit</button>
+      <button id="tab-btn-problems" class="tab-btn" data-tab="problems" type="button" role="tab">Problems</button>
+    </nav>
+    <div class="top-tools">
+      <button id="job-pill" class="pill live" type="button" hidden title="Open the Queue tab"><span class="dot"></span><span id="job-pill-text">running</span></button>
+      <button id="job-stop" class="secondary small" type="button" hidden title="Finish the run in progress, record it, then stop">Stop after current</button>
+      <div id="fb-status" class="pill">Firebase: checking…</div>
+      <div class="header-name">
+        <input id="run-by" aria-label="Your name" placeholder="your name" autocomplete="off">
+      </div>
+      <button id="theme-toggle" class="ghost icon" type="button" aria-label="Switch between light and dark" title="Switch light / dark"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.8a6.2 6.2 0 0 1 0 12.4z" fill="currentColor"/></svg></button>
+    </div>
   </div>
-  <div id="fb-status" class="pill">Firebase: checking…</div>
 </header>
 
 <main>
-  <div class="tabs">
-    <button id="tab-btn-run" class="tab-btn active" data-tab="run" type="button">Run</button>
-    <button id="tab-btn-results" class="tab-btn" data-tab="results" type="button">Results</button>
-    <button id="tab-btn-campaigns" class="tab-btn" data-tab="campaigns" type="button">Campaigns</button>
-    <button id="tab-btn-audit" class="tab-btn" data-tab="audit" type="button">Judge audit</button>
-    <button id="tab-btn-problems" class="tab-btn" data-tab="problems" type="button">Problems</button>
+  <div id="tab-queue" class="tab-panel">
+    <section class="card q-head">
+      <input id="q-name" class="q-name" aria-label="Queue name" placeholder="Name this queue, e.g. Phase B baseline" autocomplete="off">
+      <span id="q-state" class="chip" hidden></span>
+      <div class="q-tools">
+        <select id="q-open" aria-label="Open a saved queue"></select>
+        <button id="q-new" class="secondary small" type="button">New</button>
+        <button id="q-save" class="secondary small" type="button">Save</button>
+        <button id="q-delete" class="ghost small danger" type="button">Delete</button>
+      </div>
+    </section>
+
+    <div id="q-empty" class="empty" hidden>
+      <h2>Line up your runs</h2>
+      <p>A queue is an ordered list of steps. Each step is one configuration (agent, model, judge) on a set of
+        problems, repeated a few times. The Lab runs the steps one after another, on its own, and picks up
+        where it stopped if you run the queue again.</p>
+      <ol>
+        <li>First time on this machine: open <em>Setup &amp; quick run</em>, save your model key and run setup.</li>
+        <li>Add a step: for example <em>ReliOps v1 typed</em> on the 30 problems, 3 repeats.</li>
+        <li>Add the next one: <em>typed + guarded shell</em>, same problems. Then a step on your dev set.</li>
+        <li>Press <strong>Run queue</strong>. You can close this tab; the run keeps going.</li>
+      </ol>
+      <button id="q-add-empty" class="primary" type="button">Add the first step</button>
+    </div>
+
+    <ol id="q-steps" class="q-steps"></ol>
+    <button id="q-add" class="q-add" type="button">+ Add step</button>
+
+    <div class="q-runbar" id="q-runbar">
+      <div class="q-total">
+        <strong id="q-total-line">No steps yet</strong>
+        <p class="hint" id="q-total-sub"></p>
+      </div>
+      <div class="q-actions">
+        <button id="q-run" class="primary" type="button" disabled>▶ Run queue</button>
+        <button id="q-stop" class="secondary" type="button" disabled>Stop after current run</button>
+      </div>
+    </div>
+
+    <section class="card now" id="q-now" hidden>
+      <div class="now-top">
+        <h2 id="q-now-title">Running</h2>
+        <span class="now-sub" id="q-now-sub"></span>
+      </div>
+      <div class="now-main" id="q-now-main"></div>
+      <div class="meter" aria-hidden="true"><span id="q-now-meter" style="width:0%"></span></div>
+    </section>
+
+    <section class="card log-card">
+      <details class="log-fold" id="q-log-fold" open>
+        <summary>Live log</summary>
+        <div class="row log-head"><span class="hint" id="q-log-hint">Output of the queue appears here. The full log is also saved on disk.</span>
+          <button id="q-log-clear" class="secondary small" type="button">Clear</button></div>
+        <pre id="q-log" class="log" aria-live="off"></pre>
+      </details>
+    </section>
   </div>
 
-  <div id="tab-run" class="tab-panel">
+  <div id="tab-run" class="tab-panel" hidden>
   <section class="card">
     <h2>0 · Machine check</h2>
     <p class="hint">Rough check only — CPU, RAM, disk, Docker, and the CLI tools Setup needs. Not
@@ -386,7 +451,103 @@
   </div>
 </main>
 
+<dialog id="step-dialog" aria-labelledby="sd-title">
+  <form method="dialog" class="dlg" id="sd-form" novalidate>
+    <div class="dlg-head">
+      <h2 id="sd-title">Add step</h2>
+      <button type="button" class="ghost icon" id="sd-x" aria-label="Close">✕</button>
+    </div>
+    <div class="dlg-body">
+      <label for="sd-name">Step name <span class="tag">(optional)</span></label>
+      <input id="sd-name" placeholder="e.g. A4 · typed on the frozen 30" autocomplete="off">
+
+      <fieldset class="seg">
+        <legend>Run class</legend>
+        <div class="seg-opts">
+          <label><input type="radio" name="sd-class" value="exploration" checked> Exploration</label>
+          <label><input type="radio" name="sd-class" value="frozen"> Frozen (measured campaign)</label>
+        </div>
+      </fieldset>
+      <div id="sd-frozen-box" hidden>
+        <label for="sd-manifest">Frozen campaign</label>
+        <select id="sd-manifest"></select>
+        <p class="locked-note" id="sd-locked">Agent, model, judge, label, problems and repeats come from the campaign and cannot change.</p>
+      </div>
+
+      <div class="grid2">
+        <div>
+          <label for="sd-agent">Agent</label>
+          <select id="sd-agent"></select>
+        </div>
+        <div>
+          <label for="sd-repeat">Repeats per problem</label>
+          <input id="sd-repeat" type="number" min="1" value="1">
+        </div>
+        <div>
+          <label for="sd-model">Agent model</label>
+          <input id="sd-model" list="model-presets" autocomplete="off">
+        </div>
+        <div>
+          <label for="sd-judge">Judge model</label>
+          <input id="sd-judge" list="model-presets" autocomplete="off">
+        </div>
+      </div>
+      <p class="hint" id="sd-agent-desc"></p>
+      <label for="sd-label">Config label <span class="tag">(names this variant in the Results tab)</span></label>
+      <input id="sd-label" list="config-label-presets" placeholder="e.g. baseline-v1-typed" autocomplete="off">
+
+      <label for="sd-set">Problems</label>
+      <select id="sd-set"></select>
+      <div class="pick-summary">
+        <strong id="sd-pick-count">0 of 0</strong> <span class="tag">selected</span>
+        <button type="button" class="secondary small" id="sd-pick-toggle">Choose individual problems</button>
+        <button type="button" class="ghost small" id="sd-save-set-btn">Save selection as a set…</button>
+      </div>
+      <div class="save-set" id="sd-save-set" hidden>
+        <input id="sd-set-name" placeholder="Set name, e.g. Dev 12" autocomplete="off" aria-label="Set name">
+        <button type="button" class="primary small" id="sd-set-save">Save set</button>
+      </div>
+      <div class="pick-panel" id="sd-pick-panel" hidden>
+        <div class="row">
+          <input type="search" id="sd-pick-filter" placeholder="Filter problems…" aria-label="Filter problems">
+          <button type="button" class="secondary small" id="sd-pick-all">All</button>
+          <button type="button" class="secondary small" id="sd-pick-none">None</button>
+        </div>
+        <div class="pick-groups" id="sd-pick-groups"></div>
+      </div>
+      <div id="sd-custom-wrap" hidden>
+        <label for="sd-custom">Problem ids <span class="tag">(comma-separated)</span></label>
+        <input id="sd-custom" placeholder="e.g. configmap_drift_hotel_reservation, revoke_auth_mongodb-1" autocomplete="off">
+      </div>
+
+      <details class="opts-fold">
+        <summary>More options</summary>
+        <label class="checkbox"><input type="checkbox" id="sd-missing" checked> Only run cells that have no result yet (lets a stopped queue resume)</label>
+        <label class="checkbox"><input type="checkbox" id="sd-build"> Force-build the agent image (first run of this agent on this machine)</label>
+        <label class="checkbox"><input type="checkbox" id="sd-walk" checked> Record the cluster timeline for the Story view</label>
+      </details>
+    </div>
+    <div class="dlg-foot">
+      <span class="msg" id="sd-msg" role="alert"></span>
+      <button type="button" class="secondary" id="sd-cancel">Cancel</button>
+      <button type="submit" class="primary" id="sd-ok">Add step</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="run-dialog" aria-labelledby="rd-title">
+  <form method="dialog" class="dlg">
+    <div class="dlg-head"><h2 id="rd-title">Start the queue?</h2></div>
+    <div class="dlg-body" id="rd-body"></div>
+    <div class="dlg-foot">
+      <button type="button" class="secondary" id="rd-cancel">Cancel</button>
+      <button type="submit" class="primary" id="rd-ok" value="go">Start</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="/app.js"></script>
 <script src="/v2.js"></script>
+<script src="/queue.js"></script>
 </body>
 </html>

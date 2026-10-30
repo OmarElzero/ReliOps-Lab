@@ -9,6 +9,7 @@ function appendLog(line) {
 
 function setFbStatus(text) {
   fbStatusEl.textContent = "Firebase: " + text;
+  fbStatusEl.title = "Firebase: " + text;   // the pill truncates long messages; the tooltip has them whole
   fbStatusEl.className = "pill" + (text.startsWith("connected") ? " ok" : /failed|error/i.test(text) ? " warn" : "");
 }
 

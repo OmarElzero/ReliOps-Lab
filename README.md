@@ -35,6 +35,19 @@ yourself; Setup does it. The one thing to know because of this: **this project's
 
 ## Features
 
+- **Run queue.** The Queue tab is where most work happens. A queue is an ordered list of steps; a
+  step is one configuration (agent, model, judge, config label, run class) on a set of problems with
+  a repeat count. Example: *ReliOps v1 typed on the 30 problems × 3*, then *typed + guarded shell on
+  the same 30 × 3*, then one of them on a dev set. Reorder, duplicate, switch steps off, save queues
+  (shared through Firestore when connected) and press **Run queue**. Each step shows its pass, fail,
+  incomplete and still-to-run counts from the recorded runs, and every problem × repeat cell.
+  Running the queue again only fills cells with no result, so a stopped or crashed queue resumes.
+  Frozen steps use a frozen campaign (manifest) and keep its enforcement. A problem selection can be
+  saved as a named set (for example the dev set) and reused in any step.
+- **Runs outlive the browser tab.** Runs and queues are driven by a server thread. Closing the tab,
+  reloading, or a sleeping screen does not stop them; reopening the Lab re-attaches to the live log.
+  One job at a time (one cluster). A status pill in the header shows what is running on every tab,
+  with a stop button (it finishes the run in progress, records it, then stops).
 - **One form, one run.** Pick environment → agent → model → problem set, paste a key, hit Run.
 - **Live log streaming** over SSE — no refreshing a page or tailing a file to see what the agent
   is doing right now.
@@ -233,7 +246,10 @@ reliops-lab/
 │   ├── test_stats.py     # python3 -I backend/test_stats.py
 │   ├── test_runner_storage.py  # python3 -I backend/test_runner_storage.py
 │   ├── test_v2.py        # python3 -I backend/test_v2.py  (API tests need: pip install httpx)
-│   ├── store.py          # append-only records: reviews, labels, re-judges, manifests
+│   ├── store.py          # append-only records: reviews, labels, re-judges, manifests, queues, sets
+│   ├── queueplan.py      # queue steps: validation, cell status, what is left to run
+│   ├── jobs.py           # background job thread, live output, re-attach
+│   ├── test_queue.py     # python3 -I backend/test_queue.py
 │   ├── campaign.py       # frozen manifests, grid, slices
 │   ├── audit.py          # judge audit, standing audit (floor and controls)
 │   ├── export.py         # CSV and SVG export
@@ -242,6 +258,7 @@ reliops-lab/
 │   ├── index.html
 │   ├── app.js            # form state, SSE client, log rendering, results
 │   ├── v2.js             # campaigns, judge audit, problems tabs
+│   ├── queue.js          # the Queue tab: steps, step dialog, run, live state
 │   └── style.css
 ├── start.sh / start.cmd  # one-command launcher
 ├── requirements.txt
