@@ -570,6 +570,10 @@
       <p class="hint" id="sd-agent-desc"></p>
       <label for="sd-label">Config label <span class="tag">(names this variant in the Results tab)</span></label>
       <input id="sd-label" list="config-label-presets" placeholder="e.g. baseline-v1-typed" autocomplete="off">
+      <fieldset id="sd-switches-box" class="switch-box" hidden>
+        <legend>Agent switches <span class="tag">(ReliOps v2 only; none ticked = behaves like v1)</span></legend>
+        <div id="sd-switches"></div>
+      </fieldset>
 
       <label for="sd-purpose">Run purpose <span class="tag">(how these results will be treated)</span></label>
       <select id="sd-purpose">

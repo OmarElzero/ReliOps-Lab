@@ -157,6 +157,7 @@
       h("span", { class: "chip mono", text: "judge " + s.judge_model_id }),
     ];
     if (s.config_label) chips.push(h("span", { class: "chip mono", text: s.config_label, title: "config label" }));
+    if ((s.agent_switches || []).length) chips.push(h("span", { class: "chip mono", text: s.agent_switches.join("+"), title: "agent switches on" }));
     chips.push(h("span", { class: "chip" + (s.run_class === "frozen" ? " frozen" : ""), text: s.run_class === "frozen" ? "frozen campaign" : "exploration" }));
     if (s.purpose) chips.push(h("span", { class: "chip", text: "purpose: " + s.purpose, title: "set for every run this step records" }));
     return chips;
@@ -401,6 +402,7 @@
     $("sd-model").value = src.model_id || (last && last.model_id) || $("model").value || (CONFIG.model_presets[0] || "");
     $("sd-judge").value = src.judge_model_id || (last && last.judge_model_id) || $("judge-model").value || (CONFIG.model_presets[0] || "");
     $("sd-label").value = src.config_label !== undefined ? src.config_label : "";
+    renderSwitches(src.agent_switches || []);
     $("sd-repeat").value = src.repeat_n || (last && last.repeat_n) || 1;
     $("sd-missing").checked = src.only_missing !== false;
     $("sd-build").checked = !!src.force_build;
@@ -453,6 +455,7 @@
       name: typedName || `${a.label} · ${setLabel}`, auto_name: !typedName,
       agent_id: a.id, agent_label: a.label, action_space: a.action_space || null,
       model_id: model, judge_model_id: judge, config_label: $("sd-label").value.trim(),
+      agent_switches: a.id === "reliops_v2" ? pickedSwitches() : [],
       run_class: frozen ? "frozen" : "exploration", manifest_id: m ? m.manifest_id : null,
       problems, set_label: setLabel, repeat_n: repeat, purpose: frozen ? null : ($("sd-purpose").value || null),
       only_missing: $("sd-missing").checked, force_build: $("sd-build").checked, record_walkthrough: $("sd-walk").checked,
@@ -468,7 +471,25 @@
   $("sd-cancel").addEventListener("click", () => dlg.close());
   $("sd-x").addEventListener("click", () => dlg.close());
   dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });   // click on the backdrop
-  $("sd-agent").addEventListener("change", lockFromManifest);
+  $("sd-agent").addEventListener("change", () => { lockFromManifest(); syncSwitchBox(); });
+
+  // ReliOps v2 switches: one checkbox each, shown only when the chosen agent is reliops_v2
+  function renderSwitches(on) {
+    const box = $("sd-switches");
+    box.innerHTML = "";
+    (CONFIG.agent_switches || []).forEach((sw) => {
+      const id = "sw-" + sw.id;
+      const cb = h("input", { type: "checkbox", id, value: sw.id });
+      cb.checked = on.includes(sw.id);
+      box.append(h("label", { class: "switch-row", title: sw.help }, [cb, h("span", { class: "mono", text: sw.id }), h("span", { class: "hint", text: " " + sw.help })]));
+    });
+    syncSwitchBox();
+  }
+  const pickedSwitches = () => Array.from($("sd-switches").querySelectorAll("input:checked")).map((i) => i.value);
+  function syncSwitchBox() {
+    const a = agentOf();
+    $("sd-switches-box").hidden = !(a && a.id === "reliops_v2");
+  }
   $("sd-manifest").addEventListener("change", lockFromManifest);
   document.querySelectorAll('input[name="sd-class"]').forEach((r) => r.addEventListener("change", () => { dlg.dataset.manifest = ""; lockFromManifest(); }));
   $("sd-set").addEventListener("change", () => chooseSet(Number($("sd-set").value)));

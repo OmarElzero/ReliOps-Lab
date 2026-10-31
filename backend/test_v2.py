@@ -1008,3 +1008,114 @@ class FirebaseResilienceTests(unittest.TestCase):
             source, runs = app_module._collect_runs(50)
         self.assertEqual(source, "firestore-saved-copy")
         self.assertEqual({r["run_by"] for r in runs}, {"Noura", "Omar Betawy"})
+
+
+class AgentSwitchTests(unittest.TestCase):
+    """Per-step agent switches (ReliOps v2) and the token reading fix."""
+
+    def setUp(self):
+        import runner
+        self.r = runner
+
+    def test_clean_switches_validates_and_orders(self):
+        self.assertEqual(self.r.clean_switches(["soak", "survey", "SURVEY"]), ["SURVEY", "SOAK"])
+        self.assertEqual(self.r.clean_switches(None), [])
+        with self.assertRaises(ValueError):
+            self.r.clean_switches(["nonsense"])
+
+    def test_a_step_with_switches_needs_the_v2_agent_and_keeps_them_in_order(self):
+        import queueplan
+        base = {"agent_id": "reliops_v2", "model_id": "m", "judge_model_id": "j", "problems": ["p"], "config_label": "B+S",
+                "action_space": "typed+shell", "agent_switches": ["SURVEY", "TOKEN_LOG"]}
+        step = queueplan.clean_step(base)
+        self.assertEqual(step["agent_switches"], ["TOKEN_LOG", "SURVEY"])
+        with self.assertRaises(ValueError):
+            queueplan.clean_step({**base, "agent_id": "reliops_v1"})
+
+    def test_a_run_with_other_switches_is_not_the_same_cell(self):
+        import queueplan
+        step = queueplan.clean_step({"agent_id": "reliops_v2", "model_id": "m", "judge_model_id": "j", "problems": ["p"],
+                                     "config_label": "x", "action_space": "typed+shell", "agent_switches": ["SOAK"]})
+        run = {"agent_id": "reliops_v2", "model_id": "m", "judge_model_id": "j", "config_label": "x", "action_space": "typed+shell",
+               "run_class": "exploration", "agent_switches": "SOAK"}
+        self.assertTrue(queueplan._matches(step, run))
+        self.assertFalse(queueplan._matches(step, {**run, "agent_switches": "SURVEY"}))
+        self.assertFalse(queueplan._matches(step, {**run, "agent_switches": ""}))
+
+    def _campaign(self, agent, switches, env=None):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        r = self.r
+        seen, records = [], []
+        tmp = Path(tempfile.mkdtemp())
+
+        def fake_stream(cmd, cwd=None, env=None):
+            seen.append(dict(env or {}))
+            return iter(["line\n"])
+        with mock.patch.object(r, "sregym_dir", return_value=tmp), \
+             mock.patch.object(r, "merged_env_vars", return_value=env or {}), \
+             mock.patch.object(r, "preflight_warnings", return_value=[]), \
+             mock.patch.object(r, "cluster_node_problems", return_value=None), \
+             mock.patch.object(r, "_stream", side_effect=fake_stream), \
+             mock.patch.object(r, "_latest_result_row", return_value={"Diagnosis.success": True, "Mitigation.success": True}), \
+             mock.patch.object(r, "_find_transcript", return_value=None), \
+             mock.patch.object(r, "_start_recorder", return_value=None), \
+             mock.patch.object(r, "_stop_recorder"), \
+             mock.patch.object(r, "_git_commit_safe", return_value="abc"), \
+             mock.patch.object(r, "_problem_log_path", side_effect=lambda p, rep, n: tmp / f"{p}-{rep}.log"):
+            log = "".join(r.stream_campaign(agent=agent, action_space="typed+shell", model="gemini/x", judge_model="gemini/x",
+                                            problems=["p1"], repeat_n=1, force_build=False, config_label="B+SURVEY",
+                                            agent_switches=switches, on_result=records.append))
+        return log, seen, records
+
+    def test_chosen_switches_are_on_and_every_other_one_is_off_even_if_the_env_file_says_otherwise(self):
+        log, seen, records = self._campaign("reliops_v2", ["SURVEY", "TOKEN_LOG"], env={"REACT_V1_SOAK": "on"})
+        env = seen[0]
+        self.assertEqual((env["REACT_V1_SURVEY"], env["REACT_V1_TOKEN_LOG"], env["REACT_V1_SOAK"], env["REACT_V1_LEDGER"]),
+                         ("on", "on", "off", "off"))
+        self.assertEqual(env["REACT_V1_VARIANT"], "B+SURVEY")
+        self.assertEqual(records[0]["agent_switches"], "TOKEN_LOG+SURVEY")
+
+    def test_switches_on_the_v1_agent_stop_the_run_before_anything_starts(self):
+        log, seen, records = self._campaign("reliops_v1", ["SURVEY"])
+        self.assertEqual((seen, records), ([], []))
+        self.assertIn("Nothing was run", log)
+
+    def test_v1_runs_get_no_switch_variables(self):
+        _, seen, records = self._campaign("reliops_v1", None)
+        self.assertFalse([k for k in seen[0] if k.startswith("REACT_V1_") and k != "REACT_V1_ACTION_SPACE" and k != "REACT_V1_LOG_OBS"])
+        self.assertEqual(records[0]["agent_switches"], "")
+
+    def test_tokens_are_read_from_either_key_format(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "t.jsonl").write_text("\n".join(json.dumps(x) for x in [
+            {"type": "model_call", "usage": {"input_tokens": 100, "output_tokens": 10}},
+            {"type": "model_call", "usage": {"prompt_tokens": 20, "completion_tokens": 5}},
+            {"type": "action"}]) + "\n")
+        with mock.patch.object(self.r, "sregym_dir", return_value=tmp):
+            self.assertEqual(self.r.transcript_stats("t.jsonl"),
+                             {"prompt_tokens": 120, "completion_tokens": 15, "total_tokens": 135, "num_llm_calls": 2, "num_tool_calls": 1})
+
+    def test_old_rows_get_their_tokens_back_from_the_local_transcript(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "t.jsonl").write_text(json.dumps({"type": "model_call", "usage": {"input_tokens": 7, "output_tokens": 3}}) + "\n")
+        with mock.patch.object(self.r, "sregym_dir", return_value=tmp):
+            got = app_module._token_fields({"transcript_rel": "t.jsonl", "total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0})
+            kept = app_module._token_fields({"transcript_rel": "t.jsonl", "total_tokens": 50, "prompt_tokens": 40, "completion_tokens": 10})
+            none = app_module._token_fields({"total_tokens": 0})
+        self.assertEqual(got["total_tokens"], 10)
+        self.assertEqual(kept["total_tokens"], 50)      # a stored value is never overwritten
+        self.assertEqual(none["total_tokens"], 0)

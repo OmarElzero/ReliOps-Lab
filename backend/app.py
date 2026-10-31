@@ -112,6 +112,7 @@ def config():
     return {
         "environments": [{"id": "sregym", "label": "SREGym (live Kubernetes faults)"}],
         "agents": runner.AGENTS,
+        "agent_switches": [{"id": n, "help": runner.AGENT_SWITCH_HELP.get(n, "")} for n in runner.AGENT_SWITCHES],
         "model_presets": runner.MODEL_PRESETS,
         "problem_sets": _with_pins(_all_problem_sets()),
         "pins": [{k: v for k, v in p.items() if k != "problems"} for p in pins.load()],
@@ -234,6 +235,27 @@ def _incomplete_reason(r: dict) -> str:
         return ""
 
 
+_TOKEN_CACHE: dict[tuple[str, float], dict] = {}
+
+
+def _token_fields(r: dict) -> dict:
+    """Token counts of one run. Runs recorded before the 31 Oct fix stored 0 (the Lab read the wrong key names); when this
+    machine still has the run's transcript the real counts are read from it now. Nothing stored is changed."""
+    stored = {k: r.get(k) for k in ("total_tokens", "prompt_tokens", "completion_tokens")}
+    rel = r.get("transcript_rel")
+    if stored["total_tokens"] or not rel:
+        return stored
+    try:
+        path = runner.sregym_dir() / rel
+        key = (str(path), path.stat().st_mtime)
+        if key not in _TOKEN_CACHE:
+            _TOKEN_CACHE[key] = runner.transcript_stats(rel)
+        fresh = _TOKEN_CACHE[key]
+    except OSError:
+        return stored
+    return {k: (fresh.get(k) if fresh.get("total_tokens") else stored[k]) for k in stored}
+
+
 def _collect_runs(limit: int) -> tuple[str, list[dict]]:
     """Every recorded run, newest first, as flat dicts the tables and the statistics both read.
     Firestore (the whole team's runs) wins when connected; this machine's own
@@ -270,6 +292,7 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "judge_model_id": r.get("judge_model_id"),
             "action_space": r.get("action_space"),
             "config_label": r.get("config_label") or "",
+            "agent_switches": r.get("agent_switches") or "",
             "experiment": r.get("experiment") or "",
             "incomplete_reason": _incomplete_reason(r),
             "run_class": r.get("run_class") or "exploration",
@@ -287,9 +310,7 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "manifest_id": r.get("manifest_id"),
             "git_commit": r.get("git_commit"),
             "key_slot": r.get("key_slot"),
-            "total_tokens": r.get("total_tokens"),
-            "prompt_tokens": r.get("prompt_tokens"),
-            "completion_tokens": r.get("completion_tokens"),
+            **_token_fields(r),
             "num_llm_calls": r.get("num_llm_calls"),
             "num_tool_calls": r.get("num_tool_calls"),
             "failure_mode_tag": review.get("failure_mode_tag") or "",
@@ -483,6 +504,7 @@ def _on_result(record: dict) -> None:
 def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str], action_space: Optional[str] = None,
                force_build: bool = False, repeat_n: int = 1, run_by: Optional[str] = None,
                config_label: Optional[str] = None, run_class: str = "exploration", record_walkthrough: bool = True,
+               agent_switches: Optional[list] = None,
                manifest_id: Optional[str] = None, slice_k: int = 1, slice_n: int = 1,
                cells: Optional[list[tuple[str, int]]] = None, purpose: Optional[str] = None,
                experiment: Optional[str] = None):
@@ -531,7 +553,7 @@ def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str],
         agent=agent, action_space=action_space, model=model, judge_model=judge_model, problems=problem_list,
         repeat_n=repeat_n, force_build=force_build, run_by=run_by, config_label=config_label, run_class=run_class,
         record_walkthrough=record_walkthrough, cells=cell_list, manifest_id=manifest_id, experiment=experiment,
-        on_result=on_result,
+        agent_switches=agent_switches, on_result=on_result,
     )
 
 
@@ -750,6 +772,7 @@ def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: b
             problems=step["problems"], action_space=step.get("action_space"), force_build=bool(step.get("force_build")),
             repeat_n=step["repeat_n"], run_by=run_by, config_label=step.get("config_label") or None,
             run_class=step["run_class"], record_walkthrough=bool(step.get("record_walkthrough", True)),
+            agent_switches=step.get("agent_switches") or None,
             manifest_id=step.get("manifest_id"), cells=None if step.get("manifest_id") else cell_list,
             purpose=step.get("purpose") or None, experiment=label)
         yield f"##### [QUEUE] step {i}/{len(steps)} end #####\n"

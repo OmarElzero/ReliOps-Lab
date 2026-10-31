@@ -26,6 +26,36 @@ RELIOPS_REPO_URL = "https://github.com/OmarElzero/ReliOps"
 DEFAULT_WORKDIR = Path(os.environ.get("RELIOPS_LAB_WORKDIR", Path.home() / "reliops-lab-workdir"))
 RELIOPS_BRANCH = os.environ.get("RELIOPS_BRANCH", "claude/determined-einstein-mjmr56")
 
+# The opt-in switches of agent/react_v2 (agent/react_v2/features.py). Each is passed to the agent as REACT_V1_<NAME>=on;
+# every switch not chosen for a step is passed as "off", so a stray line in a .env cannot turn one on.
+AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AWARE", "FAULT_EXISTS", "SURVEY", "LEDGER",
+                  "SELFCHECK", "SOAK", "CATALOGUE_V2", "K8S_KNOWLEDGE")
+AGENT_SWITCH_HELP = {
+    "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
+    "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
+    "OPTIONAL_ARGS": "pass optional action arguments (previous logs, container, tail) through",
+    "BUDGET_AWARE": "F7: show actions used and seconds left after each observation",
+    "FAULT_EXISTS": "tell the agent a fault exists, so a healthy-looking cluster is not the answer",
+    "SURVEY": "F14: survey-first instruction and a survey action",
+    "LEDGER": "F2: hypothesis ledger in each thought, numbered observations",
+    "SELFCHECK": "F3: one evidence-closure question before the diagnosis is accepted",
+    "SOAK": "F6: wait 60 s and re-read the cluster after a fix before submitting",
+    "CATALOGUE_V2": "typed patch_resource, delete_resource, exec_in_pod",
+    "K8S_KNOWLEDGE": "F13: append reviewed Kubernetes notes (needs knowledge/k8s_notes.md)",
+}
+SWITCH_AGENT = "reliops_v2"
+OUR_AGENTS = ("reliops_v1", "reliops_v2")
+
+
+def clean_switches(raw) -> list[str]:
+    """A list of switch names, validated against AGENT_SWITCHES and de-duplicated in the canonical order."""
+    names = [str(x).strip().upper() for x in (raw or []) if str(x).strip()]
+    unknown = [n for n in names if n not in AGENT_SWITCHES]
+    if unknown:
+        raise ValueError(f"unknown agent switch {unknown[0]!r}; known: {', '.join(AGENT_SWITCHES)}")
+    return [n for n in AGENT_SWITCHES if n in names]
+
+
 AGENTS = [
     {
         "id": "reliops_v1", "label": "ReliOps v1 (ours, typed)", "action_space": "typed",
@@ -37,6 +67,15 @@ AGENTS = [
         "desc": "Same agent, with a guarded shell tool added — can run arbitrary kubectl commands "
                 "too, routed through SREGym's own safety runner. In the pilot this arm scored "
                 "53% end-to-end vs the typed-only arm's 33% (n=15 each).",
+    },
+    {
+        "id": "reliops_v2", "label": "ReliOps v2 (ours, typed + guarded shell, switches)", "action_space": "typed+shell",
+        "desc": "ReliOps v1 plus opt-in switches (tick them below). With none ticked it behaves exactly like v1. "
+                "Name the variant in the config label; every run records which switches were on.",
+    },
+    {
+        "id": "reliops_v2", "label": "ReliOps v2 (ours, typed, switches)", "action_space": "typed",
+        "desc": "Same as above with the typed action menu only (tick CATALOGUE_V2 for the richer typed menu).",
     },
     {
         "id": "stratus", "label": "STRATUS (multi-agent reference)", "action_space": None,
@@ -329,15 +368,16 @@ def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops
         out.append(f"[check] GEMINI_API_KEY contains a space, a quote or a '#' (it starts with {gk[:4]}... and has {len(gk)} characters). "
                    f"A key never contains those, so the line in the .env probably carries extra text. Google will reject it.")
     try:
-        driver = (reliops or reliops_dir()) / "agent" / "react_v1" / "driver.py"
-        if agent == "reliops_v1" and driver.exists() and shutil.which("docker"):
+        pkg = "react_v2" if agent == "reliops_v2" else "react_v1"
+        driver = (reliops or reliops_dir()) / "agent" / pkg / "driver.py"
+        if agent in OUR_AGENTS and driver.exists() and shutil.which("docker"):
             r = subprocess.run(["docker", "image", "inspect", "-f", "{{.Created}}", "sregym-agent-base:latest"],
                                capture_output=True, text=True, timeout=10)
             if r.returncode == 0 and r.stdout.strip():
                 from datetime import datetime
                 created = datetime.fromisoformat(r.stdout.strip().replace("Z", "+00:00")[:26].rstrip(".") + "+00:00")
                 if driver.stat().st_mtime > created.timestamp():
-                    out.append("[check] the agent image looks older than agent/react_v1/driver.py. Run scripts/sync_agent.sh and tick "
+                    out.append(f"[check] the agent image looks older than agent/{pkg}/driver.py. Run scripts/sync_agent.sh and tick "
                                "'Force-build the agent image' for the next run, or the old driver code runs.")
     except Exception:  # noqa: BLE001  best effort only
         pass
@@ -655,7 +695,7 @@ _RUN_LOG_HEADER_FALLBACK = [
 # has (and skipped if the template already lists them), so the template stays the single source of truth
 # and this tool never silently drops the diagnosis text again.
 LAB_EXTRA_COLUMNS = [
-    "judge_model_id", "run_by", "run_class", "config_label", "experiment", "incomplete_reason",
+    "judge_model_id", "run_by", "run_class", "config_label", "agent_switches", "experiment", "incomplete_reason",
     "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel", "manifest_id",
 ]
 
@@ -829,6 +869,7 @@ def append_csv_run(record: dict) -> Path:
         "run_by": record.get("run_by", ""),
         "run_class": record.get("run_class", ""),
         "config_label": record.get("config_label", ""),
+        "agent_switches": record.get("agent_switches", ""),
         "experiment": record.get("experiment", ""),
         "incomplete_reason": record.get("incomplete_reason", ""),
         "diagnosis_text": record.get("diagnosis_text"),
@@ -1251,8 +1292,10 @@ def transcript_stats(transcript_rel: str | None) -> dict:
                     seen = True
                     calls += 1
                     u = rec.get("usage") or {}
-                    prompt += int(u.get("prompt_tokens") or 0)
-                    completion += int(u.get("completion_tokens") or 0)
+                    # The agent writes SREGym's token format (input_tokens / output_tokens); older code and some
+                    # providers use prompt_tokens / completion_tokens. Reading only the second pair gave 0 for every run.
+                    prompt += int(u.get("input_tokens") or u.get("prompt_tokens") or 0)
+                    completion += int(u.get("output_tokens") or u.get("completion_tokens") or 0)
                 elif rec.get("type") == "action":
                     actions += 1
     except OSError:
@@ -1379,6 +1422,7 @@ def stream_campaign(
     cells: list[tuple[str, int]] | None = None,
     manifest_id: str | None = None,
     experiment: str | None = None,
+    agent_switches: list[str] | None = None,
     on_result=None,
 ) -> Iterator[str]:
     """Runs one problem at a time (SREGym itself is single-run per process) and yields log lines
@@ -1396,6 +1440,17 @@ def stream_campaign(
     base_env = {"AGENT_MODEL_ID": model}
     if action_space:
         base_env["REACT_V1_ACTION_SPACE"] = action_space
+    switches = clean_switches(agent_switches)
+    if switches and agent != SWITCH_AGENT:
+        yield f"Agent switches only exist in {SWITCH_AGENT}; {agent} would ignore {', '.join(switches)}. Nothing was run.\n"
+        return
+    if agent == SWITCH_AGENT:
+        for name in AGENT_SWITCHES:
+            base_env[f"REACT_V1_{name}"] = "on" if name in switches else "off"
+        base_env["REACT_V1_VARIANT"] = (config_label or "").strip()
+    switches_text = "+".join(switches)
+    if switches:
+        yield f"[agent] {agent} with switches: {switches_text}\n"
     # merged_env_vars() (this tool's own .env, falling back to the clone's) rather than reading
     # reliops_dir()/.env directly — these go straight into the subprocess's env via Popen, so the
     # actual test run gets your key whether you saved it here or edited the clone's .env by hand.
@@ -1479,7 +1534,7 @@ def stream_campaign(
         first_run_of_agent = force_build and i == 1
         if first_run_of_agent:
             cmd.append("--force-build")
-        elif agent == "reliops_v1":
+        elif agent in OUR_AGENTS:
             env["SREGYM_AGENT_IMAGE"] = "sregym-agent-base:latest"
 
         # Tee this one problem's output into its own log file as it streams, in addition to the
@@ -1526,6 +1581,7 @@ def stream_campaign(
             # for a measured campaign. The results tables keep the two apart so they are never averaged.
             "run_class": run_class if run_class in ("exploration", "frozen") else "exploration",
             "config_label": (config_label or "").strip(),
+            "agent_switches": switches_text,
             # What this run belongs to, in the person's own words (one experiment can hold many runs and queue starts).
             "experiment": (experiment or "").strip(),
             "transcript_rel": transcript_rel,

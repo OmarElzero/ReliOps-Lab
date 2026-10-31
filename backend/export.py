@@ -11,7 +11,7 @@ from xml.sax.saxutils import escape
 
 RUN_COLUMNS = [
     "run_id", "timestamp_utc", "run_by", "problem_id", "repeat_index", "repeat_n", "agent_id", "model_id",
-    "action_space", "config_label", "run_class", "manifest_id", "judge_model_id", "diagnosis_pass",
+    "action_space", "config_label", "agent_switches", "run_class", "manifest_id", "judge_model_id", "diagnosis_pass",
     "mitigation_pass", "e2e_pass", "ttd_s", "ttm_s", "total_tokens", "num_llm_calls", "failure_mode_tag",
     "first_bad_step", "review_note", "diagnosis_text", "judge_reasoning",
 ]
@@ -140,7 +140,7 @@ def experiment_zip(name: str, runs: list[dict], read_log, read_story) -> tuple[b
                 report["with_story"] += 1
             else:
                 notes.append(f"no story: {why}")
-            text = [f"run_id: {rid}", f"problem: {r.get('problem_id')}", f"config: {r.get('config_label')} / {r.get('action_space')}",
+            text = [f"run_id: {rid}", f"problem: {r.get('problem_id')}", f"config: {r.get('config_label')} / {r.get('action_space')}" + (f" / switches: {r.get('agent_switches')}" if r.get('agent_switches') else ""),
                     f"repeat: {r.get('repeat_index')}", f"outcome: diagnosis_pass={r.get('diagnosis_pass')} "
                     f"mitigation_pass={r.get('mitigation_pass')} e2e_pass={r.get('e2e_pass')}",
                     f"judge D1/D2/D3/composite: {r.get('diagnosis_d1')}/{r.get('diagnosis_d2')}/{r.get('diagnosis_d3')}/{r.get('diagnosis_composite')}",
@@ -161,6 +161,6 @@ def experiment_zip(name: str, runs: list[dict], read_log, read_story) -> tuple[b
                  "| # | run | problem | repeat | config | notes |", "|---|---|---|---|---|---|"]
         for i, r in enumerate(rows, 1):
             lines.append(f"| {i} | {str(r.get('run_id'))[:8]} | {r.get('problem_id')} | {r.get('repeat_index')} | "
-                         f"{r.get('config_label') or '-'} | {r['export_notes'] or '-'} |")
+                         f"{r.get('config_label') or '-'}{(' [' + r['agent_switches'] + ']') if r.get('agent_switches') else ''} | {r['export_notes'] or '-'} |")
         z.writestr("README.md", "\n".join(lines) + "\n")
     return buf.getvalue(), report

@@ -43,6 +43,10 @@ def clean_step(raw: dict) -> dict:
         raise ValueError("purpose ‘final’ is for frozen-campaign steps; an exploration run is an experiment or dev")
     if run_class == "frozen" and not manifest_id:
         raise ValueError("a frozen step needs a frozen campaign (manifest): freeze one in the Campaigns tab")
+    import runner  # local import: runner does not import this module, but keep the dependency one-way
+    switches = runner.clean_switches(raw.get("agent_switches"))
+    if switches and agent_id != runner.SWITCH_AGENT:
+        raise ValueError(f"agent switches only exist in {runner.SWITCH_AGENT}; pick that agent or untick the switches")
     try:
         repeat_n = max(1, int(raw.get("repeat_n") or 1))
     except (TypeError, ValueError):
@@ -55,6 +59,7 @@ def clean_step(raw: dict) -> dict:
         "action_space": (raw.get("action_space") or None),
         "model_id": model_id, "judge_model_id": judge,
         "config_label": (raw.get("config_label") or "").strip(),
+        "agent_switches": switches,
         "run_class": run_class, "manifest_id": manifest_id, "purpose": purpose,
         "problems": problems, "set_label": raw.get("set_label") or "",
         "repeat_n": repeat_n,
@@ -130,6 +135,7 @@ def _matches(step: dict, run: dict) -> bool:
             and (run.get("action_space") or "") == (step["action_space"] or "")
             and (run.get("judge_model_id") or "") == step["judge_model_id"]
             and (run.get("config_label") or "").strip() == step["config_label"]
+            and (run.get("agent_switches") or "") == "+".join(step.get("agent_switches") or [])
             and (run.get("run_class") or "exploration") == step["run_class"]
             and (not step["manifest_id"] or run.get("manifest_id") == step["manifest_id"]))
 

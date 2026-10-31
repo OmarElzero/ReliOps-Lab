@@ -109,3 +109,17 @@ One card per problem (what the fault is, expected difficulty, notes) and the att
 1. Run **Demo** to see the output, then a machine check.
 2. Run a single problem with the dumb baseline, then the agent on one dev problem, and confirm the run appears in Results with its diagnosis text.
 3. Only then queue a long run, and start with the dev 12 so any pipeline problem shows up on problems you are allowed to read.
+
+## Agent switches (ReliOps v2)
+
+In a queue step, choose an agent named "ReliOps v2" and tick the switches the variant should have; the config label names the
+variant (for example `B+SURVEY`). Every switch you did not tick is passed to the agent as off, whatever the `.env` says, and each
+run records the switches that were on (Results can filter on them; the experiment zip lists them). Choosing switches with any
+other agent is refused. With none ticked, v2 behaves like v1. The switches and what they do are in
+`docs/plan/12-agent-ladder.md` of the ReliOps repo. Run `bash scripts/sync_agent.sh` and tick "Force-build the agent image" once
+after updating the repo so the container has the v2 code.
+
+## Tokens
+
+Token counts come from the agent's transcript. Runs recorded before 31 Oct stored 0 (the wrong field names were read); when the
+transcript is still on the machine, Results now shows the real counts for those runs. Stored values are never changed.

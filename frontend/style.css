@@ -466,3 +466,7 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 
 /* Results banner when the team's runs are not live */
 #dash-source.src-problem { color: var(--warn); border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 8px 10px; border-radius: 6px; }
+
+.switch-box { border: 1px solid var(--border, #2a3040); border-radius: 8px; padding: 8px 12px; margin: 10px 0; }
+.switch-box legend { padding: 0 6px; font-size: 0.9em; }
+.switch-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }

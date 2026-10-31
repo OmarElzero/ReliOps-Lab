@@ -22,7 +22,7 @@ FIELDS = {
     "agent_id": "agent_id", "model_id": "model_id", "action_space": "action_space", "config_label": "config_label",
     "judge_model_id": "judge_model_id", "run_class": "run_class", "purpose": "purpose", "category": "category",
     "app": "app", "problem_id": "problem_id", "run_by": "run_by", "manifest_id": "manifest_id",
-    "experiment": "experiment",
+    "experiment": "experiment", "agent_switches": "agent_switches",
 }
 RUN_LIMIT = 3000
 
@@ -213,7 +213,7 @@ def build(all_runs: list[dict], f: dict, metric: str, manifests: list[dict], lab
 
     trim = sorted(runs, key=lambda r: r.get("timestamp_utc") or "", reverse=True)[:RUN_LIMIT]
     cols = ("run_id", "timestamp_utc", "problem_id", "category", "app", "purpose", "purpose_source", "agent_id", "model_id",
-            "action_space", "config_label", "experiment", "judge_model_id", "run_class", "repeat_index", "e2e_pass", "diagnosis_pass",
+            "action_space", "config_label", "agent_switches", "experiment", "judge_model_id", "run_class", "repeat_index", "e2e_pass", "diagnosis_pass",
             "mitigation_pass", "ttd_s", "ttm_s", "incomplete_reason", "failure_mode_tag", "first_bad_step", "review_note", "run_by", "manifest_id",
             "git_commit", "key_slot", "has_story", "log_file", "total_tokens")
     rows = []
