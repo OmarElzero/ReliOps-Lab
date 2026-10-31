@@ -911,14 +911,22 @@ class FirebaseResilienceTests(unittest.TestCase):
             p = mock.patch.object(runner, target, return_value=ret)
             p.start()
             self.addCleanup(p.stop)
-        self._saved = (dict(self.fb._snap), dict(self.fb._errors), self.fb._disk_loaded, self.fb._client)
+        self._saved = (dict(self.fb._snap), dict(self.fb._errors), self.fb._disk_loaded, self.fb._client,
+                       dict(self.fb._blocked_until), dict(self.fb._meta), dict(self.fb._usage), self.fb._usage_loaded)
         self.fb._snap.clear(); self.fb._errors.clear(); self.fb._disk_loaded = False
+        self.fb._blocked_until.clear(); self.fb._meta.update({"checked_at": 0.0, "stamps": None})
+        self.fb._usage.update({"day": "", "reads": 0}); self.fb._usage_loaded = False
+        self.fb._story_cache.clear()
+        self.meta = None
         self.addCleanup(self._restore)
 
     def _restore(self):
         self.fb._snap.clear(); self.fb._snap.update(self._saved[0])
         self.fb._errors.clear(); self.fb._errors.update(self._saved[1])
         self.fb._disk_loaded, self.fb._client = self._saved[2], self._saved[3]
+        self.fb._blocked_until.clear(); self.fb._blocked_until.update(self._saved[4])
+        self.fb._meta.clear(); self.fb._meta.update(self._saved[5])
+        self.fb._usage.clear(); self.fb._usage.update(self._saved[6]); self.fb._usage_loaded = self._saved[7]
 
     class _Doc:
         def __init__(self, i, d): self.id, self._d = i, d
@@ -936,9 +944,22 @@ class FirebaseResilienceTests(unittest.TestCase):
             if self.fail: raise self.fail
             return iter(self.docs)
 
+    class _Meta:
+        """The meta/changes document: get() is one read, set(merge) is what a teammate's write does."""
+        def __init__(self): self.stamps, self.gets = {}, 0
+        def document(self, _id): return self
+        def get(self):
+            self.gets += 1
+            stamps = dict(self.stamps)
+            return type("D", (), {"exists": True, "to_dict": lambda me: stamps})()
+        def set(self, data, merge=False): self.stamps.update(data)
+
     class _Client:
         def __init__(self, owner): self.owner = owner
-        def collection(self, name): return self.owner.make_query()
+        def collection(self, name):
+            if name == "meta" and self.owner.meta is not None:
+                return self.owner.meta
+            return self.owner.make_query()
 
     def _connect(self, docs, fail=None):
         self.docs, self.fail, self.log = docs, fail, []
@@ -948,6 +969,125 @@ class FirebaseResilienceTests(unittest.TestCase):
         from unittest import mock
         p = mock.patch.object(self.fb, "status", return_value="connected (test)")
         p.start(); self.addCleanup(p.stop)
+
+    def _later(self, name="runs"):
+        """The short waits (check interval, change-stamp interval) have passed; the safety poll has not."""
+        self.fb._snap[name]["checked_at"] = 0
+        self.fb._meta["checked_at"] = 0.0
+
+    def _docs(self, *stamps):
+        return [self._Doc(f"d{i}", {"timestamp_utc": s}) for i, s in enumerate(stamps)]
+
+    def test_nothing_new_costs_one_read_and_no_query(self):
+        self._connect(self._docs("2026-10-30T10:00:00Z", "2026-10-30T11:00:00Z"))
+        self.meta = self._Meta()
+        self.fb.list_runs(10)
+        before_log, before_reads = len(self.log), self.fb.reads_today()
+        for _ in range(5):
+            self._later(); self.fb.list_runs(10)
+        self.assertEqual(len(self.log), before_log)                       # no query reached the collection
+        self.assertEqual(self.fb.reads_today() - before_reads, 5)         # one change-stamp read per check
+
+    def test_a_teammates_write_moves_the_stamp_and_only_the_new_documents_are_read(self):
+        self._connect(self._docs("2026-10-30T10:00:00Z", "2026-10-30T11:00:00Z"))
+        self.meta = self._Meta()
+        self.fb.list_runs(10)
+        self.docs.append(self._Doc("new", {"timestamp_utc": "2026-10-31T08:00:00Z"}))
+        self.meta.stamps["runs"] = "123"                                  # what their Lab writes after saving a run
+        self._later()
+        self.assertEqual(len(self.fb.list_runs(10)), 3)
+        self.assertEqual([x for x in self.log if x[0] == "where"][-1][1], "2026-10-30T11:00:00Z")
+        self.assertEqual([x for x in self.log if x[0] == "stream"][-1][1], 2)   # the newest known one plus the new one
+
+    def test_our_own_write_shows_at_once_and_moves_the_stamp(self):
+        self._connect(self._docs("2026-10-30T10:00:00Z"))
+        self.meta = self._Meta()
+        self.fb.list_runs(10)
+        self.docs.append(self._Doc("mine", {"timestamp_utc": "2026-10-31T09:00:00Z"}))
+        self.fb._touch("runs")                                            # what write_run does after set()
+        self.assertIn("runs", self.meta.stamps)
+        self.assertEqual(len(self.fb.list_runs(10)), 2)                   # no waiting for the check interval
+
+    def test_a_restart_reads_only_what_is_newer(self):
+        self._connect(self._docs("2026-10-30T10:00:00Z", "2026-10-30T11:00:00Z"))
+        self.fb.list_runs(10)
+        self.fb._snap.clear(); self.fb._disk_loaded = False               # new process, same machine
+        self.log.clear()
+        self.assertEqual(len(self.fb.list_runs(10)), 2)
+        self.assertEqual([x[0] for x in self.log if x[0] != "stream"], ["where"])     # incremental, not a full read
+
+    def test_a_full_reread_happens_at_most_once_a_day(self):
+        self._connect(self._docs("2026-10-30T10:00:00Z"))
+        self.fb.list_runs(10)
+        self._later()
+        self.fb._snap["runs"]["full_at"] -= 3600 * 20                     # 20 hours old: still incremental
+        self.log.clear(); self.fb.list_runs(10)
+        self.assertEqual([x[0] for x in self.log if x[0] != "stream"], ["where"])
+        self._later()
+        self.fb._snap["runs"]["full_at"] -= 3600 * 6                      # now more than a day
+        self.log.clear(); self.fb.list_runs(10)
+        self.assertEqual([x[0] for x in self.log if x[0] != "stream"], [])
+
+    def test_safety_poll_catches_a_teammate_with_an_older_lab(self):
+        self._connect(self._docs("2026-10-30T10:00:00Z"))
+        self.meta = self._Meta()
+        self.fb.list_runs(10)
+        self.docs.append(self._Doc("old-lab", {"timestamp_utc": "2026-10-31T08:00:00Z"}))   # no stamp was written for it
+        self._later()
+        self.assertEqual(len(self.fb.list_runs(10)), 1)                   # not yet
+        self._later(); self.fb._snap["runs"]["queried_at"] -= self.fb.SAFETY_POLL_S + 1
+        self.assertEqual(len(self.fb.list_runs(10)), 2)                   # the safety poll found it
+
+    def test_daily_budget_stops_refreshing_and_says_so(self):
+        from unittest import mock
+        self._connect(self._docs("2026-10-30T10:00:00Z"))
+        self.fb.list_runs(10)
+        with mock.patch.object(self.fb, "read_budget", return_value=3):
+            self.fb._spend(5)
+            self.docs.append(self._Doc("x", {"timestamp_utc": "2026-10-31T08:00:00Z"}))
+            self._later(); self.log.clear()
+            got = self.fb.list_runs_ex(10)
+        self.assertEqual(len(got["runs"]), 1)                              # the saved copy
+        self.assertFalse(got["live"])
+        self.assertIn("daily share", got["error"])
+        self.assertEqual(self.log, [])                                     # nothing was asked of Firestore
+
+    def test_budget_does_not_block_the_very_first_read(self):
+        from unittest import mock
+        self._connect(self._docs("2026-10-30T10:00:00Z"))
+        with mock.patch.object(self.fb, "read_budget", return_value=1):
+            self.fb._spend(50)
+            self.assertEqual(len(self.fb.list_runs(10)), 1)
+
+    def test_after_a_failed_read_it_waits_instead_of_retrying_every_page_load(self):
+        self._connect(self._docs("2026-10-30T10:00:00Z"))
+        self.fb.list_runs(10)
+        self.fail = RuntimeError("503 Service Unavailable")
+        self._later(); self.fb.list_runs(10)
+        self.log.clear()
+        for _ in range(4):
+            self._later(); self.fb.list_runs(10)
+        self.assertEqual(self.log, [])                                     # inside the wait: no new attempts
+        self.fb._blocked_until["runs"] = 0                                 # the wait is over, Firestore is back
+        self.fail = None; self._later()
+        self.assertTrue(self.fb.list_runs_ex(10)["live"])
+
+    def test_a_quota_error_waits_for_the_reset(self):
+        self._connect(self._docs("2026-10-30T10:00:00Z"))
+        self.fb.list_runs(10)
+        self.fail = RuntimeError("429 Quota exceeded")
+        self._later(); self.fb.list_runs(10)
+        import time
+        self.assertGreater(self.fb._blocked_until["runs"] - time.time(), 600)
+
+    def test_read_budget_can_be_changed_in_the_environment(self):
+        from unittest import mock
+        with mock.patch.dict("os.environ", {"RELIOPS_FIRESTORE_READ_BUDGET": "1234"}):
+            self.assertEqual(self.fb.read_budget(), 1234)
+        with mock.patch.dict("os.environ", {"RELIOPS_FIRESTORE_READ_BUDGET": "0"}):
+            self.assertEqual(self.fb.read_budget(), 0)                     # 0 = no limit
+        with mock.patch.dict("os.environ", {"RELIOPS_FIRESTORE_READ_BUDGET": "junk"}):
+            self.assertEqual(self.fb.read_budget(), self.fb.READ_BUDGET_DEFAULT)
 
     def test_service_account_json_pasted_in_every_common_way(self):
         import json

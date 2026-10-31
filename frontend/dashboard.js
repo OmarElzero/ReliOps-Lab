@@ -69,7 +69,8 @@
     const src = $("dash-source");
     const when = fb.synced_at ? " (last synced " + fb.synced_at.replace("T", " ").replace("Z", " UTC") + ")" : "";
     if (d.provenance.source === "firestore") {
-      src.textContent = "Showing the whole team's runs (via Firestore)" + when + ".";
+      src.textContent = "Showing the whole team's runs (via Firestore)" + when + "." +
+        (fb.read_budget ? " Shared-store reads used today on this machine: " + fb.reads_today + " of " + fb.read_budget + "." : "");
       src.classList.remove("src-problem");
     } else if (d.provenance.source === "firestore-saved-copy") {
       src.textContent = "Firebase could not be read just now" + (fb.error ? ": " + fb.error : "") +

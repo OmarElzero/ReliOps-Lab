@@ -15,6 +15,8 @@ Open the Lab (`./start.sh`), type your name in the header (it labels every run y
 
 Because the diagnosis text and the judge's reasoning are stored with every run, scores can be re-judged later without running the agent again. Mitigation is graded by SREGym's own checker, not by the judge. Records are append-only: a correction is another line, and the latest one wins.
 
+**Firestore reads and the free quota.** The free plan allows 50,000 reads a day for the whole team, and every query costs at least one read plus one per document it returns. The Lab keeps its use low: a one-document change stamp (`meta/changes`) tells it which collections changed, so an unchanged collection costs no query; queries are incremental; the full re-read happens once a day at most; a restart reuses the saved copy (`results/gui_remote_cache.json`); a failed read is not retried on every page load. Each machine also counts its reads per Pacific day (`results/gui_firestore_usage.json`, shown in the Results banner) and stops refreshing, showing the saved copy, once it reaches `RELIOPS_FIRESTORE_READ_BUDGET` (default 8000, about a fifth of the free quota, for a team of five; `0` removes the limit). If the team grows or one machine needs more, change it in `.env` and keep the total under 50,000. Every teammate needs the current Lab for the stamps; a teammate on an older Lab is still picked up, up to 15 minutes later, by the safety poll.
+
 If Firebase is not connected, you see only this machine's runs. A laptop that is lost loses its transcripts unless the story was shared.
 
 ## Queue

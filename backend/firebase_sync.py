@@ -169,25 +169,119 @@ def status() -> str:
 
 
 # --- reading ---------------------------------------------------------------------------------
-# Reads used to stream the whole `runs` collection (and each small collection) on every dashboard
-# refresh, and any failure silently fell back to this machine's own runs. Two things follow from
-# that, and both showed up as "my teammates' runs and names disappeared": (1) the free Firestore plan
-# allows 50,000 reads a day for the whole project, which a few people clicking filters can use up,
-# and (2) the page then said "Firebase is not connected" although it was. So reads are now:
-#   - incremental: one full read, then only documents newer than the last one seen (a full re-read
-#     every FULL_REFRESH_S to pick up deletions);
-#   - remembered: the last good copy is kept in memory and in results/gui_remote_cache.json, and is
-#     shown (marked as a saved copy, with the error) when Firestore cannot be read;
-#   - explained: the last error per collection is available through sync_info().
-CHECK_TTL_S = 20          # no new query to Firestore more often than this
-FULL_REFRESH_S = 1800     # re-read everything this often
+# The free Firestore plan allows 50,000 reads a day for the WHOLE project, and a query always costs at
+# least one read, plus one per document it returns. Reading used to cost far more than it needed to:
+# every dashboard refresh re-read each of about nine collections, every collection was re-read in full
+# every 30 minutes (up to 5,000 documents each), and every restart read everything again. So now:
+#   - one tiny "change stamp" document (meta/changes, 1 read) says which collections changed; a
+#     collection is queried only when its stamp moved (or every SAFETY_POLL_S as a safety net, for
+#     teammates whose Lab is older and does not write stamps);
+#   - queries are incremental (only documents at or after the newest one seen); a full re-read happens
+#     once on the first ever load and then only every FULL_REFRESH_S (a day) to pick up deletions;
+#   - a restart uses the saved copy in results/gui_remote_cache.json and reads only what is newer;
+#   - every read is counted per machine and per day (Pacific time, when Google resets the quota);
+#     past READ_BUDGET the Lab stops refreshing and shows the saved copy, saying so, so one machine
+#     cannot use up the team's quota;
+#   - after a failed read the Lab waits (5 minutes; until the quota resets for a quota error) instead of
+#     retrying on every page load;
+#   - the last good copy is remembered in memory and on disk, shown (marked as a saved copy, with the
+#     error) when Firestore cannot be read, and the last error per collection is in sync_info().
+CHECK_TTL_S = 45          # no new check against Firestore more often than this
+SAFETY_POLL_S = 900       # query a collection at least this often even if its change stamp did not move
+FULL_REFRESH_S = 86400    # full re-read (to notice deletions) at most this often
 FULL_CAP = 5000           # newest documents kept per collection
+ERROR_BACKOFF_S = 300     # wait this long after a failed read before trying again
+READ_BUDGET_DEFAULT = 8000   # reads per machine per day: the 50,000 free reads shared by about five machines, with headroom
 _ORDER_FIELD = {"runs": "timestamp_utc"}   # every other collection uses "updated_at"
 
 _snap: dict[str, dict] = {}
 _errors: dict[str, str] = {}
+_blocked_until: dict[str, float] = {}
+_meta: dict[str, Any] = {"checked_at": 0.0, "stamps": None}
+_usage: dict[str, Any] = {"day": "", "reads": 0}
+_usage_loaded = False
 _disk_loaded = False
 _lock = threading.RLock()
+
+
+def read_budget() -> int:
+    """Reads this machine may spend per day (RELIOPS_FIRESTORE_READ_BUDGET in .env or the environment; 0 = no limit)."""
+    raw = os.environ.get("RELIOPS_FIRESTORE_READ_BUDGET", "")
+    try:
+        import runner
+
+        raw = raw or str(runner.read_env_file(runner.lab_dir() / ".env").get("RELIOPS_FIRESTORE_READ_BUDGET", ""))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return max(0, int(raw)) if str(raw).strip() else READ_BUDGET_DEFAULT
+    except ValueError:
+        return READ_BUDGET_DEFAULT
+
+
+def _pacific_now():
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("America/Los_Angeles"))
+    except Exception:  # noqa: BLE001 - no tz database (some Windows installs): standard time is close enough
+        return datetime.now(timezone(timedelta(hours=-8)))
+
+
+def _seconds_to_quota_reset() -> float:
+    from datetime import timedelta
+
+    n = _pacific_now()
+    nxt = (n + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+    return max(60.0, (nxt - n).total_seconds())
+
+
+def _usage_path() -> Path:
+    import runner
+
+    return runner.reliops_dir() / "results" / "gui_firestore_usage.json"
+
+
+def _load_usage() -> None:
+    global _usage_loaded
+    if _usage_loaded:
+        return
+    _usage_loaded = True
+    try:
+        data = json.loads(_usage_path().read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _usage.update({"day": str(data.get("day") or ""), "reads": int(data.get("reads") or 0)})
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _spend(n: int) -> None:
+    """Count n document reads against today's budget (Pacific day)."""
+    with _lock:
+        _load_usage()
+        day = _pacific_now().strftime("%Y-%m-%d")
+        if _usage["day"] != day:
+            _usage["day"], _usage["reads"] = day, 0
+        _usage["reads"] += max(0, int(n))
+        try:
+            path = _usage_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(_usage), encoding="utf-8")
+        except OSError:
+            pass
+
+
+def reads_today() -> int:
+    with _lock:
+        _load_usage()
+        return _usage["reads"] if _usage["day"] == _pacific_now().strftime("%Y-%m-%d") else 0
+
+
+def _over_budget() -> bool:
+    limit = read_budget()
+    return bool(limit) and reads_today() >= limit
 
 
 def _cache_path() -> Path:
@@ -205,21 +299,24 @@ def _load_disk() -> None:
     if _disk_loaded:
         return
     _disk_loaded = True
+    path = _cache_path()
     try:
-        data = json.loads(_cache_path().read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        saved_at = path.stat().st_mtime
     except (OSError, ValueError):
         return
     for name, snap in (data or {}).items():
         if isinstance(snap, dict) and isinstance(snap.get("docs"), dict):
-            _snap.setdefault(name, {"docs": snap["docs"], "full_at": 0, "checked_at": 0,
-                                    "synced_at": snap.get("synced_at"), "last": snap.get("last") or ""})
+            # a restart is not a reason to read everything again: only what is newer than `last`
+            _snap.setdefault(name, {"docs": snap["docs"], "full_at": snap.get("full_at") or saved_at, "checked_at": 0,
+                                    "queried_at": 0, "synced_at": snap.get("synced_at"), "last": snap.get("last") or ""})
 
 
 def _save_disk() -> None:
     try:
         path = _cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {n: {"docs": s["docs"], "synced_at": s.get("synced_at"), "last": s.get("last") or ""}
+        payload = {n: {"docs": s["docs"], "synced_at": s.get("synced_at"), "last": s.get("last") or "", "full_at": s.get("full_at")}
                    for n, s in _snap.items()}
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
@@ -232,7 +329,7 @@ def explain_error(e: Exception | str) -> str:
     """A plain-language reason for a failed Firestore call (no credentials in it)."""
     text = str(e)
     low = (type(e).__name__ + " " + text).lower()
-    if "quota" in low or "resourceexhausted" in low or "429" in low:
+    if _is_quota_error(e):
         return ("Firestore read quota used up for today (the free plan allows 50,000 reads a day for the whole "
                 "project; it resets at midnight Pacific time). " + text[:160])
     if "permission" in low or "unauthenticated" in low or "403" in low or "401" in low:
@@ -240,6 +337,34 @@ def explain_error(e: Exception | str) -> str:
     if "unavailable" in low or "deadline" in low or "timed out" in low or "connection" in low:
         return "Firestore could not be reached (network): " + text[:160]
     return text[:200]
+
+
+def _is_quota_error(e: Exception | str) -> bool:
+    low = (type(e).__name__ + " " + str(e)).lower()
+    return "quota" in low or "resourceexhausted" in low or "429" in low
+
+
+def _gate(now: float) -> dict | None:
+    """The change stamps (one read, shared by all collections for CHECK_TTL_S), or None when they cannot be
+    read, in which case every collection falls back to its own incremental check."""
+    if now - _meta["checked_at"] < CHECK_TTL_S:
+        return _meta["stamps"]
+    _meta["checked_at"] = now
+    try:
+        doc = _client.collection("meta").document("changes").get()
+        _spend(1)
+        _meta["stamps"] = (doc.to_dict() or {}) if getattr(doc, "exists", False) else {}
+    except Exception:  # noqa: BLE001 - optional optimisation; the real read reports real errors
+        _meta["stamps"] = None
+    return _meta["stamps"]
+
+
+def _bump(collection: str) -> None:
+    """After a write of ours: move this collection's change stamp so teammates' Labs know to query it."""
+    try:
+        _client.collection("meta").document("changes").set({collection: str(time.time_ns())}, merge=True)
+    except Exception:  # noqa: BLE001 - they still catch up through the safety poll
+        pass
 
 
 def _sync(collection: str, force: bool = False) -> dict | None:
@@ -252,39 +377,68 @@ def _sync(collection: str, force: bool = False) -> dict | None:
             _errors[collection] = "Firebase is not connected (no credentials found in .env)"
             return snap
         now = time.time()
-        if snap and not force and snap.get("full_at") and now - snap.get("checked_at", 0) < CHECK_TTL_S:
-            return snap
+        if snap and not force:
+            if now < _blocked_until.get(collection, 0.0):
+                return snap                      # a recent failure: keep showing the saved copy, do not retry yet
+            if snap.get("full_at") and not snap.get("dirty") and now - snap.get("checked_at", 0) < CHECK_TTL_S:
+                return snap
+            if _over_budget():
+                _errors[collection] = (f"This machine has used its daily share of Firestore reads ({reads_today()} of {read_budget()}), "
+                                       "so it shows the saved copy until midnight Pacific time. Raise RELIOPS_FIRESTORE_READ_BUDGET in .env "
+                                       "only if the team's total stays under 50,000 a day.")
+                return snap
         field = _ORDER_FIELD.get(collection, "updated_at")
         try:
+            stamp = None
+            if not force and snap and snap.get("full_at") and not snap.get("dirty"):
+                stamps = _gate(now)
+                if stamps is not None:
+                    stamp = stamps.get(collection)
+                    if stamp == snap.get("meta_seen") and now - snap.get("queried_at", 0) < SAFETY_POLL_S:
+                        snap["checked_at"] = now         # nobody wrote to this collection: no query, no document reads
+                        _errors.pop(collection, None)
+                        return snap
+            elif not snap:
+                stamps = _gate(now)
+                stamp = stamps.get(collection) if stamps is not None else None
             col = _client.collection(collection)
             need_full = (not snap or not snap.get("full_at") or not snap.get("last")
                          or now - snap["full_at"] > FULL_REFRESH_S)
             if need_full:
                 query = col.order_by(field, direction="DESCENDING") if collection == "runs" else col
                 docs = {d.id: d.to_dict() for d in query.limit(FULL_CAP).stream()}
+                _spend(max(1, len(docs)))
                 changed = not snap or snap.get("docs") != docs
                 snap = {"docs": docs, "full_at": now}
             else:
                 new = {d.id: d.to_dict() for d in col.where(field, ">=", snap["last"]).stream()}
+                _spend(max(1, len(new)))
                 changed = any(snap["docs"].get(k) != v for k, v in new.items())
                 snap["docs"].update(new)
-            snap["checked_at"] = now
+            snap["checked_at"] = snap["queried_at"] = now
+            snap["meta_seen"] = stamp
+            snap.pop("dirty", None)
             snap["synced_at"] = _now_iso()
             snap["last"] = max((str(v.get(field) or "") for v in snap["docs"].values()), default="")
             _snap[collection] = snap
             _errors.pop(collection, None)
+            _blocked_until.pop(collection, None)
             if changed:
                 _save_disk()
         except Exception as e:  # noqa: BLE001 - kept and shown, not swallowed
             _errors[collection] = explain_error(e)
+            _blocked_until[collection] = now + (_seconds_to_quota_reset() if _is_quota_error(e) else ERROR_BACKOFF_S)
         return _snap.get(collection)
 
 
 def _touch(collection: str) -> None:
-    """After a write of ours: the next read asks Firestore for what is new, so our own rows show at once."""
+    """After a write of ours: the next read asks Firestore for what is new, so our own rows show at once,
+    and the change stamp tells teammates' Labs to do the same."""
     with _lock:
         if collection in _snap:
-            _snap[collection]["checked_at"] = 0
+            _snap[collection]["dirty"] = True
+        _blocked_until.pop(collection, None)
+    _bump(collection)        # a network write: not done while holding the lock
 
 
 def sync_info(collection: str = "runs") -> dict[str, Any]:
@@ -294,7 +448,8 @@ def sync_info(collection: str = "runs") -> dict[str, Any]:
         err = _errors.get(collection)
         return {"connected": _client is not None, "status": _status, "error": err,
                 "live": bool(snap) and err is None and _client is not None,
-                "synced_at": (snap or {}).get("synced_at"), "have_copy": bool(snap)}
+                "synced_at": (snap or {}).get("synced_at"), "have_copy": bool(snap),
+                "reads_today": reads_today(), "read_budget": read_budget()}
 
 
 def list_runs_ex(limit: int = 300) -> dict[str, Any]:
@@ -369,12 +524,23 @@ def write_story(run_id: str, text: str) -> str:
     return write_doc("stories", run_id, {"run_id": run_id, "text": text})
 
 
+_story_cache: dict[str, str] = {}
+
+
 def read_story(run_id: str) -> str | None:
     status()
+    if run_id in _story_cache:
+        return _story_cache[run_id]
     if _client is None:
         return None
     try:
         doc = _client.collection("stories").document(run_id).get()
-        return (doc.to_dict() or {}).get("text") if doc.exists else None
+        _spend(1)
+        text = (doc.to_dict() or {}).get("text") if doc.exists else None
+        if text:
+            if len(_story_cache) >= 40:
+                _story_cache.pop(next(iter(_story_cache)))
+            _story_cache[run_id] = text
+        return text
     except Exception:  # noqa: BLE001
         return None
