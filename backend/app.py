@@ -922,6 +922,47 @@ def export_runs():
                              headers={"Content-Disposition": "attachment; filename=reliops_runs.csv"})
 
 
+@app.get("/api/export/experiments")
+def export_experiments():
+    _, runs = _collect_runs(100000)
+    return {"experiments": export.experiment_names(runs)}
+
+
+@app.get("/api/export/experiment.zip")
+def export_experiment_zip(name: str):
+    """One zip per experiment name (however many runs): each run's log, story and diagnosis text, plus a CSV/JSONL
+    index and a README listing what is missing and why. No keys or .env are ever read."""
+    from fastapi.responses import Response
+    name = (name or "").strip()
+    _, runs = _collect_runs(100000)
+    mine = [r for r in runs if (r.get("experiment") or "").strip() == name]
+    if not name or not mine:
+        return JSONResponse({"error": f"no runs recorded under experiment '{name}'"}, status_code=404)
+    raw = {r.get("run_id"): r for r in runner.list_local_runs(100000)}
+
+    def read_log(run):
+        fn = run.get("log_file") or ""
+        if not fn or "/" in fn or "\\" in fn or ".." in fn:
+            return None
+        p = runner.reliops_dir() / "results" / "gui_logs" / fn
+        return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
+
+    def read_story(run):
+        rec = raw.get(run.get("run_id"))
+        why = "run is not on this machine (a teammate's) and no shared story was found"
+        if rec is not None:
+            try:
+                return runner.render_story(rec), ""
+            except Exception as e:  # missing transcript, replay script, or a renderer error: say why, keep going
+                why = str(e)
+        shared = firebase_sync.read_story(run.get("run_id") or "")
+        return (shared, "") if shared else (None, why)
+
+    data, _ = export.experiment_zip(name, mine, read_log, read_story)
+    safe = export._slug(name, 60)
+    return Response(data, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=experiment_{safe}.zip"})
+
+
 @app.get("/api/export/summary.csv")
 def export_summary(metric: str = "e2e_pass", run_class: Optional[str] = None):
     _, runs = _collect_runs(100000)
