@@ -568,7 +568,25 @@
 
   // ---- wiring -------------------------------------------------------------------
   $("sum-metric").addEventListener("change", () => schedule(0));
-  $("dash-refresh").addEventListener("click", () => load());
+  $("dash-refresh").addEventListener("click", () => { load(); loadExperimentNames(); });
+  async function loadExperimentNames() {
+    const sel = $("exp-zip-name");
+    if (!sel) return;
+    try {
+      const d = await (await fetch("/api/export/experiments")).json();
+      const keep = sel.value;
+      sel.textContent = "";
+      sel.appendChild(new Option("Experiment…", ""));
+      (d.experiments || []).forEach((e) => sel.appendChild(new Option(`${e.name} (${e.runs} runs)`, e.name)));
+      sel.value = keep;
+    } catch (e) { /* the list is a convenience; the rest of the dashboard works without it */ }
+  }
+  $("exp-zip").addEventListener("click", () => {
+    const name = $("exp-zip-name").value;
+    if (!name) { alert("Pick an experiment first."); return; }
+    window.location.href = "/api/export/experiment.zip?name=" + encodeURIComponent(name);
+  });
+  loadExperimentNames();
   $("dash-report").addEventListener("click", async () => {
     const r = await fetch("/api/report.md", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filters: F, metric: metric() }) });
