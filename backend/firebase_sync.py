@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -53,16 +55,37 @@ def _credential_from_env() -> tuple[Any, str] | None:
     for var in ("FIREBASE_SERVICE_ACCOUNT_JSON", "SERVICE_ACCOUNT_KEY"):
         raw = env_vars.get(var)
         if raw:
-            try:
-                return json.loads(raw), f"inline JSON from .env ({var})"
-            except json.JSONDecodeError as e:
-                return None, f"bad-json:{var}:{e}"
+            parsed, error = parse_service_account_json(raw)
+            if parsed is not None:
+                return parsed, f"inline JSON from .env ({var})"
+            return None, f"bad-json:{var}:{error}"
 
     default_path = runner.default_firebase_key_path()
     if default_path.is_file():
         return str(default_path), f"default file ({default_path})"
 
     return None
+
+
+def parse_service_account_json(raw: str) -> tuple[dict | None, str]:
+    """Reads the service-account JSON however it was pasted into .env: bare, in single or double
+    quotes, with the inner quotes escaped (`\\"`), or followed by a comment. Returns (dict, "") or
+    (None, reason). The key itself is never included in the reason."""
+    text = raw.strip()
+    candidates = [text]
+    if "{" in text and "}" in text:
+        core = text[text.index("{"): text.rindex("}") + 1]   # drops outer quotes and trailing comments
+        candidates += [core, core.replace('\\"', '"')]
+    first_error = ""
+    for c in candidates:
+        try:
+            value = json.loads(c)
+        except json.JSONDecodeError as e:
+            first_error = first_error or str(e)
+            continue
+        if isinstance(value, dict):
+            return value, ""
+    return None, first_error or "not a JSON object"
 
 
 def _connect(cred_source: Any, label: str) -> None:
@@ -145,24 +168,151 @@ def status() -> str:
     return try_auto_connect()
 
 
-def list_runs(limit: int = 300) -> list[dict[str, Any]] | None:
-    """Fetches the most recent `runs/{id}` docs for the dashboard tab — the whole team's runs,
-    since they all write to this same collection. Returns None (not an empty list) when Firebase
-    isn't connected, so the caller can tell "no team data available" apart from "connected, team
-    just hasn't run anything yet" and fall back to this machine's own local results."""
-    status()  # re-resolve from .env first, same as every other call — see try_auto_connect
-    if _client is None:
-        return None
+# --- reading ---------------------------------------------------------------------------------
+# Reads used to stream the whole `runs` collection (and each small collection) on every dashboard
+# refresh, and any failure silently fell back to this machine's own runs. Two things follow from
+# that, and both showed up as "my teammates' runs and names disappeared": (1) the free Firestore plan
+# allows 50,000 reads a day for the whole project, which a few people clicking filters can use up,
+# and (2) the page then said "Firebase is not connected" although it was. So reads are now:
+#   - incremental: one full read, then only documents newer than the last one seen (a full re-read
+#     every FULL_REFRESH_S to pick up deletions);
+#   - remembered: the last good copy is kept in memory and in results/gui_remote_cache.json, and is
+#     shown (marked as a saved copy, with the error) when Firestore cannot be read;
+#   - explained: the last error per collection is available through sync_info().
+CHECK_TTL_S = 20          # no new query to Firestore more often than this
+FULL_REFRESH_S = 1800     # re-read everything this often
+FULL_CAP = 5000           # newest documents kept per collection
+_ORDER_FIELD = {"runs": "timestamp_utc"}   # every other collection uses "updated_at"
+
+_snap: dict[str, dict] = {}
+_errors: dict[str, str] = {}
+_disk_loaded = False
+_lock = threading.RLock()
+
+
+def _cache_path() -> Path:
+    import runner
+
+    return runner.reliops_dir() / "results" / "gui_remote_cache.json"
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _load_disk() -> None:
+    global _disk_loaded
+    if _disk_loaded:
+        return
+    _disk_loaded = True
     try:
-        docs = (
-            _client.collection("runs")
-            .order_by("timestamp_utc", direction="DESCENDING")
-            .limit(limit)
-            .stream()
-        )
-        return [d.to_dict() for d in docs]
-    except Exception:  # noqa: BLE001 — a query hiccup falls back to local, not an error page
-        return None
+        data = json.loads(_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    for name, snap in (data or {}).items():
+        if isinstance(snap, dict) and isinstance(snap.get("docs"), dict):
+            _snap.setdefault(name, {"docs": snap["docs"], "full_at": 0, "checked_at": 0,
+                                    "synced_at": snap.get("synced_at"), "last": snap.get("last") or ""})
+
+
+def _save_disk() -> None:
+    try:
+        path = _cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {n: {"docs": s["docs"], "synced_at": s.get("synced_at"), "last": s.get("last") or ""}
+                   for n, s in _snap.items()}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass  # the cache is a convenience; never fail a read because it cannot be saved
+
+
+def explain_error(e: Exception | str) -> str:
+    """A plain-language reason for a failed Firestore call (no credentials in it)."""
+    text = str(e)
+    low = (type(e).__name__ + " " + text).lower()
+    if "quota" in low or "resourceexhausted" in low or "429" in low:
+        return ("Firestore read quota used up for today (the free plan allows 50,000 reads a day for the whole "
+                "project; it resets at midnight Pacific time). " + text[:160])
+    if "permission" in low or "unauthenticated" in low or "403" in low or "401" in low:
+        return "Firestore refused the credentials (permission denied): " + text[:160]
+    if "unavailable" in low or "deadline" in low or "timed out" in low or "connection" in low:
+        return "Firestore could not be reached (network): " + text[:160]
+    return text[:200]
+
+
+def _sync(collection: str, force: bool = False) -> dict | None:
+    """The newest snapshot of one collection: live when Firestore answers, otherwise the last saved
+    copy (or None if there never was one). Never raises; the reason for a failure is kept in _errors."""
+    with _lock:
+        _load_disk()
+        snap = _snap.get(collection)
+        if _client is None:
+            _errors[collection] = "Firebase is not connected (no credentials found in .env)"
+            return snap
+        now = time.time()
+        if snap and not force and snap.get("full_at") and now - snap.get("checked_at", 0) < CHECK_TTL_S:
+            return snap
+        field = _ORDER_FIELD.get(collection, "updated_at")
+        try:
+            col = _client.collection(collection)
+            need_full = (not snap or not snap.get("full_at") or not snap.get("last")
+                         or now - snap["full_at"] > FULL_REFRESH_S)
+            if need_full:
+                query = col.order_by(field, direction="DESCENDING") if collection == "runs" else col
+                docs = {d.id: d.to_dict() for d in query.limit(FULL_CAP).stream()}
+                changed = not snap or snap.get("docs") != docs
+                snap = {"docs": docs, "full_at": now}
+            else:
+                new = {d.id: d.to_dict() for d in col.where(field, ">=", snap["last"]).stream()}
+                changed = any(snap["docs"].get(k) != v for k, v in new.items())
+                snap["docs"].update(new)
+            snap["checked_at"] = now
+            snap["synced_at"] = _now_iso()
+            snap["last"] = max((str(v.get(field) or "") for v in snap["docs"].values()), default="")
+            _snap[collection] = snap
+            _errors.pop(collection, None)
+            if changed:
+                _save_disk()
+        except Exception as e:  # noqa: BLE001 - kept and shown, not swallowed
+            _errors[collection] = explain_error(e)
+        return _snap.get(collection)
+
+
+def _touch(collection: str) -> None:
+    """After a write of ours: the next read asks Firestore for what is new, so our own rows show at once."""
+    with _lock:
+        if collection in _snap:
+            _snap[collection]["checked_at"] = 0
+
+
+def sync_info(collection: str = "runs") -> dict[str, Any]:
+    """What the Results banner needs: is Firebase connected, is the copy shown live or saved, and why not."""
+    with _lock:
+        snap = _snap.get(collection)
+        err = _errors.get(collection)
+        return {"connected": _client is not None, "status": _status, "error": err,
+                "live": bool(snap) and err is None and _client is not None,
+                "synced_at": (snap or {}).get("synced_at"), "have_copy": bool(snap)}
+
+
+def list_runs_ex(limit: int = 300) -> dict[str, Any]:
+    """`{"runs": [...] | None, "live": bool, "error": str | None, "synced_at": iso | None}`.
+    runs is the team's runs (live, or the last saved copy when Firestore cannot be read) and None
+    only when there has never been any copy, in which case the caller uses this machine's own."""
+    status()
+    snap = _sync("runs")
+    info = sync_info("runs")
+    if not snap:
+        return {"runs": None, **{k: info[k] for k in ("live", "error", "synced_at")}}
+    docs = sorted(snap["docs"].values(), key=lambda r: str(r.get("timestamp_utc") or ""), reverse=True)
+    return {"runs": docs[:limit], **{k: info[k] for k in ("live", "error", "synced_at")}}
+
+
+def list_runs(limit: int = 300) -> list[dict[str, Any]] | None:
+    """The team's runs, or None when there is no Firestore copy at all (older callers)."""
+    return list_runs_ex(limit)["runs"]
 
 
 def write_run(record: dict[str, Any]) -> str:
@@ -179,9 +329,10 @@ def write_run(record: dict[str, Any]) -> str:
         }
         self_id = record.get("run_id")
         _client.collection("runs").document(self_id).set(doc)
+        _touch("runs")
         return "written to Firestore runs/" + str(self_id)
     except Exception as e:  # noqa: BLE001
-        return f"not written: {e} (local copy is still saved)"
+        return f"not written: {explain_error(e)} (local copy is still saved)"
 
 
 def write_doc(collection: str, doc_id: str, doc: dict[str, Any]) -> str:
@@ -191,20 +342,19 @@ def write_doc(collection: str, doc_id: str, doc: dict[str, Any]) -> str:
         return "not written: Firebase not connected (local copy is still saved)"
     try:
         _client.collection(collection).document(doc_id).set(doc)
+        _touch(collection)
         return f"written to Firestore {collection}/{doc_id}"
     except Exception as e:  # noqa: BLE001
-        return f"not written: {e} (local copy is still saved)"
+        return f"not written: {explain_error(e)} (local copy is still saved)"
 
 
 def list_docs(collection: str, limit: int = 5000) -> list[dict[str, Any]] | None:
-    """All docs of a small shared collection, or None when Firebase is not connected."""
+    """All docs of a small shared collection (live, or the last saved copy), or None when there is none."""
     status()
-    if _client is None:
+    snap = _sync(collection)
+    if not snap:
         return None
-    try:
-        return [d.to_dict() for d in _client.collection(collection).limit(limit).stream()]
-    except Exception:  # noqa: BLE001
-        return None
+    return list(snap["docs"].values())[:limit]
 
 
 STORY_MAX_BYTES = 900_000  # a Firestore document is limited to 1 MiB

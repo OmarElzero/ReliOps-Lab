@@ -65,9 +65,22 @@
   // ---- rendering -----------------------------------------------------------------
   function render() {
     const d = DATA;
-    $("dash-source").textContent = d.provenance.source === "firestore"
-      ? "Showing the whole team's runs (via Firestore)."
-      : "Showing this machine's own runs only. Firebase is not connected, so teammates' runs are not here (Setup & quick run → Keys & Firebase).";
+    const fb = d.provenance.firebase || {};
+    const src = $("dash-source");
+    const when = fb.synced_at ? " (last synced " + fb.synced_at.replace("T", " ").replace("Z", " UTC") + ")" : "";
+    if (d.provenance.source === "firestore") {
+      src.textContent = "Showing the whole team's runs (via Firestore)" + when + ".";
+      src.classList.remove("src-problem");
+    } else if (d.provenance.source === "firestore-saved-copy") {
+      src.textContent = "Firebase could not be read just now" + (fb.error ? ": " + fb.error : "") +
+        ". Showing the team's runs from this machine's saved copy" + when + ", plus your own. New runs from teammates will not appear until it works again.";
+      src.classList.add("src-problem");
+    } else {
+      src.textContent = fb.connected
+        ? "Firebase is connected but could not be read" + (fb.error ? ": " + fb.error : "") + ", and there is no saved copy yet. Showing this machine's own runs only."
+        : "Showing this machine's own runs only. Firebase is not connected, so teammates' runs are not here (Setup & quick run → Keys & Firebase).";
+      src.classList.add("src-problem");
+    }
     renderPurpose();
     renderFilters();
     renderActive();

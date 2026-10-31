@@ -151,8 +151,11 @@ class TmpRepoCase(unittest.TestCase):
             p = mock.patch.object(runner, target, return_value=self.tmp)
             p.start()
             self.addCleanup(p.stop)
+        p = mock.patch.object(firebase_sync, "list_runs_ex", return_value={"runs": None, "live": False, "error": None, "synced_at": None})
+        p.start()
+        self.addCleanup(p.stop)
         for name, ret in (("list_docs", None), ("write_doc", "not written: test"), ("read_story", None),
-                          ("write_story", "not written: test"), ("list_runs", None)):
+                          ("write_story", "not written: test")):
             p = mock.patch.object(firebase_sync, name, return_value=ret)
             p.start()
             self.addCleanup(p.stop)
@@ -786,7 +789,7 @@ class JudgeScoresReachThePageTests(TmpRepoCase):
         except Exception as e:  # noqa: BLE001
             self.skipTest(f"fastapi not available: {e}")
         from unittest import mock
-        with mock.patch.object(app_module.firebase_sync, "list_runs", return_value=records):
+        with mock.patch.object(app_module.firebase_sync, "list_runs_ex", return_value={"runs": records, "live": True, "error": None, "synced_at": None}):
             return app_module._collect_runs(50)[1]
 
     def test_scores_are_sent_whether_stored_with_the_run_or_recovered_from_its_row(self):
@@ -894,3 +897,114 @@ class RotationFromTheScreenTests(TmpRepoCase):
         a = self.c.get("/api/state").json()["key_alerts"]
         self.assertEqual(len(a), 1)
         self.assertFalse(a[0]["in_pool"])
+
+
+class FirebaseResilienceTests(unittest.TestCase):
+    """Teammates' runs must not vanish because a Firestore read failed or a key was pasted oddly."""
+
+    def setUp(self):
+        import firebase_sync
+        self.fb = firebase_sync
+        self.tmp = Path(tempfile.mkdtemp())
+        from unittest import mock
+        for target, ret in (("reliops_dir", self.tmp),):
+            p = mock.patch.object(runner, target, return_value=ret)
+            p.start()
+            self.addCleanup(p.stop)
+        self._saved = (dict(self.fb._snap), dict(self.fb._errors), self.fb._disk_loaded, self.fb._client)
+        self.fb._snap.clear(); self.fb._errors.clear(); self.fb._disk_loaded = False
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        self.fb._snap.clear(); self.fb._snap.update(self._saved[0])
+        self.fb._errors.clear(); self.fb._errors.update(self._saved[1])
+        self.fb._disk_loaded, self.fb._client = self._saved[2], self._saved[3]
+
+    class _Doc:
+        def __init__(self, i, d): self.id, self._d = i, d
+        def to_dict(self): return dict(self._d)
+
+    class _Query:
+        def __init__(self, docs, fail=None, log=None): self.docs, self.fail, self.log = docs, fail, log
+        def order_by(self, *a, **k): return self
+        def where(self, field, op, value):
+            self.log.append(("where", value))
+            return type(self)([d for d in self.docs if str(d._d.get(field) or "") >= value], self.fail, self.log)
+        def limit(self, n): return self
+        def stream(self):
+            self.log.append(("stream", len(self.docs)))
+            if self.fail: raise self.fail
+            return iter(self.docs)
+
+    class _Client:
+        def __init__(self, owner): self.owner = owner
+        def collection(self, name): return self.owner.make_query()
+
+    def _connect(self, docs, fail=None):
+        self.docs, self.fail, self.log = docs, fail, []
+        self.make_query = lambda: self._Query(self.docs, self.fail, self.log)
+        self.fb._client = self._Client(self)
+        self.fb._status = "connected (test)"
+        from unittest import mock
+        p = mock.patch.object(self.fb, "status", return_value="connected (test)")
+        p.start(); self.addCleanup(p.stop)
+
+    def test_service_account_json_pasted_in_every_common_way(self):
+        import json
+        sa = {"type": "service_account", "private_key": "-----BEGIN-----\nAAA\n-----END-----\n", "client_email": "x@y"}
+        c = json.dumps(sa)
+        for raw in (c, "'" + c + "'", '"' + c + '"', '"' + c.replace('"', '\\"') + '"', c + " # firebase", json.dumps(sa, indent=2)):
+            parsed, err = self.fb.parse_service_account_json(raw)
+            self.assertEqual(parsed, sa, raw[:30])
+        self.assertIsNone(self.fb.parse_service_account_json("not json")[0])
+
+    def test_env_reader_keeps_double_quoted_json_whole(self):
+        import json
+        sa = {"type": "service_account", "client_email": "x@y"}
+        env = self.tmp / ".env"
+        env.write_text('SERVICE_ACCOUNT_KEY="' + json.dumps(sa) + '"\nOTHER=1\n')
+        parsed, _ = self.fb.parse_service_account_json(runner.read_env_file(env)["SERVICE_ACCOUNT_KEY"])
+        self.assertEqual(parsed, sa)
+        self.assertEqual(runner.read_env_file(env)["OTHER"], "1")
+
+    def test_first_read_is_full_then_only_newer_documents(self):
+        docs = [self._Doc("a", {"timestamp_utc": "2026-10-30T10:00:00Z"}), self._Doc("b", {"timestamp_utc": "2026-10-30T11:00:00Z"})]
+        self._connect(docs)
+        self.assertEqual(len(self.fb.list_runs(10)), 2)
+        self.docs.append(self._Doc("c", {"timestamp_utc": "2026-10-31T09:00:00Z"}))
+        self.fb._snap["runs"]["checked_at"] = 0           # the short wait between checks has passed
+        self.assertEqual({r["timestamp_utc"][:10] for r in self.fb.list_runs(10)}, {"2026-10-30", "2026-10-31"})
+        self.assertEqual([x for x in self.log if x[0] == "where"][-1][1], "2026-10-30T11:00:00Z")
+
+    def test_a_failed_read_keeps_the_saved_copy_and_says_why(self):
+        self._connect([self._Doc("a", {"timestamp_utc": "2026-10-30T10:00:00Z", "run_by": "Noura"})])
+        self.assertEqual(self.fb.list_runs_ex(10)["live"], True)
+        self.fail = RuntimeError("429 Quota exceeded for quota metric 'Read requests'")
+        self.fb._snap["runs"]["checked_at"] = 0
+        got = self.fb.list_runs_ex(10)
+        self.assertEqual([r["run_by"] for r in got["runs"]], ["Noura"])      # still shown
+        self.assertFalse(got["live"])
+        self.assertIn("quota", got["error"].lower())
+
+    def test_saved_copy_survives_a_restart(self):
+        self._connect([self._Doc("a", {"timestamp_utc": "2026-10-30T10:00:00Z", "run_by": "Noura"})])
+        self.fb.list_runs(10)
+        self.fb._snap.clear(); self.fb._disk_loaded = False; self.fb._client = None   # new process, no credentials
+        got = self.fb.list_runs_ex(10)
+        self.assertEqual([r["run_by"] for r in got["runs"]], ["Noura"])
+        self.assertFalse(got["live"])
+
+    def test_page_data_adds_own_runs_to_a_saved_copy(self):
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        from unittest import mock
+        remote = {"runs": [{"run_id": "t1", "timestamp_utc": "2026-10-30T10:00:00Z", "run_by": "Noura", "problem_id": "p"}],
+                  "live": False, "error": "x", "synced_at": None}
+        own = [{"run_id": "o1", "timestamp_utc": "2026-10-31T10:00:00Z", "run_by": "Omar Betawy", "problem_id": "p"}]
+        with mock.patch.object(app_module.firebase_sync, "list_runs_ex", return_value=remote), \
+                mock.patch.object(runner, "list_local_runs", return_value=own):
+            source, runs = app_module._collect_runs(50)
+        self.assertEqual(source, "firestore-saved-copy")
+        self.assertEqual({r["run_by"] for r in runs}, {"Noura", "Omar Betawy"})

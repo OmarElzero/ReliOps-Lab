@@ -553,7 +553,8 @@ def _env_value(lines: list[str]) -> str:
     if len(lines) == 1:
         v = lines[0].strip()
         if len(v) > 1 and v[0] in "\"'":
-            end = v.find(v[0], 1)
+            # JSON pasted inside quotes (a Firebase key) has quotes of its own: it ends at the LAST quote.
+            end = v.rfind(v[0]) if v[1] in "{[" else v.find(v[0], 1)
             if end != -1:
                 return v[1:end]
         if v[:1] not in ("{", "["):

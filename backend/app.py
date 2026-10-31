@@ -239,13 +239,19 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
     Firestore (the whole team's runs) wins when connected; this machine's own
     results/gui_runs.jsonl is the fallback when it isn't — either way the caller is told which
     one it got, since "no runs yet" and "not seeing the team's runs" are different problems."""
-    firestore_runs = firebase_sync.list_runs(limit)
-    if firestore_runs is not None:
-        source = "firestore"
-        raw_runs = firestore_runs
-    else:
+    remote = firebase_sync.list_runs_ex(limit)
+    local_runs = runner.list_local_runs(limit)
+    if remote["runs"] is None:
         source = "local"
-        raw_runs = runner.list_local_runs(limit)
+        raw_runs = local_runs
+    else:
+        # The team's runs (live, or the last saved copy) plus this machine's own, so a run made here
+        # never disappears from the page even when Firestore cannot be read.
+        source = "firestore" if remote["live"] else "firestore-saved-copy"
+        by_id = {r.get("run_id"): r for r in remote["runs"] if r.get("run_id")}
+        for r in local_runs:
+            by_id.setdefault(r.get("run_id"), r)
+        raw_runs = sorted(by_id.values(), key=lambda r: str(r.get("timestamp_utc") or ""), reverse=True)[:limit]
 
     reviews = {x["run_id"]: x for x in store.read("reviews") if x.get("run_id")}
     runs = []
@@ -1013,8 +1019,10 @@ def _dashboard(filters: dict, metric: str) -> dict:
     if metric not in stats.METRICS:
         raise ValueError(f"metric must be one of {stats.METRICS}")
     source, runs = _collect_runs(100000)
-    return dashboard.build(runs, filters, metric, store.read("manifests"), store.read("labels"),
-                           store.read("rejudges"), source)
+    out = dashboard.build(runs, filters, metric, store.read("manifests"), store.read("labels"),
+                          store.read("rejudges"), source)
+    out["provenance"]["firebase"] = firebase_sync.sync_info("runs")
+    return out
 
 
 @app.post("/api/dashboard")
