@@ -1348,6 +1348,12 @@ def share_page():
     return FileResponse(publish.SITE_SRC / "index.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/share/config.js")
+def share_config():
+    # the local preview reads its data from this server, so no override
+    return PlainTextResponse("// local preview: data comes from this server\n", media_type="text/javascript")
+
+
 @app.get("/api/publish/status")
 def publish_status():
     if _publisher is None:
@@ -1368,6 +1374,6 @@ def _start_publisher():
     out = Path(env.get("RELIOPS_PUBLISH_DIR") or (runner.reliops_dir() / "results" / "site"))
     _publisher = publish.Publisher(
         _share_runs, _share_live, out, remote=str(env.get("RELIOPS_PUBLISH_GIT") or ""),
-        branch=str(env.get("RELIOPS_PUBLISH_BRANCH") or "gh-pages"),
+        branch=str(env.get("RELIOPS_PUBLISH_BRANCH") or "results-data"),
         every_s=float(env.get("RELIOPS_PUBLISH_EVERY_S") or 300))
     _publisher.start()

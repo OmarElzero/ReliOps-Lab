@@ -106,6 +106,17 @@ A static page that shows the experiment results and the queue's progress to peop
   (one replaced commit on `gh-pages`, using the git credentials already on the machine) at most every
   `RELIOPS_PUBLISH_EVERY_S` seconds (default 300, to stay under GitHub Pages' build limits). The elapsed time of the current run
   ticks in the browser between updates. `GET /api/publish/status` shows the last push and any error.
+- **Hosting it on Vercel (phone-friendly, free):** the page is static and is deployed once; only the two data files change. The Lab
+  publishes them to the `results-data` branch of this repository (the default branch name), and `site/config.js` tells the page
+  to read them from `raw.githubusercontent.com`. In `.env`:
+
+      RELIOPS_PUBLISH=on
+      RELIOPS_PUBLISH_GIT=https://github.com/OmarElzero/ReliOps-Lab.git
+
+  In Vercel: Add New Project, import this repository, set Root Directory to `site`, Framework Preset `Other`, Deploy. `site/vercel.json`
+  turns off deployments for the `results-data` branch, because Vercel's Hobby plan allows 100 deployments a day and the Lab updates
+  the data about every five minutes. The Lab must be running for the page to update; when it is not, the page keeps the last data
+  and says how old it is. If you use a different repository or branch, edit the address in `site/config.js`.
 - Data from teammates appears when the Lab reads it from Firestore (it uses the same saved copy and read budget as the Results tab).
 
 ## Results

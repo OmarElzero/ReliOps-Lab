@@ -97,7 +97,9 @@ class PublisherTests(unittest.TestCase):
         count = subprocess.run(["git", "--git-dir", str(remote), "rev-list", "--count", "gh-pages"], capture_output=True, text=True)
         self.assertEqual(count.stdout.strip(), "1")
         shown = subprocess.run(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "gh-pages"], capture_output=True, text=True).stdout.split()
-        self.assertEqual(sorted(shown), ["data/live.json", "data/snapshot.json", "index.html"])
+        site_files = [f.name for f in publish.SITE_SRC.iterdir() if f.is_file()]
+        self.assertEqual(sorted(shown), sorted(["data/live.json", "data/snapshot.json", *site_files]))
+        self.assertNotIn("diagnosis", " ".join(shown))
 
 
 if __name__ == "__main__":
