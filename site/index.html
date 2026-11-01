@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReliOps results</title>
+<style>
+:root{
+  --bg:#f6f5f1; --panel:#ffffff; --fg:#1d2230; --muted:#667085; --line:#e3e1d9; --soft:#efede6;
+  --accent:#0f6f66; --pass:#1a7f4b; --pass-bg:#dff3e7; --fail:#b3261e; --fail-bg:#fbe3e0; --inc:#8a6d00; --inc-bg:#f7edc6;
+  --live:#0f6f66; --warn:#b3261e;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#14171d; --panel:#1b1f27; --fg:#e8eaf0; --muted:#98a1b3; --line:#2b313c; --soft:#222732;
+  --accent:#4cc3b5; --pass:#6fd39b; --pass-bg:#173a29; --fail:#ff8d84; --fail-bg:#43201d; --inc:#e6c65c; --inc-bg:#3b3315;
+  --live:#4cc3b5; --warn:#ff8d84; color-scheme:dark; } }
+:root[data-theme="dark"]{
+  --bg:#14171d; --panel:#1b1f27; --fg:#e8eaf0; --muted:#98a1b3; --line:#2b313c; --soft:#222732;
+  --accent:#4cc3b5; --pass:#6fd39b; --pass-bg:#173a29; --fail:#ff8d84; --fail-bg:#43201d; --inc:#e6c65c; --inc-bg:#3b3315;
+  --live:#4cc3b5; --warn:#ff8d84; color-scheme:dark; }
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding-block:20px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+main{max-width:1180px;margin:0 auto;display:grid;gap:16px}
+h1{font-size:20px;margin:0;letter-spacing:-.01em}
+h2{font-size:12px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
+.top{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:baseline;justify-content:space-between}
+.sub{color:var(--muted);font-size:13px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;min-width:0}
+.pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600;background:var(--soft);color:var(--muted)}
+.pill.running{background:var(--pass-bg);color:var(--live)}
+.pill.paused,.pill.halted,.pill.interrupted{background:var(--inc-bg);color:var(--inc)}
+.pill.running::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--live);animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+@media (prefers-reduced-motion: reduce){.pill.running::before{animation:none}}
+.live{display:grid;gap:10px}
+.facts{display:flex;flex-wrap:wrap;gap:6px 24px}
+.fact{min-width:0}
+.fact b{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);font-weight:600}
+.fact span{overflow-wrap:anywhere}
+.bar{height:8px;border-radius:99px;background:var(--soft);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .4s}
+.filters{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center}
+label{font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
+select{font:inherit;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;max-width:100%}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+td.num,th.num{text-align:right}
+.ci{color:var(--muted);font-size:12px}
+.cell{display:inline-block;min-width:44px;text-align:center;border-radius:6px;padding:1px 6px;font-weight:600;font-size:12px}
+.cell.pass{background:var(--pass-bg);color:var(--pass)}
+.cell.fail{background:var(--fail-bg);color:var(--fail)}
+.cell.mix{background:var(--inc-bg);color:var(--inc)}
+.cell.inc{background:var(--soft);color:var(--muted)}
+.cell.none{color:var(--muted)}
+.grid th.v{text-transform:none;letter-spacing:0;font-size:12px;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap;padding:8px 4px;text-align:left}
+.grid td.p{max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;color:var(--muted);font-size:12px;margin-top:8px}
+.notice{background:var(--inc-bg);color:var(--inc);border-radius:8px;padding:8px 12px;font-size:13px}
+.notice.err{background:var(--fail-bg);color:var(--fail)}
+.empty{color:var(--muted);padding:8px 0}
+footer{color:var(--muted);font-size:12px}
+.reasons{display:grid;gap:4px;margin:0;padding:0;list-style:none}
+.reasons li{display:flex;gap:10px}
+.reasons b{min-width:28px;text-align:right}
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div>
+      <h1>ReliOps results</h1>
+      <div class="sub">Read-only view of the experiment runs. Nothing on this page can start or change a run.</div>
+    </div>
+    <div class="sub" id="fresh">loading…</div>
+  </div>
+
+  <div id="notice" hidden></div>
+
+  <section class="card live" aria-live="polite">
+    <h2>Right now</h2>
+    <div><span class="pill" id="status">idle</span></div>
+    <div class="facts" id="facts"></div>
+    <div id="progress" hidden>
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="barwrap"><i id="bar"></i></div>
+      <div class="sub" id="progtext"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="filters">
+      <label>Experiment <select id="f-exp"></select></label>
+      <label>Purpose <select id="f-purpose"></select></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Per variant</h2>
+    <div class="scroll"><table id="summary"></table></div>
+    <div class="sub" style="margin-top:8px">Rates use completed runs only. Runs that did not finish are counted separately and never as failures.
+      Interval: 95% Wilson. With few runs per variant the intervals are wide; differences of one or two problems are noise.</div>
+  </section>
+
+  <section class="card">
+    <h2>Problem by variant (end to end)</h2>
+    <div class="scroll"><table id="grid" class="grid"></table></div>
+    <div class="legend">
+      <span><span class="cell pass">✓</span> passed</span>
+      <span><span class="cell fail">✗</span> failed</span>
+      <span><span class="cell mix">1/2</span> mixed over repeats</span>
+      <span><span class="cell inc">…</span> no completed run</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Latest runs</h2>
+    <div class="scroll"><table id="recent"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Why runs did not finish</h2>
+    <ul class="reasons" id="reasons"></ul>
+  </section>
+
+  <footer id="foot"></footer>
+</main>
+
+<script>
+(function(){
+  "use strict";
+  var snap = null, live = null, liveAt = 0;
+  var $ = function(id){ return document.getElementById(id); };
+
+  function el(tag, attrs, kids){
+    var e = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function(k){
+      if (k === "text") e.textContent = attrs[k]; else if (k === "cls") e.className = attrs[k]; else e.setAttribute(k, attrs[k]);
+    });
+    (kids || []).forEach(function(c){ e.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+    return e;
+  }
+  function clear(n){ while (n.firstChild) n.removeChild(n.firstChild); }
+  function fmtDur(s){
+    if (s == null || !isFinite(s)) return "–";
+    s = Math.max(0, Math.round(s));
+    var h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60;
+    return h ? h+"h "+String(m).padStart(2,"0")+"m" : m ? m+"m "+String(x).padStart(2,"0")+"s" : x+"s";
+  }
+  function ago(iso){ var t = typeof iso === "number" ? iso*1000 : Date.parse(iso); return isFinite(t) ? fmtDur((Date.now()-t)/1000)+" ago" : "unknown"; }
+  function pct(x){ return x == null ? "–" : Math.round(x*100)+"%"; }
+  function wilson(k, n){
+    if (!n) return null;
+    var z = 1.96, p = k/n, d = 1 + z*z/n, c = p + z*z/(2*n), a = z*Math.sqrt(p*(1-p)/n + z*z/(4*n*n));
+    return [Math.max(0,(c-a)/d), Math.min(1,(c+a)/d)];
+  }
+  function median(a){ a = a.filter(function(x){ return typeof x === "number" && isFinite(x); }).sort(function(x,y){ return x-y; });
+    if (!a.length) return null; var m = a.length >> 1; return a.length % 2 ? a[m] : (a[m-1]+a[m])/2; }
+  function mean(a){ a = a.filter(function(x){ return typeof x === "number" && isFinite(x) && x > 0; }); return a.length ? a.reduce(function(s,x){ return s+x; },0)/a.length : null; }
+  function done(r){ return typeof r.e2e_pass === "boolean"; }
+
+  // ---- data ------------------------------------------------------------------------------
+  function get(path){
+    return fetch(path + "?t=" + Date.now(), {cache:"no-store"}).then(function(r){ if (!r.ok) throw new Error(path+" "+r.status); return r.json(); });
+  }
+  function loadLive(){
+    return get("data/live.json").then(function(d){ live = d; liveAt = Date.now(); renderLive(); }).catch(function(){ renderLive(true); });
+  }
+  function loadSnap(){
+    return get("data/snapshot.json").then(function(d){ snap = d; buildFilters(); renderAll(); }).catch(function(e){
+      var n = $("notice"); n.hidden = false; n.className = "notice err"; n.textContent = "Could not load the results data. It may not have been published yet.";
+    });
+  }
+
+  // ---- live ------------------------------------------------------------------------------
+  function renderLive(failed){
+    var st = $("status"), facts = $("facts");
+    clear(facts);
+    if (!live){ st.className = "pill"; st.textContent = failed ? "no live data" : "loading"; return; }
+    var status = live.status || "idle";
+    var stale = status === "running" && live.generated_at && (Date.now()/1000 - live.generated_at) > 25*60;
+    st.className = "pill " + status;
+    st.textContent = stale ? "running (last update " + ago(live.generated_at) + ")" : status;
+    function fact(k, v){ if (v == null || v === "") return; facts.appendChild(el("div", {cls:"fact"}, [el("b",{text:k}), el("span",{text:String(v)})])); }
+    fact("Experiment", live.experiment);
+    fact("Queue", live.queue);
+    if (live.step) fact("Step", live.step + " of " + live.steps + (live.step_name ? " · " + live.step_name : ""));
+    if (status === "running" && live.problem){
+      fact("Problem", live.problem + (live.repeat_n > 1 ? " (repeat " + live.repeat + "/" + live.repeat_n + ")" : ""));
+      if (live.run_started_at) fact("This run", fmtDur(Date.now()/1000 - live.run_started_at) + " elapsed");
+    }
+    if (live.reason && status !== "running") fact("Why it stopped", live.reason);
+    var prog = $("progress");
+    var recorded = live.recorded_this_start || 0, left = live.runs_left;
+    if (status === "running" && left != null && recorded + left > 0){
+      var total = recorded + left, share = Math.round(recorded/total*100);
+      prog.hidden = false; $("bar").style.width = share + "%"; $("barwrap").setAttribute("aria-valuenow", share);
+      $("progtext").textContent = recorded + " finished since this start, " + left + " to go" + (live.eta_s ? " · about " + fmtDur(live.eta_s) + " left at the current pace" : "");
+    } else if (left != null && status !== "running"){
+      prog.hidden = false; $("bar").style.width = "0"; $("progtext").textContent = left + " runs left in this experiment.";
+    } else prog.hidden = true;
+    $("fresh").textContent = "live data " + ago(live.generated_at) + (snap ? " · results " + ago(snap.generated_at) : "");
+  }
+
+  // ---- filters ---------------------------------------------------------------------------
+  function uniq(a){ return a.filter(function(x,i){ return x && a.indexOf(x) === i; }); }
+  function fill(sel, values, firstLabel, keep){
+    var cur = keep || sel.value; clear(sel);
+    sel.appendChild(el("option", {value:"", text:firstLabel}));
+    values.forEach(function(v){ sel.appendChild(el("option", {value:v, text:v})); });
+    sel.value = values.indexOf(cur) >= 0 ? cur : "";
+  }
+  function buildFilters(){
+    var runs = snap.runs;
+    var byNew = runs.slice().sort(function(a,b){ return String(b.timestamp_utc).localeCompare(String(a.timestamp_utc)); });
+    fill($("f-exp"), uniq(byNew.map(function(r){ return r.experiment; })), "All experiments");
+    fill($("f-purpose"), uniq(runs.map(function(r){ return r.purpose; })), "All purposes");
+  }
+  function selected(){
+    var e = $("f-exp").value, p = $("f-purpose").value;
+    return snap.runs.filter(function(r){ return (!e || r.experiment === e) && (!p || r.purpose === p); });
+  }
+
+  // ---- tables ----------------------------------------------------------------------------
+  function variantOrder(runs){
+    var first = {};
+    runs.slice().sort(function(a,b){ return String(a.timestamp_utc).localeCompare(String(b.timestamp_utc)); })
+      .forEach(function(r){ var k = r.config_label || r.agent_id || "(none)"; if (!(k in first)) first[k] = r.timestamp_utc; });
+    return Object.keys(first).sort(function(a,b){ return String(first[a]).localeCompare(String(first[b])); });
+  }
+  function vkey(r){ return r.config_label || r.agent_id || "(none)"; }
+
+  function rate(rs, field){
+    var c = rs.filter(function(r){ return typeof r[field] === "boolean"; }), k = c.filter(function(r){ return r[field]; }).length;
+    return {k:k, n:c.length};
+  }
+  function rateCell(rt){
+    var td = el("td", {cls:"num"});
+    if (!rt.n){ td.textContent = "–"; return td; }
+    var w = wilson(rt.k, rt.n);
+    td.appendChild(document.createTextNode(rt.k + "/" + rt.n + " · " + pct(rt.k/rt.n) + " "));
+    td.appendChild(el("span", {cls:"ci", text:"(" + pct(w[0]) + "–" + pct(w[1]) + ")"}));
+    return td;
+  }
+  function renderSummary(runs){
+    var t = $("summary"); clear(t);
+    if (!runs.length){ t.appendChild(el("tr",{},[el("td",{cls:"empty",text:"No runs match."})])); return; }
+    var head = el("tr"); ["Variant","Switches","Runs","Unfinished","End to end","Mitigation","Diagnosis","Median calls","Median seconds","Mean tokens"].forEach(function(h, i){
+      head.appendChild(el("th", {cls: i >= 2 ? "num" : "", text:h})); });
+    t.appendChild(el("thead",{},[head]));
+    var body = el("tbody");
+    variantOrder(runs).forEach(function(v){
+      var rs = runs.filter(function(r){ return vkey(r) === v; });
+      var sw = rs[0].agent_switches || "";
+      var tr = el("tr");
+      tr.appendChild(el("td", {text:v}));
+      tr.appendChild(el("td", {cls:"ci", title:sw, text: sw.length > 38 ? sw.slice(0,36) + "…" : (sw || "–")}));
+      tr.appendChild(el("td", {cls:"num", text:String(rs.length)}));
+      tr.appendChild(el("td", {cls:"num", text:String(rs.filter(function(r){ return !done(r); }).length)}));
+      tr.appendChild(rateCell(rate(rs,"e2e_pass"))); tr.appendChild(rateCell(rate(rs,"mitigation_pass"))); tr.appendChild(rateCell(rate(rs,"diagnosis_pass")));
+      var calls = median(rs.map(function(r){ return r.num_llm_calls; })), secs = median(rs.map(function(r){ return (r.ttd_s||0)+(r.ttm_s||0) || null; })), tok = mean(rs.map(function(r){ return r.total_tokens; }));
+      tr.appendChild(el("td", {cls:"num", text: calls == null ? "–" : String(Math.round(calls))}));
+      tr.appendChild(el("td", {cls:"num", text: secs == null ? "–" : String(Math.round(secs))}));
+      tr.appendChild(el("td", {cls:"num", text: tok == null ? "–" : Math.round(tok/1000) + "k"}));
+      body.appendChild(tr);
+    });
+    t.appendChild(body);
+  }
+
+  function cellFor(rs){
+    var c = rs.filter(done), k = c.filter(function(r){ return r.e2e_pass; }).length;
+    var span = el("span", {cls:"cell"});
+    if (!rs.length){ span.className = "cell none"; span.textContent = "·"; return span; }
+    if (!c.length){ span.className = "cell inc"; span.textContent = "…"; span.title = rs.length + " run(s), none finished"; return span; }
+    if (k === c.length){ span.className = "cell pass"; span.textContent = c.length > 1 ? k + "/" + c.length : "✓"; }
+    else if (k === 0){ span.className = "cell fail"; span.textContent = c.length > 1 ? "0/" + c.length : "✗"; }
+    else { span.className = "cell mix"; span.textContent = k + "/" + c.length; }
+    span.title = k + " of " + c.length + " completed runs passed" + (rs.length > c.length ? "; " + (rs.length - c.length) + " unfinished" : "");
+    return span;
+  }
+  function renderGrid(runs){
+    var t = $("grid"); clear(t);
+    if (!runs.length){ t.appendChild(el("tr",{},[el("td",{cls:"empty",text:"No runs match."})])); return; }
+    var vs = variantOrder(runs), ps = uniq(runs.map(function(r){ return r.problem_id; })).sort();
+    var head = el("tr"); head.appendChild(el("th",{text:"Problem"}));
+    vs.forEach(function(v){ head.appendChild(el("th",{cls:"v", text:v})); });
+    t.appendChild(el("thead",{},[head]));
+    var body = el("tbody");
+    ps.forEach(function(p){
+      var tr = el("tr"); tr.appendChild(el("td",{cls:"p", title:p, text:p}));
+      vs.forEach(function(v){
+        var rs = runs.filter(function(r){ return r.problem_id === p && vkey(r) === v; });
+        var td = el("td"); td.appendChild(cellFor(rs)); tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    t.appendChild(body);
+  }
+
+  function outcomeCell(r){
+    if (!done(r)) return el("span",{cls:"cell inc", text:"unfinished"});
+    return el("span",{cls:"cell " + (r.e2e_pass ? "pass" : "fail"), text: r.e2e_pass ? "pass" : "fail"});
+  }
+  function renderRecent(runs){
+    var t = $("recent"); clear(t);
+    var rows = runs.slice().sort(function(a,b){ return String(b.timestamp_utc).localeCompare(String(a.timestamp_utc)); }).slice(0, 30);
+    if (!rows.length){ t.appendChild(el("tr",{},[el("td",{cls:"empty",text:"No runs match."})])); return; }
+    var head = el("tr"); ["When","Variant","Problem","Outcome","Diagnosis","Mitigation","Calls","Run by"].forEach(function(h){ head.appendChild(el("th",{text:h})); });
+    t.appendChild(el("thead",{},[head]));
+    var body = el("tbody");
+    function yn(v){ return typeof v === "boolean" ? (v ? "yes" : "no") : "–"; }
+    rows.forEach(function(r){
+      var tr = el("tr");
+      tr.appendChild(el("td",{text: ago(r.timestamp_utc)}));
+      tr.appendChild(el("td",{text: vkey(r)}));
+      tr.appendChild(el("td",{title:r.problem_id, text:r.problem_id}));
+      var o = el("td"); o.appendChild(outcomeCell(r)); tr.appendChild(o);
+      tr.appendChild(el("td",{text:yn(r.diagnosis_pass)})); tr.appendChild(el("td",{text:yn(r.mitigation_pass)}));
+      tr.appendChild(el("td",{text: r.num_llm_calls == null ? "–" : String(r.num_llm_calls)}));
+      tr.appendChild(el("td",{text:r.run_by || "–"}));
+      body.appendChild(tr);
+    });
+    t.appendChild(body);
+  }
+  function renderReasons(runs){
+    var ul = $("reasons"); clear(ul);
+    var c = {};
+    runs.filter(function(r){ return !done(r); }).forEach(function(r){
+      var k = (r.incomplete_reason || "no reason recorded").replace(/\s+/g," ").slice(0,160); c[k] = (c[k]||0) + 1; });
+    var keys = Object.keys(c).sort(function(a,b){ return c[b]-c[a]; });
+    if (!keys.length){ ul.appendChild(el("li",{cls:"empty",text:"Every run in view finished."})); return; }
+    keys.slice(0,12).forEach(function(k){ ul.appendChild(el("li",{},[el("b",{text:String(c[k])}), el("span",{text:k})])); });
+  }
+
+  function renderAll(){
+    if (!snap) return;
+    var runs = selected();
+    renderSummary(runs); renderGrid(runs); renderRecent(runs); renderReasons(runs);
+    var n = $("notice");
+    if (snap.hidden_final_runs){ n.hidden = false; n.className = "notice"; n.textContent = snap.hidden_final_runs + " run(s) on the frozen evaluation set are not shown here on purpose."; }
+    else n.hidden = true;
+    $("foot").textContent = "Source: " + snap.source + " · " + snap.n_runs + " runs published. Not published: diagnosis text, judge reasoning, logs, keys, file paths.";
+    $("fresh").textContent = (live ? "live data " + ago(live.generated_at) + " · " : "") + "results " + ago(snap.generated_at);
+  }
+
+  $("f-exp").addEventListener("change", renderAll);
+  $("f-purpose").addEventListener("change", renderAll);
+  setInterval(function(){ renderLive(); }, 1000);
+  setInterval(loadLive, 20000);
+  setInterval(loadSnap, 60000);
+  loadLive(); loadSnap();
+})();
+</script>
+</body>
+</html>

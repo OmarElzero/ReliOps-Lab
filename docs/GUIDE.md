@@ -81,6 +81,33 @@ Three repair buttons sit under it. Each one shows the exact commands and asks be
 
 There is no free-text command box on purpose: the page sends only the name of a repair, and the server builds the commands from names it reads itself. A box that ran typed commands would let any web page that reaches `127.0.0.1` run commands on this machine.
 
+## Shared results page (read-only)
+
+A static page that shows the experiment results and the queue's progress to people who do not have the Lab open
+(teammates, supervisors, sponsors). It cannot start, stop or change anything.
+
+- **Preview on this machine:** open `http://localhost:8765/share/`. It is computed on request from the same runs the Results tab
+  uses, so it works without any setup.
+- **What it shows:** the live state (running, paused, halted, finished; experiment, step, current problem, time on this run,
+  runs left, estimated time left), a per-variant table (end to end, mitigation, diagnosis with 95 percent Wilson intervals,
+  median calls and seconds, mean tokens), a problem-by-variant grid, the latest runs, and why runs did not finish.
+- **What is published:** per run the problem, category, agent, config label, switches, experiment, outcomes, judge scores, calls,
+  tokens, seconds, failure tag, incomplete reason and who ran it. Never keys, the `.env`, diagnosis text, judge reasoning,
+  logs, stories, file paths or e-mail addresses. Runs of the frozen set (purpose `final`) are left out unless
+  `RELIOPS_PUBLISH_FINAL=on`, so the page cannot be used to read frozen-set failures before the freeze.
+  `RELIOPS_PUBLISH_NAMES=off` leaves out the `run_by` names.
+- **Hosting it for others:** create an empty repository for the page (for example `ReliOps-Results`, public is fine because it holds
+  only the files above), switch on GitHub Pages for its `gh-pages` branch, then put in the Lab `.env`:
+
+      RELIOPS_PUBLISH=on
+      RELIOPS_PUBLISH_GIT=https://github.com/<you>/ReliOps-Results.git
+
+  The Lab then writes the files to `results/site/` whenever a run is recorded or the queue changes state, and pushes them
+  (one replaced commit on `gh-pages`, using the git credentials already on the machine) at most every
+  `RELIOPS_PUBLISH_EVERY_S` seconds (default 300, to stay under GitHub Pages' build limits). The elapsed time of the current run
+  ticks in the browser between updates. `GET /api/publish/status` shows the last push and any error.
+- Data from teammates appears when the Lab reads it from Firestore (it uses the same saved copy and read budget as the Results tab).
+
 ## Results
 
 A dashboard computed from exactly the runs the filters leave in view.

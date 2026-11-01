@@ -33,6 +33,7 @@ import runner
 import stats
 import pins
 import dashboard
+import publish
 import store
 
 app = FastAPI(title="ReliOps Lab")
@@ -743,10 +744,11 @@ def queue_preview_draft(body: QueueIn):
     return queueplan.preview(q, runs, store.read("manifests"), body.experiment)
 
 
-def _runs_left(queue: dict, label: str) -> int:
+def _runs_left(queue: dict, label: str, runs: Optional[list] = None) -> int:
     """Cells the queue still has to run under this experiment label (enabled steps only)."""
     manifests = store.read("manifests")
-    _, runs = _collect_runs(5000)
+    if runs is None:
+        _, runs = _collect_runs(5000)
     n = 0
     for step in queue["steps"]:
         if not step.get("enabled", True):
@@ -1300,3 +1302,72 @@ def key_mark(body: KeyMarkIn):
                                 "until": until, "reason": "set by hand", "marked_by": body.by or "unknown",
                                 "fp": _fp(body.var, env)})
     return {"ok": True}
+
+
+# ---- Shared, read-only results page (see publish.py) -------------------------------------------
+_SHARE_TTL_S = 15.0
+_share_cache: dict = {"at": 0.0, "runs": ("local", [])}
+_publisher: Optional[publish.Publisher] = None
+
+
+def _share_runs() -> tuple[str, list[dict]]:
+    """The runs for the shared page, recomputed at most every few seconds however many readers there are."""
+    import time as _t
+
+    if _t.time() - _share_cache["at"] > _SHARE_TTL_S:
+        _share_cache["runs"] = _collect_runs(5000)
+        _share_cache["at"] = _t.time()
+    return _share_cache["runs"]
+
+
+def _share_live() -> dict:
+    job = jobs.current()
+    desc = job.describe() if job else None
+    qstate = queuestate.describe(jobs.busy())
+    left = None
+    if desc and desc["state"] == "running" and qstate:
+        queue = _find_queue(qstate.get("queue_id") or "")
+        if queue is not None:
+            left = _runs_left(queue, qstate.get("experiment") or queue.get("name", ""), _share_runs()[1])
+    return publish.build_live(desc, qstate, left)
+
+
+@app.get("/share/data/snapshot.json")
+def share_snapshot():
+    source, runs = _share_runs()
+    return JSONResponse(publish.build_snapshot(runs, source), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/share/data/live.json")
+def share_live():
+    return JSONResponse(_share_live(), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/share/")
+def share_page():
+    return FileResponse(publish.SITE_SRC / "index.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/publish/status")
+def publish_status():
+    if _publisher is None:
+        return {"enabled": False, "preview": "/share/",
+                "how": "Set RELIOPS_PUBLISH=on in .env (and RELIOPS_PUBLISH_GIT to a repository URL to host it); see docs/GUIDE.md."}
+    return {"enabled": True, "preview": "/share/", **_publisher.describe()}
+
+
+@app.on_event("startup")
+def _start_publisher():
+    global _publisher
+    env = runner.merged_env_vars()
+    for k in ("RELIOPS_PUBLISH_FINAL", "RELIOPS_PUBLISH_NAMES"):   # also used by the local /share/ preview
+        if k in env:
+            os.environ.setdefault(k, str(env[k]))
+    if str(env.get("RELIOPS_PUBLISH", "")).strip().lower() not in ("1", "on", "true", "yes"):
+        return
+    out = Path(env.get("RELIOPS_PUBLISH_DIR") or (runner.reliops_dir() / "results" / "site"))
+    _publisher = publish.Publisher(
+        _share_runs, _share_live, out, remote=str(env.get("RELIOPS_PUBLISH_GIT") or ""),
+        branch=str(env.get("RELIOPS_PUBLISH_BRANCH") or "gh-pages"),
+        every_s=float(env.get("RELIOPS_PUBLISH_EVERY_S") or 300))
+    _publisher.start()
