@@ -1375,5 +1375,5 @@ def _start_publisher():
     _publisher = publish.Publisher(
         _share_runs, _share_live, out, remote=str(env.get("RELIOPS_PUBLISH_GIT") or ""),
         branch=str(env.get("RELIOPS_PUBLISH_BRANCH") or "results-data"),
-        every_s=float(env.get("RELIOPS_PUBLISH_EVERY_S") or 300))
+        every_s=float(env.get("RELIOPS_PUBLISH_EVERY_S") or 60))
     _publisher.start()

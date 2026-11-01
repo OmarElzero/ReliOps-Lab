@@ -16,7 +16,7 @@ Where it goes
   - Always: `/share/` on the local Lab (preview, computed on request).
   - With `RELIOPS_PUBLISH=on`: files are written to `RELIOPS_PUBLISH_DIR` (default `results/site/`) whenever a run is
     recorded or the queue changes state, and, when `RELIOPS_PUBLISH_GIT` names a remote, pushed to its
-    `RELIOPS_PUBLISH_BRANCH` (default `results-data`) at most every `RELIOPS_PUBLISH_EVERY_S` seconds (default 300), so the
+    `RELIOPS_PUBLISH_BRANCH` (default `results-data`) at most every `RELIOPS_PUBLISH_EVERY_S` seconds (default 60), so the
     site host's build limits are respected. The push replaces the branch's single commit; it holds only the files above.
 """
 
