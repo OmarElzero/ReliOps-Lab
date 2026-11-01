@@ -20,7 +20,7 @@
     </nav>
     <div class="top-tools">
       <button id="job-pill" class="pill live" type="button" hidden title="Open the Queue tab"><span class="dot"></span><span id="job-pill-text">running</span></button>
-      <button id="job-stop" class="secondary small" type="button" hidden title="Finish the run in progress, record it, then stop">Stop after current</button>
+      <button id="job-stop" class="secondary small" type="button" hidden title="Finish the run in progress, record it, then pause. Continue picks up from there.">Pause after current</button>
       <div id="fb-status" class="pill">Firebase: checking…</div>
       <div class="header-name">
         <input id="run-by" aria-label="Your name" placeholder="your name" autocomplete="off">
@@ -62,6 +62,7 @@
     <button id="q-add" class="q-add" type="button">+ Add step</button>
 
     <div class="q-runbar" id="q-runbar">
+      <div class="q-paused" id="q-paused" role="status" hidden></div>
       <div class="q-total">
         <strong id="q-total-line">No steps yet</strong>
         <p class="hint" id="q-total-sub"></p>
@@ -74,7 +75,8 @@
       </div>
       <div class="q-actions">
         <button id="q-run" class="primary" type="button" disabled>▶ Run queue</button>
-        <button id="q-stop" class="secondary" type="button" disabled>Stop after current run</button>
+        <button id="q-continue" class="primary" type="button" hidden title="Carry on the queue that was paused, from the first cell that has no result yet">▶ Continue</button>
+        <button id="q-stop" class="secondary" type="button" disabled title="Finish the run in progress, record it, then pause. Continue picks up from there.">Pause after current run</button>
         <button id="q-restart" class="secondary danger" type="button" disabled title="Start the whole queue again from step 1">↻ Restart</button>
       </div>
     </div>
@@ -570,6 +572,12 @@
       <p class="hint" id="sd-agent-desc"></p>
       <label for="sd-label">Config label <span class="tag">(names this variant in the Results tab)</span></label>
       <input id="sd-label" list="config-label-presets" placeholder="e.g. baseline-v1-typed" autocomplete="off">
+      <fieldset id="sd-variants-box" class="switch-box" hidden>
+        <legend>Add this step for many agents <span class="tag">(optional)</span></legend>
+        <p class="hint">Tick ready-made agent variants. Each one becomes its own step with everything else on this form (problems, repeats, models, purpose). The Agent and switches above are then ignored, and each variant's name is its config label.</p>
+        <div class="row"><button type="button" class="secondary small" id="sd-var-all">Tick all that can run</button><button type="button" class="ghost small" id="sd-var-none">Clear</button><span class="hint" id="sd-var-count"></span></div>
+        <div id="sd-variants"></div>
+      </fieldset>
       <fieldset id="sd-switches-box" class="switch-box" hidden>
         <legend>Agent switches <span class="tag">(ReliOps v2 only; none ticked = behaves like v1)</span></legend>
         <div id="sd-switches"></div>

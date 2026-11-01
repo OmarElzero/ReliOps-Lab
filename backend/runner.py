@@ -56,6 +56,38 @@ def clean_switches(raw) -> list[str]:
     return [n for n in AGENT_SWITCHES if n in names]
 
 
+# Ready-made agent variants for the queue's "Add steps for many agents" list (docs/plan/12-agent-ladder.md in the ReliOps repo,
+# which also generates whole queues from the same recipes with scripts/make_ladder_queues.py). The id is the config label that
+# is stamped on every run of the variant, so the Results table keeps the variants apart.
+_BASE = ["TOKEN_LOG", "EMPTY_SUBMIT_GUARD"]
+
+
+def _variant(id_: str, group: str, agent_id: str, space: str, switches: list[str], help_: str, needs_notes: bool = False) -> dict:
+    return {"id": id_, "group": group, "agent_id": agent_id, "action_space": space, "switches": switches, "help": help_,
+            "needs_notes": needs_notes}
+
+
+VARIANT_PRESETS = [
+    _variant("V0", "Controls", "reliops_v1", "typed+shell", [], "frozen react_v1, re-run in the same batch to show day-to-day drift"),
+    _variant("a", "Controls", "reliops_v2", "typed+shell", ["TOKEN_LOG"], "noise-floor control: behaves like V0, so a minus V0 is run-to-run noise"),
+    _variant("B", "Controls", "reliops_v2", "typed+shell", _BASE, "base of the ladder: logging plus the empty-diagnosis guard"),
+    _variant("c1 OPTIONAL_ARGS", "One switch on B", "reliops_v2", "typed+shell", _BASE + ["OPTIONAL_ARGS"], "pass previous, tail and container through"),
+    _variant("c2 FAULT_EXISTS", "One switch on B", "reliops_v2", "typed+shell", _BASE + ["FAULT_EXISTS"], "say a fault exists"),
+    _variant("c3 BUDGET_AWARE", "One switch on B", "reliops_v2", "typed+shell", _BASE + ["BUDGET_AWARE"], "show actions used and time left"),
+    _variant("c4 SURVEY", "One switch on B", "reliops_v2", "typed+shell", _BASE + ["SURVEY"], "survey every object first"),
+    _variant("c5 LEDGER", "One switch on B", "reliops_v2", "typed+shell", _BASE + ["LEDGER"], "hypothesis ledger with cited steps"),
+    _variant("c6 SELFCHECK", "One switch on B", "reliops_v2", "typed+shell", _BASE + ["SELFCHECK"], "evidence check before the diagnosis"),
+    _variant("c7 SOAK", "One switch on B", "reliops_v2", "typed+shell", _BASE + ["SOAK"], "wait and re-read after a fix"),
+    _variant("c8 K8S_KNOWLEDGE", "One switch on B", "reliops_v2", "typed+shell", _BASE + ["K8S_KNOWLEDGE"],
+             "reviewed Kubernetes notes; refuses to run until knowledge/k8s_notes.md exists", needs_notes=True),
+    _variant("t1 typed", "Typed menu", "reliops_v2", "typed", _BASE, "B on the typed action menu"),
+    _variant("t2 typed+CATALOGUE_V2", "Typed menu", "reliops_v2", "typed", _BASE + ["CATALOGUE_V2"], "typed menu plus patch, delete and exec actions"),
+    _variant("p1 LEDGER+SELFCHECK", "Pairs", "reliops_v2", "typed+shell", _BASE + ["LEDGER", "SELFCHECK"], "F2 with F3"),
+    _variant("p2 SURVEY+LEDGER", "Pairs", "reliops_v2", "typed+shell", _BASE + ["SURVEY", "LEDGER"], "survey with the ledger"),
+    _variant("p3 SOAK+SELFCHECK", "Pairs", "reliops_v2", "typed+shell", _BASE + ["SOAK", "SELFCHECK"], "soak with the self-check"),
+]
+
+
 AGENTS = [
     {
         "id": "reliops_v1", "label": "ReliOps v1 (ours, typed)", "action_space": "typed",

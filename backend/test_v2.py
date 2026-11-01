@@ -776,6 +776,142 @@ class QueueStopsWhenAStepHaltsTests(TmpRepoCase):
         self.assertIn("[QUEUE] finished", log)
 
 
+class VariantPresetTests(unittest.TestCase):
+    """The ready-made agent variants offered in the queue step dialog must all be runnable as listed."""
+
+    def test_every_preset_names_a_real_agent_action_space_and_valid_switches(self):
+        ids = set()
+        for v in runner.VARIANT_PRESETS:
+            self.assertNotIn(v["id"], ids); ids.add(v["id"])
+            self.assertTrue(any(a["id"] == v["agent_id"] and (a["action_space"] or "") == v["action_space"] for a in runner.AGENTS), v["id"])
+            self.assertEqual(runner.clean_switches(v["switches"]), [s for s in runner.AGENT_SWITCHES if s in v["switches"]], v["id"])
+            if v["agent_id"] != runner.SWITCH_AGENT:
+                self.assertEqual(v["switches"], [], v["id"])      # switches exist only in react_v2
+
+    def test_presets_survive_the_queue_validator_as_steps(self):
+        import queueplan
+        for v in runner.VARIANT_PRESETS:
+            step = queueplan.clean_step({"agent_id": v["agent_id"], "action_space": v["action_space"], "model_id": "m", "judge_model_id": "j",
+                                         "problems": ["p"], "config_label": v["id"], "agent_switches": v["switches"]})
+            self.assertEqual(step["config_label"], v["id"])
+            self.assertEqual(step["agent_switches"], runner.clean_switches(v["switches"]))
+
+    def test_the_screen_gets_them_from_the_config(self):
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        self.assertEqual([v["id"] for v in app_module.config()["variant_presets"]], [v["id"] for v in runner.VARIANT_PRESETS])
+
+
+class QueuePauseAndContinueTests(TmpRepoCase):
+    """Pause finishes the current run and records where the queue was; Continue carries on under the same experiment."""
+
+    def setUp(self):
+        super().setUp()
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        import queuestate
+        self.app, self.qs = app_module, queuestate
+        step = lambda n: {"name": f"step {n}", "enabled": True, "agent_id": "a", "model_id": "m", "judge_model_id": "j",
+                          "problems": ["p"], "repeat_n": 1, "run_class": "exploration"}
+        self.queue = {"queue_id": "q1", "name": "q", "steps": [step(1), step(2), step(3)]}
+        self.done, self.started, self.pause_during = set(), [], None
+        runner._halt(None); runner._stop_event.clear()
+        self.addCleanup(runner._stop_event.clear)
+        self.addCleanup(runner._halt, None)
+
+    def _run(self, restart=False):
+        started, done = self.started, self.done
+
+        def fake_run_lines(**kw):
+            n = len(started) + 1
+            started.append(kw["experiment"])
+            yield f"run {n}\n"
+            done.add(len(done) + 1)
+            if self.pause_during == len(done):
+                runner._stop_event.set()           # the person pressed Pause while this run was going
+
+        def todo(step, runs, manifest, label):
+            return [] if int(step["name"].split()[-1]) in done else [("p", 1)]
+
+        with mock.patch.object(self.app, "_run_lines", side_effect=fake_run_lines), \
+             mock.patch.object(self.app.store, "read", return_value=[]), \
+             mock.patch.object(self.app, "_collect_runs", return_value=("local", [])), \
+             mock.patch.object(self.app.queueplan, "todo", side_effect=todo):
+            return "".join(self.app._queue_lines(self.queue, "Omar", "Dev - first try", restart))
+
+    def test_pause_keeps_the_queue_and_experiment_and_continue_runs_only_the_rest(self):
+        self.pause_during = 1
+        log = self._run()
+        self.assertEqual(len(self.started), 1)
+        self.assertIn("paused after the current run, in step 1/3", log)
+        self.assertIn("2 run(s) left", log)
+        st = self.qs.describe(False)
+        self.assertEqual((st["status"], st["experiment"], st["queue_id"], st["run_by"], st["left"]), ("paused", "Dev - first try", "q1", "Omar", 2))
+        self.assertTrue(st["can_continue"])
+        self.pause_during = None
+        log2 = self._run()                       # what the Continue button starts: same experiment, not a restart
+        self.assertEqual(len(self.started), 3)
+        self.assertEqual(set(self.started), {"Dev - first try"})
+        self.assertIn("step 1/3 nothing to do", log2)
+        self.assertIn("[QUEUE] finished", log2)
+        self.assertEqual(self.qs.describe(False)["status"], "finished")
+        self.assertFalse(self.qs.describe(False)["can_continue"])
+
+    def test_pausing_during_the_very_last_run_is_just_finished(self):
+        self.done.update({1, 2}); self.pause_during = 3
+        log = self._run()
+        self.assertIn("[QUEUE] finished", log)
+        self.assertEqual(self.qs.describe(False)["status"], "finished")
+
+    def test_a_queue_that_stopped_itself_can_be_continued_too(self):
+        def halting(**kw):
+            runner._halt("3 runs in a row ended incomplete")
+            yield "x\n"
+        with mock.patch.object(self.app, "_run_lines", side_effect=halting), \
+             mock.patch.object(self.app.store, "read", return_value=[]), \
+             mock.patch.object(self.app, "_collect_runs", return_value=("local", [])), \
+             mock.patch.object(self.app.queueplan, "todo", return_value=[("p", 1)]):
+            "".join(self.app._queue_lines(self.queue, "Omar", "E"))
+        st = self.qs.describe(False)
+        self.assertEqual(st["status"], "halted")
+        self.assertIn("incomplete", st["reason"])
+        self.assertTrue(st["can_continue"])
+
+    def test_a_queue_cut_off_without_an_end_is_interrupted_and_can_be_continued(self):
+        self.qs.begin(self.queue, "E", "Omar")        # the Lab went down before anything said how it ended
+        self.assertEqual(self.qs.describe(False)["status"], "interrupted")
+        self.assertTrue(self.qs.describe(False)["can_continue"])
+        self.assertFalse(self.qs.describe(True)["can_continue"])     # but not while a job is running
+
+    def test_state_endpoint_reports_what_is_left_and_refuses_a_deleted_queue(self):
+        self.qs.begin(self.queue, "E", "Omar"); self.qs.end("paused", step=1, step_name="step 1", left=9)
+        with mock.patch.object(self.app, "_find_queue", return_value=self.queue), \
+             mock.patch.object(self.app, "_runs_left", return_value=2), \
+             mock.patch.object(self.app, "_collect_runs", return_value=("local", [])), \
+             mock.patch.object(self.app.jobs, "busy", return_value=False):
+            st = self.app.queue_state()["state"]
+        self.assertEqual((st["status"], st["left"], st["can_continue"]), ("paused", 2, True))
+        with mock.patch.object(self.app, "_find_queue", return_value=None), mock.patch.object(self.app.jobs, "busy", return_value=False):
+            st = self.app.queue_state()["state"]
+        self.assertFalse(st["can_continue"])
+        self.assertIn("deleted", st["problem"])
+
+    def test_nothing_to_continue_when_the_last_queue_finished(self):
+        self.qs.begin(self.queue, "E", "Omar"); self.qs.end("finished", left=0)
+        with mock.patch.object(self.app.jobs, "busy", return_value=False):
+            resp = self.app.queue_continue()
+        import asyncio
+
+        async def collect():
+            return "".join([c.decode() if isinstance(c, bytes) else c async for c in resp.body_iterator])
+        body = asyncio.run(collect())
+        self.assertIn("Nothing to continue", body)
+
+
 class JudgeScoresReachThePageTests(TmpRepoCase):
     """The detail panel read D1-D3 from the run list, which never carried them ("D1=? D2=? D3=?")."""
 

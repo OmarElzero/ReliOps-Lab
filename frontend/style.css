@@ -470,3 +470,10 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 .switch-box { border: 1px solid var(--border, #2a3040); border-radius: 8px; padding: 8px 12px; margin: 10px 0; }
 .switch-box legend { padding: 0 6px; font-size: 0.9em; }
 .switch-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }
+
+/* pause / continue banner in the queue run bar */
+.q-paused { flex: 1 1 100%; padding: 8px 12px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-size: 13.5px; }
+.q-paused.problem { background: var(--bad-soft); color: var(--bad); }
+.variant-group { margin: 6px 0 2px; font-weight: 600; font-size: 12.5px; opacity: .8; }
+.variant-row { display: flex; gap: 8px; align-items: baseline; padding: 1px 0; }
+.variant-row.blocked { opacity: .6; }

@@ -196,6 +196,7 @@
           h("input", { type: "checkbox", checked: s.enabled !== false, onchange: (e) => { s.enabled = e.target.checked; markDirty(); renderSteps(); } }), "On"),
         h("button", { class: "ghost small", type: "button", text: "Edit", onclick: () => openStepDialog(i) }),
         h("button", { class: "ghost small", type: "button", text: "Duplicate", onclick: () => duplicateStep(i) }),
+        h("button", { class: "ghost small", type: "button", text: "Copy for other agents…", title: "Same problems, repeats and models; choose several agents at once", onclick: () => openStepDialog(null, Q.steps[i]) }),
         h("button", { class: "ghost small icon", type: "button", text: "↑", "aria-label": "Move up", disabled: i === 0, onclick: () => moveStep(i, -1) }),
         h("button", { class: "ghost small icon", type: "button", text: "↓", "aria-label": "Move down", disabled: i === Q.steps.length - 1, onclick: () => moveStep(i, 1) }),
         h("button", { class: "ghost small danger", type: "button", text: "Remove", onclick: () => removeStep(i) }));
@@ -259,7 +260,7 @@
 
   // ---- step dialog ----------------------------------------------------------------------------
   const dlg = $("step-dialog");
-  const D = { setIdx: 0, selected: new Set(), custom: "" };
+  const D = { setIdx: 0, selected: new Set(), custom: "", variants: new Set() };
   const agentOf = () => CONFIG.agents[Number($("sd-agent").value)];
   const currentSet = () => CONFIG.problem_sets[D.setIdx];
   const isFrozen = () => document.querySelector('input[name="sd-class"]:checked').value === "frozen";
@@ -375,17 +376,18 @@
     $("sd-locked").hidden = !m;
     $("sd-agent-desc").textContent = agentOf() && agentOf().desc ? agentOf().desc : "";
     $("sd-ok").disabled = frozen && !m;
+    syncVariantBox();
     $("sd-purpose").disabled = frozen;
     $("sd-purpose-note").textContent = frozen
       ? "A frozen campaign is the reported measurement; its results are final when the problems are the pinned frozen set."
       : "Automatic: a dev-set problem is dev, anything else is an experiment. You can change the purpose of any run later in Results.";
   }
 
-  function openStepDialog(index) {
+  function openStepDialog(index, seed) {
     editing = index;
     const s = index == null ? null : Q.steps[index];
     const last = Q.steps[Q.steps.length - 1];
-    $("sd-title").textContent = s ? "Edit step" : "Add step";
+    $("sd-title").textContent = s ? "Edit step" : seed ? "Copy this step for other agents" : "Add step";
     $("sd-ok").textContent = s ? "Save changes" : "Add step";
     $("sd-msg").textContent = "";
     const agents = $("sd-agent");
@@ -393,16 +395,18 @@
     CONFIG.agents.forEach((a, i) => agents.append(h("option", { value: i, text: a.label })));
     fillSets("sd-set");
 
-    const src = s || {};
-    let agentIdx = s ? CONFIG.agents.findIndex((a) => a.id === s.agent_id && (a.action_space || "") === (s.action_space || "")) : -1;
+    const src = s || seed || {};
+    let agentIdx = (s || seed) ? CONFIG.agents.findIndex((a) => a.id === src.agent_id && (a.action_space || "") === (src.action_space || "")) : -1;
     if (agentIdx < 0) agentIdx = last ? Math.max(0, CONFIG.agents.findIndex((a) => a.id === last.agent_id && (a.action_space || "") === (last.action_space || ""))) : Number($("agent").value) || 0;
     agents.value = agentIdx;
-    $("sd-name").value = src.auto_name ? "" : (src.name || "");
+    $("sd-name").value = seed || src.auto_name ? "" : (src.name || "");
     $("sd-name").placeholder = "e.g. A4 · typed on the frozen 30";
     $("sd-model").value = src.model_id || (last && last.model_id) || $("model").value || (CONFIG.model_presets[0] || "");
     $("sd-judge").value = src.judge_model_id || (last && last.judge_model_id) || $("judge-model").value || (CONFIG.model_presets[0] || "");
     $("sd-label").value = src.config_label !== undefined ? src.config_label : "";
     renderSwitches(src.agent_switches || []);
+    D.variants = new Set();
+    renderVariants();
     $("sd-repeat").value = src.repeat_n || (last && last.repeat_n) || 1;
     $("sd-missing").checked = src.only_missing !== false;
     $("sd-build").checked = !!src.force_build;
@@ -450,15 +454,37 @@
     const set = currentSet();
     const setLabel = m ? `campaign ${m.name}` : set.id === "custom" ? "custom" : (set.name || set.label.replace(/\s*\(.*$/, "")) + (problems.length < set.problems.length ? `, ${problems.length} of ${set.problems.length}` : "");
     const typedName = $("sd-name").value.trim();
-    const step = {
-      step_id: editing != null ? Q.steps[editing].step_id : uid(),
-      name: typedName || `${a.label} · ${setLabel}`, auto_name: !typedName,
-      agent_id: a.id, agent_label: a.label, action_space: a.action_space || null,
-      model_id: model, judge_model_id: judge, config_label: $("sd-label").value.trim(),
-      agent_switches: a.id === "reliops_v2" ? pickedSwitches() : [],
+    const common = {
+      model_id: model, judge_model_id: judge,
       run_class: frozen ? "frozen" : "exploration", manifest_id: m ? m.manifest_id : null,
       problems, set_label: setLabel, repeat_n: repeat, purpose: frozen ? null : ($("sd-purpose").value || null),
-      only_missing: $("sd-missing").checked, force_build: $("sd-build").checked, record_walkthrough: $("sd-walk").checked,
+      only_missing: $("sd-missing").checked, record_walkthrough: $("sd-walk").checked,
+    };
+    const picked = !$("sd-variants-box").hidden ? (CONFIG.variant_presets || []).filter((v) => D.variants.has(v.id)) : [];
+    if (picked.length) {
+      const bad = picked.find((v) => !variantAgent(v));
+      if (bad) return fail(`The agent for ${bad.id} is not available in this Lab.`, "sd-variants-box");
+      picked.forEach((v, k) => {
+        const va = variantAgent(v);
+        Q.steps.push({
+          ...common, step_id: uid(), name: `${v.id} · ${setLabel}`, auto_name: false,
+          agent_id: va.id, agent_label: va.label, action_space: va.action_space || null,
+          config_label: v.id, agent_switches: v.switches.slice(),
+          force_build: $("sd-build").checked && k === 0,      // one rebuild for the whole batch, not one per step
+          enabled: true,
+        });
+      });
+      dlg.close();
+      markDirty(); renderAll();
+      return true;
+    }
+    const step = {
+      ...common, step_id: editing != null ? Q.steps[editing].step_id : uid(),
+      name: typedName || `${a.label} · ${setLabel}`, auto_name: !typedName,
+      agent_id: a.id, agent_label: a.label, action_space: a.action_space || null,
+      config_label: $("sd-label").value.trim(),
+      agent_switches: a.id === "reliops_v2" ? pickedSwitches() : [],
+      force_build: $("sd-build").checked,
       enabled: editing != null ? Q.steps[editing].enabled !== false : true,
     };
     if (editing != null) Q.steps[editing] = step; else Q.steps.push(step);
@@ -472,6 +498,39 @@
   $("sd-x").addEventListener("click", () => dlg.close());
   dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });   // click on the backdrop
   $("sd-agent").addEventListener("change", () => { lockFromManifest(); syncSwitchBox(); });
+
+  // Ready-made agent variants: tick several and each becomes its own step with the rest of the form shared.
+  const variantAgent = (v) => CONFIG.agents.find((a) => a.id === v.agent_id && (a.action_space || "") === (v.action_space || ""));
+  const variantRunnable = (v) => !!variantAgent(v) && !v.needs_notes;
+  function syncVariantBox() {
+    $("sd-variants-box").hidden = editing != null || isFrozen() || !(CONFIG.variant_presets || []).length;
+  }
+  function renderVariants() {
+    const box = $("sd-variants");
+    box.innerHTML = "";
+    let group = null;
+    (CONFIG.variant_presets || []).forEach((v) => {
+      if (v.group !== group) { group = v.group; box.append(h("div", { class: "variant-group", text: group })); }
+      const id = "var-" + v.id.replace(/[^A-Za-z0-9]/g, "_");
+      const cb = h("input", { type: "checkbox", id, checked: D.variants.has(v.id), onchange: (e) => {
+        if (e.target.checked) D.variants.add(v.id); else D.variants.delete(v.id);
+        updateVariantCount();
+      } });
+      const note = v.needs_notes ? " (waits for the reviewed Kubernetes notes; tick it once knowledge/k8s_notes.md exists)" : "";
+      box.append(h("label", { class: "variant-row", for: id, title: v.help }, cb, h("span", { class: "mono", text: v.id }), h("span", { class: "hint", text: " " + v.help + note })));
+    });
+    updateVariantCount();
+    syncVariantBox();
+  }
+  function updateVariantCount() {
+    const n = D.variants.size;
+    $("sd-var-count").textContent = n ? `${plural(n, "agent")} ticked: ${plural(n, "step")} will be added instead of the single agent above` : "";
+  }
+  $("sd-var-all").addEventListener("click", () => {
+    (CONFIG.variant_presets || []).forEach((v) => { if (variantRunnable(v)) D.variants.add(v.id); });
+    renderVariants();
+  });
+  $("sd-var-none").addEventListener("click", () => { D.variants.clear(); renderVariants(); });
 
   // ReliOps v2 switches: one checkbox each, shown only when the chosen agent is reliops_v2
   function renderSwitches(on) {
@@ -591,11 +650,40 @@
     renderTotals(); refreshPreview();
   });
 
+  // ---- pause / continue -----------------------------------------------------------------------
+  let qstate = null;
+  async function loadQueueState() {
+    try { qstate = (await jsonGet("/api/queue/state")).state; } catch (e) { qstate = null; }
+    renderPaused();
+  }
+  function renderPaused() {
+    const box = $("q-paused"), btn = $("q-continue");
+    const open = !!qstate && ["paused", "halted", "interrupted"].includes(qstate.status) && !jobBusy();
+    box.hidden = !open; btn.hidden = !open;
+    if (!open) return;
+    const where = qstate.step ? ` after step ${qstate.step}${qstate.step_name ? " (" + qstate.step_name + ")" : ""}` : "";
+    const left = qstate.left != null ? `${plural(qstate.left, "run")} left` : "";
+    const what = { paused: "Paused", halted: "Stopped by itself", interrupted: "Cut off" }[qstate.status];
+    const why = qstate.status === "halted" && qstate.reason ? `: ${qstate.reason}. Fix that first` : qstate.status === "interrupted" ? " (the Lab or the machine went down)" : "";
+    box.className = "q-paused" + (qstate.problem ? " problem" : "");
+    box.textContent = qstate.problem || `${what} "${qstate.queue_name}" · experiment "${qstate.experiment}"${where}${why}. ${left}. Continue keeps every finished run and runs only what is missing.`;
+    btn.disabled = !qstate.can_continue;
+  }
+  $("q-continue").addEventListener("click", () => {
+    if (!qstate || !qstate.can_continue) return;
+    $("q-log").textContent = ""; lastId = 0; lastRecorded = -1;
+    const p = new URLSearchParams();
+    if (who()) p.set("run_by", who());
+    qstate = null; renderPaused();
+    openStream("/api/queue/continue?" + p.toString());
+    setTimeout(pollState, 600);
+  });
+
   async function requestStop() {
     stopping = true;
-    ["q-stop", "job-stop"].forEach((id) => { $(id).disabled = true; $(id).textContent = "Stopping after this run…"; });
+    ["q-stop", "job-stop"].forEach((id) => { $(id).disabled = true; $(id).textContent = "Pausing after this run…"; });
     try { await fetch("/api/stop", { method: "POST" }); } catch (e) { /* server unreachable */ }
-    appendQ("\n[stop requested: the run in progress will finish and be recorded, then the queue stops]\n");
+    appendQ("\n[pause requested: the run in progress will finish and be recorded, then the queue pauses. Continue picks up from there]\n");
   }
   $("q-stop").addEventListener("click", requestStop);
   $("job-stop").addEventListener("click", requestStop);
@@ -644,10 +732,10 @@
       if (p.step && p.steps) bits.push(`step ${p.step}/${p.steps}`);
       if (job.run_elapsed_s != null) bits.push(fmtDur(job.run_elapsed_s));
       $("job-pill-text").textContent = bits.join(" · ");
-      if (!stopping) { $("job-stop").disabled = false; $("job-stop").textContent = "Stop after current"; }
+      if (!stopping) { $("job-stop").disabled = false; $("job-stop").textContent = "Pause after current"; }
     } else {
       stopping = false;
-      ["q-stop", "job-stop"].forEach((id) => { $(id).textContent = id === "q-stop" ? "Stop after current run" : "Stop after current"; });
+      ["q-stop", "job-stop"].forEach((id) => { $(id).textContent = id === "q-stop" ? "Pause after current run" : "Pause after current"; });
     }
     const now = $("q-now");
     now.hidden = !job;
@@ -664,7 +752,7 @@
         const pct = p.step_runs ? Math.min(100, (100 * (p.step_recorded || 0)) / p.step_runs) : 0;
         $("q-now-meter").style.width = pct + "%";
       } else {
-        const label = { done: "Finished", stopped: "Stopped", error: "Stopped by an error" }[job.state] || job.state;
+        const label = { done: "Finished", stopped: "Paused", error: "Stopped by an error" }[job.state] || job.state;
         const end = job.finished_at ? new Date(job.finished_at * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
         $("q-now-title").textContent = `${label}: ${job.name}`;
         $("q-now-sub").textContent = end ? `ended ${end}` : "";
@@ -672,6 +760,8 @@
         $("q-now-meter").style.width = job.state === "done" ? "100%" : "0%";
       }
     }
+    if (prev && prev.state === "running" && !running) loadQueueState();
+    else if (running && qstate) { qstate = null; renderPaused(); }
     // outcome-driven refresh: a run was recorded, or the job just ended
     const rec = job && job.progress ? job.progress.recorded || 0 : 0;
     if (rec !== lastRecorded || (prev && prev.state === "running" && !running)) {
@@ -684,7 +774,7 @@
       lastSig = sig;
     }
     renderTotals();
-    if (stopping && running) { $("q-stop").disabled = true; $("q-stop").textContent = "Stopping after this run…"; }
+    if (stopping && running) { $("q-stop").disabled = true; $("q-stop").textContent = "Pausing after this run…"; }
   }
 
   // live elapsed counter between polls
@@ -826,6 +916,7 @@
     const tab = (location.hash || "").slice(1);
     if (tab && document.getElementById("tab-" + tab)) showTab(tab);
     await pollState();
+    loadQueueState();
     for (;;) { await sleep(jobBusy() ? 3000 : 8000); await pollState(); }
   }
   init();

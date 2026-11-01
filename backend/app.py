@@ -28,6 +28,7 @@ import export
 import firebase_sync
 import jobs
 import queueplan
+import queuestate
 import runner
 import stats
 import pins
@@ -113,6 +114,7 @@ def config():
         "environments": [{"id": "sregym", "label": "SREGym (live Kubernetes faults)"}],
         "agents": runner.AGENTS,
         "agent_switches": [{"id": n, "help": runner.AGENT_SWITCH_HELP.get(n, "")} for n in runner.AGENT_SWITCHES],
+        "variant_presets": runner.VARIANT_PRESETS,
         "model_presets": runner.MODEL_PRESETS,
         "problem_sets": _with_pins(_all_problem_sets()),
         "pins": [{k: v for k, v in p.items() if k != "problems"} for p in pins.load()],
@@ -741,7 +743,32 @@ def queue_preview_draft(body: QueueIn):
     return queueplan.preview(q, runs, store.read("manifests"), body.experiment)
 
 
+def _runs_left(queue: dict, label: str) -> int:
+    """Cells the queue still has to run under this experiment label (enabled steps only)."""
+    manifests = store.read("manifests")
+    _, runs = _collect_runs(5000)
+    n = 0
+    for step in queue["steps"]:
+        if not step.get("enabled", True):
+            continue
+        manifest = next((m for m in manifests if m.get("manifest_id") == step.get("manifest_id")), None) if step.get("manifest_id") else None
+        if step.get("manifest_id") and manifest is None:
+            continue
+        n += len(queueplan.todo(step, runs, manifest, label))
+    return n
+
+
 def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: bool = False):
+    """Runs the queue and remembers how it ended (queuestate), so the Continue button can pick up from there."""
+    queuestate.begin(queue, experiment, run_by)
+    outcome: dict = {"status": "interrupted"}
+    try:
+        yield from _queue_steps(queue, run_by, experiment, restart, outcome)
+    finally:
+        queuestate.end(**outcome)
+
+
+def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: bool, outcome: dict):
     steps = queue["steps"]
     manifests = store.read("manifests")
     runner._stop_event.clear()
@@ -749,9 +776,17 @@ def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: b
     label = queueplan.experiment_label(experiment, all_runs, restart=restart)
     yield f"##### [QUEUE] {queue['name']}: {len(steps)} step(s) #####\n"
     yield f"##### [QUEUE] experiment: {label}{' (restarted from scratch)' if restart else ''} #####\n"
+
+    def paused(i: int, step_name: str):
+        left = _runs_left(queue, label)
+        outcome.update(status="paused" if left else "finished", step=i, step_name=step_name, left=left)
+        return (f"\n##### [QUEUE] paused after the current run, in step {i}/{len(steps)} ({step_name}); {left} run(s) left under \"{label}\". "
+                "Every finished run is recorded. Press Continue to carry on from here. #####\n") if left else \
+               "\n##### [QUEUE] finished #####\n"
+
     for i, step in enumerate(steps, start=1):
         if runner._stop_event.is_set():
-            yield f"\n##### [QUEUE] stopped before step {i}/{len(steps)}; the rest was not started #####\n"
+            yield paused(i, step["name"])
             return
         if not step.get("enabled", True):
             yield f"##### [QUEUE] step {i}/{len(steps)} skipped (switched off): {step['name']} #####\n"
@@ -767,6 +802,9 @@ def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: b
         if not cell_list:
             yield f"##### [QUEUE] step {i}/{len(steps)} nothing to do: every cell already has a result #####\n"
             continue
+        if runner._stop_event.is_set():      # Pause pressed while the step was being prepared
+            yield paused(i, step["name"])
+            return
         yield from _run_lines(
             agent=step["agent_id"], model=step["model_id"], judge_model=step["judge_model_id"],
             problems=step["problems"], action_space=step.get("action_space"), force_build=bool(step.get("force_build")),
@@ -780,10 +818,46 @@ def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: b
         if halted:
             # The step stopped itself because the setup looks broken; the later steps would hit the same thing.
             left = len(steps) - i
+            outcome.update(status="halted", step=i, step_name=step["name"], reason=halted, left=_runs_left(queue, label))
             yield (f"\n##### [QUEUE] stopped after step {i}/{len(steps)} ({halted}); {left} later step(s) were not started. "
-                   "Fix the cause, then run the queue again: finished runs are kept and only missing cells run. #####\n")
+                   "Fix the cause, then press Continue: finished runs are kept and only missing cells run. #####\n")
             return
+        if runner._stop_event.is_set():
+            yield paused(i, step["name"])
+            return
+    outcome.update(status="finished", left=0)
     yield "\n##### [QUEUE] finished #####\n"
+
+
+@app.get("/api/queue/state")
+def queue_state():
+    """Where the queue stands for the Continue button: paused, stopped by itself, cut off, or nothing to continue."""
+    st = queuestate.describe(jobs.busy())
+    if st and st.get("status") in queuestate.RESUMABLE:
+        q = _find_queue(st["queue_id"])
+        if q is None:
+            return {"state": {**st, "can_continue": False, "problem": "The queue was deleted, so it cannot be continued."}}
+        try:
+            st["left"] = _runs_left(q, queueplan.experiment_label(st["experiment"], _collect_runs(5000)[1]))
+        except Exception:  # noqa: BLE001 - the stored count is still shown
+            pass
+        if st["left"] == 0:
+            st["can_continue"] = False
+    return {"state": st}
+
+
+@app.get("/api/queue/continue")
+def queue_continue(run_by: Optional[str] = None):
+    """Carries on the queue that was paused, stopped by itself or cut off: same queue, same experiment name, finished runs kept."""
+    st = queuestate.describe(jobs.busy())
+    if not st or st["status"] not in queuestate.RESUMABLE:
+        return _refusal(["Nothing to continue: the last queue finished, or none has run on this machine.\n"])
+    q = _find_queue(st["queue_id"])
+    if q is None:
+        return _refusal(["The queue that was running has been deleted, so it cannot be continued.\n"])
+    exp = st["experiment"]
+    return _job_sse(lambda: _queue_lines(q, run_by or st.get("run_by") or None, exp, False), "queue", q["name"],
+                    {"queue_id": q["queue_id"], "experiment": exp})
 
 
 @app.get("/api/queue/run")
