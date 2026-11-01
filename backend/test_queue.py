@@ -296,7 +296,7 @@ class QueueApiTests(TmpRepoCase):
                 time.sleep(0.01)
         self.assertEqual(started, ["one"])
         self.assertEqual(job.state, "stopped")
-        self.assertIn("stopped before step 2/2", "".join(job.read(0, wait=0.1)[0]))
+        self.assertIn("paused after the current run, in step 1/2", "".join(job.read(0, wait=0.1)[0]))
         # re-attach: the last lines and then DONE
         r = c.get("/api/job/stream", params={"offset": -3})
         self.assertIn("[[DONE]]", r.text)
