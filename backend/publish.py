@@ -146,10 +146,47 @@ def _git(args: list[str], cwd: Path, timeout: int = 120) -> subprocess.Completed
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
 
 
+_DAMAGE = re.compile(r"corrupt|is empty|loose object|bad object|invalid object|unable to read|bad tree|broken|not a git repository|"
+                     r"index file (?:smaller|corrupt)|fatal: bad", re.I)
+_DATA_FILES = {"snapshot.json", "live.json", "snapshot.json.tmp", "live.json.tmp"}
+
+
+def _only_published_files(out_dir: Path) -> bool:
+    """True when `out_dir` holds nothing but what this module writes (plus its own `.git`). The repair below deletes
+    `.git`, so it is only done in a folder that cannot be someone's real repository."""
+    try:
+        site = {f.name for f in SITE_SRC.iterdir() if f.is_file()} if SITE_SRC.is_dir() else set()
+        for p in out_dir.iterdir():
+            if p.name == ".git" or p.name in site:
+                continue
+            if p.name == "data" and p.is_dir() and all(q.name in _DATA_FILES for q in p.iterdir()):
+                continue
+            return False
+        return True
+    except OSError:
+        return False
+
+
 def push(out_dir: Path, remote: str, branch: str) -> tuple[bool, str]:
     """Replaces the single commit on `branch` with the current contents of `out_dir`. `out_dir` is its own git
-    repository, separate from the Lab's, and holds only the published files."""
+    repository, separate from the Lab's, and holds only the published files.
+
+    If git reports a damaged local repository (an object file left empty by a hard stop, say), the local `.git` is
+    thrown away and recreated once. That loses nothing: the branch holds a single commit that is replaced on every push.
+    On success after a repair the message says so."""
     out_dir = Path(out_dir)
+    ok, msg = _push_once(out_dir, remote, branch)
+    if not ok and _DAMAGE.search(msg or "") and (out_dir / ".git").exists() and _only_published_files(out_dir):
+        try:
+            shutil.rmtree(out_dir / ".git")
+        except OSError as e:
+            return False, f"{msg} (repair failed: {e})"[:300]
+        ok, msg2 = _push_once(out_dir, remote, branch)
+        return (True, "repaired the local publishing repository (it was damaged) and pushed again") if ok else (False, msg2)
+    return ok, msg
+
+
+def _push_once(out_dir: Path, remote: str, branch: str) -> tuple[bool, str]:
     try:
         if not (out_dir / ".git").exists():
             _git(["init", "-q", "-b", branch], out_dir)
@@ -182,6 +219,7 @@ class Publisher:
         self.every_s, self.poll_s = every_s, poll_s
         self.last_push = 0.0
         self.last_error = ""
+        self.last_note = ""
         self.last_pushed_at: float | None = None
         self._sig = None
         self._dirty = False
@@ -211,6 +249,7 @@ class Publisher:
             ok, err = push(self.out_dir, self.remote, self.branch)
             self.last_push = now
             self.last_error = "" if ok else err
+            self.last_note = err if ok else ""
             if ok:
                 self._dirty = False
                 self.last_pushed_at = now
@@ -225,4 +264,5 @@ class Publisher:
 
     def describe(self) -> dict:
         return {"out_dir": str(self.out_dir), "remote": bool(self.remote), "branch": self.branch,
-                "every_s": self.every_s, "last_pushed_at": self.last_pushed_at, "last_error": self.last_error}
+                "every_s": self.every_s, "last_pushed_at": self.last_pushed_at, "last_error": self.last_error,
+                "last_note": self.last_note}

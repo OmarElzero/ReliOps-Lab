@@ -118,3 +118,46 @@ class SyncNoticeTests(unittest.TestCase):
         self.assertFalse(snap["sync"]["live"])
         self.assertNotIn("/home/omar", json.dumps(snap))
         self.assertNotIn("secret", snap["sync"])
+
+
+class RepairTests(unittest.TestCase):
+    """A hard stop can leave an empty object file in the local publishing repository; every later push then fails."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.remote = self.tmp / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)], check=True)
+        self.runs = [run(1)]
+        self.live = {"status": "idle", "step": None, "problem": None, "repeat": None, "runs_left": None, "generated_at": 1.0}
+        self.pub = publish.Publisher(lambda: ("local", self.runs), lambda: dict(self.live), self.tmp / "site",
+                                     remote=str(self.remote), branch="results-data", every_s=60)
+        self.pub.tick(now=1000)
+        self.assertEqual(self.pub.last_error, "")
+
+    def damage_head_object(self):
+        site = self.tmp / "site"
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=site, capture_output=True, text=True).stdout.strip()
+        obj = site / ".git" / "objects" / sha[:2] / sha[2:]
+        obj.chmod(0o644)
+        obj.write_bytes(b"")                       # what a crash mid-write leaves behind
+
+    def test_a_damaged_local_repository_is_recreated_and_the_push_goes_through(self):
+        self.damage_head_object()
+        self.runs.append(run(2))
+        self.pub.tick(now=1100)
+        self.assertEqual(self.pub.last_error, "")
+        self.assertIn("repaired", self.pub.last_note)
+        self.assertFalse(self.pub._dirty)
+        count = subprocess.run(["git", "--git-dir", str(self.remote), "rev-list", "--count", "results-data"], capture_output=True, text=True)
+        self.assertEqual(count.stdout.strip(), "1")
+        shot = subprocess.run(["git", "--git-dir", str(self.remote), "show", "results-data:data/snapshot.json"], capture_output=True, text=True).stdout
+        self.assertEqual(json.loads(shot)["n_runs"], 2)
+
+    def test_a_folder_holding_other_files_is_never_wiped(self):
+        (self.tmp / "site" / "my-notes.txt").write_text("not ours")
+        self.damage_head_object()
+        self.runs.append(run(2))
+        self.pub.tick(now=1100)
+        self.assertNotEqual(self.pub.last_error, "")
+        self.assertTrue((self.tmp / "site" / ".git").exists())
+        self.assertEqual((self.tmp / "site" / "my-notes.txt").read_text(), "not ours")

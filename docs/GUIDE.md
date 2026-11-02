@@ -112,7 +112,10 @@ A static page that shows the experiment results and the queue's progress to peop
   The Lab then writes the files to `results/site/` whenever a run is recorded or the queue changes state, and pushes them
   (one replaced commit on `gh-pages`, using the git credentials already on the machine) at most every
   `RELIOPS_PUBLISH_EVERY_S` seconds (default 60). The elapsed time of the current run
-  ticks in the browser between updates. `GET /api/publish/status` shows the last push and any error.
+  ticks in the browser between updates. `GET /api/publish/status` shows the last push, any error, and a note when the Lab had to
+  repair itself. If the page goes stale, open that address first: `last_error` says why. A damaged local publishing repository (an empty
+  object file after a hard stop) is recreated automatically; by hand, delete `results/site/.git` inside the Lab's ReliOps folder and the
+  next push rebuilds it. Nothing is lost, because the data branch holds one commit that every push replaces.
 - **Hosting it on Vercel (phone-friendly, free):** the page is static and is deployed once; only the two data files change. The Lab
   publishes them to the `results-data` branch of this repository (the default branch name), and `site/config.js` tells the page
   to read them from `raw.githubusercontent.com`. In `.env`:
