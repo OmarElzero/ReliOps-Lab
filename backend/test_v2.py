@@ -1445,3 +1445,21 @@ class AgentSwitchTests(unittest.TestCase):
         self.assertEqual(got["total_tokens"], 10)
         self.assertEqual(kept["total_tokens"], 50)      # a stored value is never overwritten
         self.assertEqual(none["total_tokens"], 0)
+
+
+class ContinueSavesEditsTests(unittest.TestCase):
+    """Continue must run what is on screen, not the last saved copy (a force-build ticked after the last save was ignored)."""
+
+    def test_the_continue_button_saves_pending_edits_before_it_starts(self):
+        from pathlib import Path
+        js = (Path(__file__).resolve().parent.parent / "frontend" / "queue.js").read_text(encoding="utf-8")
+        start = js.index('$("q-continue").addEventListener("click"')
+        handler = js[start:js.index("async function requestStop", start)]
+        self.assertIn("saveQueue(true)", handler)
+        self.assertLess(handler.index("saveQueue(true)"), handler.index("/api/queue/continue"))
+
+    def test_a_rebuild_does_not_also_warn_about_an_old_image(self):
+        from unittest import mock
+        r = __import__("runner")
+        with mock.patch.object(r.subprocess, "run", side_effect=AssertionError("image inspected")):
+            self.assertEqual([w for w in r.preflight_warnings({}, "gemini/x", "reliops_v2", rebuilding=True) if "older" in w], [])

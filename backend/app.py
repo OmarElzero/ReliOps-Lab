@@ -807,6 +807,7 @@ def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: b
         if runner._stop_event.is_set():      # Pause pressed while the step was being prepared
             yield paused(i, step["name"])
             return
+        yield f"[step] agent image: {'force-build on the first run' if step.get('force_build') else 'use the existing image (force-build is off for this step)'}\n"
         yield from _run_lines(
             agent=step["agent_id"], model=step["model_id"], judge_model=step["judge_model_id"],
             problems=step["problems"], action_space=step.get("action_space"), force_build=bool(step.get("force_build")),

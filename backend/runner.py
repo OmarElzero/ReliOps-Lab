@@ -422,7 +422,8 @@ def key_looks_garbled(value: str) -> bool:
     return bool(value) and bool(re.search(r"""[\s"'#]""", value))
 
 
-def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops: Path | None = None) -> list[str]:
+def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops: Path | None = None,
+                       rebuilding: bool = False) -> list[str]:
     """Cheap checks before a campaign starts. Warnings only, never a block."""
     out: list[str] = []
     base = (env_vars.get("AGENT_API_BASE") or "").strip()
@@ -443,7 +444,7 @@ def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops
     try:
         pkg = "react_v2" if agent == "reliops_v2" else "react_v1"
         driver = (reliops or reliops_dir()) / "agent" / pkg / "driver.py"
-        if agent in OUR_AGENTS and driver.exists() and shutil.which("docker"):
+        if agent in OUR_AGENTS and not rebuilding and driver.exists() and shutil.which("docker"):
             r = subprocess.run(["docker", "image", "inspect", "-f", "{{.Created}}", "sregym-agent-base:latest"],
                                capture_output=True, text=True, timeout=10)
             if r.returncode == 0 and r.stdout.strip():
@@ -1531,7 +1532,7 @@ def stream_campaign(
         base_env.setdefault(k, v)
 
     pool = key_pool(base_env)
-    for w in preflight_warnings(base_env, model, agent):
+    for w in preflight_warnings(base_env, model, agent, rebuilding=bool(force_build)):
         yield w + "\n"
     setup_problem = agent_setup_problem(agent)
     if setup_problem:

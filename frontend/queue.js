@@ -669,8 +669,11 @@
     box.textContent = qstate.problem || `${what} "${qstate.queue_name}" · experiment "${qstate.experiment}"${where}${why}. ${left}. Continue keeps every finished run and runs only what is missing.`;
     btn.disabled = !qstate.can_continue;
   }
-  $("q-continue").addEventListener("click", () => {
+  $("q-continue").addEventListener("click", async () => {
     if (!qstate || !qstate.can_continue) return;
+    // Continue runs the queue as stored on the server, so edits made since the last save (a ticked force-build, a changed
+    // step) are saved first, exactly as Run queue does. Without this they were silently ignored.
+    if (dirty && !(await saveQueue(true))) return;
     $("q-log").textContent = ""; lastId = 0; lastRecorded = -1;
     const p = new URLSearchParams();
     if (who()) p.set("run_by", who());
