@@ -16,6 +16,8 @@ import shlex
 import shutil
 import subprocess
 import re
+import socket
+import ssl
 import sys
 import threading
 import time
@@ -304,6 +306,11 @@ _API_BASE_RE = re.compile(r"agent_api_base:\s*(\S+?),")
 # Python's "No module named 'clients.x'" when the agent image was built without our code.
 _AGENT_UNKNOWN_RE = re.compile(r"Agent '([\w.-]+)' not found in registry")
 _AGENT_NOMODULE_RE = re.compile(r"No module named ['\"]?(clients\.[\w.]+)")
+# The machine's own internet failed: DNS for a public host (Helm downloads its charts from github.com on every deploy, and the
+# WSL resolver sometimes times out), or a dropped TLS connection to the model API.
+_NETWORK_RE = re.compile(
+    r"lookup\s+(?:[\w-]+\.)+(?:com|io|org|net|dev|app)\s+on\s+[\d.:a-f]+:\s*(?:read\s+udp[^\n]*?)?(?:i/o timeout|no such host|server misbehaving)"
+    r"|Temporary failure in name resolution|UNEXPECTED_EOF_WHILE_READING|GeminiException\s*-\s*\[SSL", re.I)
 _AGENT_EXIT_RE = re.compile(r"Agent process exited with return code (-?\d+)")
 _LAST_ERROR_RE = re.compile(r"^.*?\b((?:[\w.]+\.)?\w*(?:Error|Exception)\b[^\n]*)$", re.M)
 _DEPLOY_FAILED_RE = re.compile(r"start_problem failed|deploy attempts? failed", re.I)
@@ -330,6 +337,10 @@ def classify_incomplete(log_text: str) -> tuple[str, str]:
     if nomodule:
         return "agent", (f"The agent image has no code for {nomodule.group(1).split('.')[1]} ({nomodule.group(1)} is missing). "
                          "In the ReliOps folder run: bash scripts/sync_agent.sh, then tick 'Force-build the agent image' for the next run")
+    if _NETWORK_RE.search(text) and not _CLEANUP_RE.search(text) and not classify_key_problem(text):
+        what = ("DNS lookup of a public host timed out (Helm could not download its charts)" if re.search(r"lookup\s+\S+\s+on\s+", text)
+                else "the connection to the model service dropped")
+        return "network", f"The internet connection of this machine failed: {what}. The Lab waits for it to come back before the next run."
     if _DEPLOY_FAILED_RE.search(text) or _CLEANUP_RE.search(text):
         parts = []
         nodes = sorted({n for n in _NODE_TIMEOUT_RE.findall(text) if n != "nodes"})
@@ -371,6 +382,43 @@ def classify_incomplete(log_text: str) -> tuple[str, str]:
         head = f"The agent process exited with return code {exited[-1]}" if exited else "The run ended without a result"
         return "other", head + (f". Last error in the log: {last}" if last else "") + " (see the log)."
     return "other", "The run ended without a result (see the log)."
+
+
+def network_problems(hosts: list[str], timeout: float = 6.0) -> list[str]:
+    """Hosts this machine cannot reach right now, as ["github.com (name lookup failed: ...)"]. A run needs github.com (Helm
+    charts) and the model API; starting a 5 to 8 minute deploy while either is unreachable only produces an empty run."""
+    bad = []
+    for host in hosts:
+        try:
+            ip = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)[0][4][0]
+        except OSError as e:
+            bad.append(f"{host} (name lookup failed: {e})")
+            continue
+        try:
+            with socket.create_connection((ip, 443), timeout=timeout) as raw:
+                with ssl.create_default_context().wrap_socket(raw, server_hostname=host):
+                    pass
+        except (OSError, ssl.SSLError) as e:
+            bad.append(f"{host} (connection failed: {type(e).__name__}: {str(e)[:80]})")
+    return bad
+
+
+def network_hosts(env_vars: dict[str, str], model: str) -> list[str]:
+    hosts = ["github.com"]
+    base = (env_vars.get("AGENT_API_BASE") or "").strip()
+    if base:
+        hosts.append(re.sub(r"^https?://", "", base).split("/")[0].split(":")[0])
+    elif model.startswith("gemini/"):
+        hosts.append("generativelanguage.googleapis.com")
+    return hosts
+
+
+def max_network_wait_min(env_vars: dict[str, str]) -> float:
+    """How long a run waits for the internet to come back before the queue stops (RELIOPS_NET_WAIT_MIN, default 30; 0 = do not check)."""
+    try:
+        return max(0.0, float(env_vars.get("RELIOPS_NET_WAIT_MIN") or os.environ.get("RELIOPS_NET_WAIT_MIN") or 30))
+    except ValueError:
+        return 30.0
 
 
 def agent_setup_problem(agent: str) -> str | None:
@@ -1551,8 +1599,29 @@ def stream_campaign(
     runs = list(cells) if cells else [(problem, rep) for problem in problems for rep in range(1, repeat_n + 1)]
     total_runs = len(runs)
     commit = _git_commit_safe()
+    net_wait_min = max_network_wait_min(base_env)
+    net_hosts = network_hosts(base_env, model)
     for i, (problem, rep) in enumerate(runs, start=1):
         repeat_note = f" repeat={rep}/{repeat_n}" if repeat_n > 1 else ""
+        if net_wait_min:
+            down = network_problems(net_hosts)
+            waited = 0.0
+            while down and waited < net_wait_min * 60 and not _stop_event.is_set():
+                yield (f"[network] cannot reach {'; '.join(down)}. Waiting for the connection before starting "
+                       f"{problem}{repeat_note} (checked again every 30 s, up to {net_wait_min:g} min).\n")
+                for _ in range(6):
+                    if _stop_event.is_set():
+                        break
+                    time.sleep(5)
+                waited += 30
+                down = network_problems(net_hosts)
+            if down and not _stop_event.is_set():
+                yield (f"\n[stopped: the internet connection of this machine has been down for {net_wait_min:g} minutes ({'; '.join(down)}). "
+                       "Check the connection (in WSL: nslookup github.com), then press Continue; finished runs are kept.]\n")
+                _halt("the internet connection is down")
+                return
+            if waited:
+                yield f"[network] connection is back after about {int(waited)} s. Starting {problem}{repeat_note}.\n"
         key_slot = None
         key_var, key_owner = ("GEMINI_API_KEY", "you") if base_env.get("GEMINI_API_KEY") else (None, None)
         picked = None
@@ -1683,7 +1752,7 @@ def stream_campaign(
         yield f"----- recorded result for {problem}: {found_note}{repeat_suffix} -----\n"
 
         cell = (problem, rep)
-        if (incomplete_kind in ("key", "model") and retries.get(cell, 0) < retry_limit and not _stop_event.is_set()
+        if (incomplete_kind in ("key", "model", "network") and retries.get(cell, 0) < retry_limit and not _stop_event.is_set()
                 and (incomplete_kind != "key" or len(pool) >= 2)):  # a single bad key would only fail again
             retries[cell] = retries.get(cell, 0) + 1
             runs.insert(i, cell)  # the very next run, with the next key when the pool has one

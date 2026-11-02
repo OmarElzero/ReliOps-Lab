@@ -411,6 +411,7 @@ class SetupGuardTests(unittest.TestCase):
         with mock.patch.object(r, "sregym_dir", return_value=tmp), \
              mock.patch.object(r, "merged_env_vars", return_value=env or {}), \
              mock.patch.object(r, "preflight_warnings", return_value=[]), \
+             mock.patch.object(r, "network_problems", return_value=[]), \
              mock.patch.object(r, "cluster_node_problems", return_value=nodes), \
              mock.patch.object(r, "_stream", side_effect=lambda *a, **k: iter(list(stream))), \
              mock.patch.object(r, "_latest_result_row", side_effect=lambda *a, **k: rows.pop(0)), \
@@ -616,6 +617,7 @@ class SetupGuardTests(unittest.TestCase):
         with mock.patch.object(self.r, "agent_setup_problem", return_value="no entry for reliops_v2"), \
              mock.patch.object(self.r, "sregym_dir", return_value=clone), \
              mock.patch.object(self.r, "merged_env_vars", return_value={}), \
+             mock.patch.object(self.r, "network_problems", return_value=[]), \
              mock.patch.object(self.r, "preflight_warnings", return_value=[]):
             out = "".join(self.r.stream_campaign(agent="reliops_v2", action_space="typed", model="gemini/x", judge_model="gemini/x",
                                                  problems=["p1"], repeat_n=1, force_build=False, on_result=lambda r: self.fail("ran")))
@@ -1382,6 +1384,7 @@ class AgentSwitchTests(unittest.TestCase):
         with mock.patch.object(r, "sregym_dir", return_value=tmp), \
              mock.patch.object(r, "merged_env_vars", return_value=env or {}), \
              mock.patch.object(r, "preflight_warnings", return_value=[]), \
+             mock.patch.object(r, "network_problems", return_value=[]), \
              mock.patch.object(r, "cluster_node_problems", return_value=None), \
              mock.patch.object(r, "_stream", side_effect=fake_stream), \
              mock.patch.object(r, "_latest_result_row", return_value={"Diagnosis.success": True, "Mitigation.success": True}), \
@@ -1463,3 +1466,80 @@ class ContinueSavesEditsTests(unittest.TestCase):
         r = __import__("runner")
         with mock.patch.object(r.subprocess, "run", side_effect=AssertionError("image inspected")):
             self.assertEqual([w for w in r.preflight_warnings({}, "gemini/x", "reliops_v2", rebuilding=True) if "older" in w], [])
+
+
+HELM_DNS_LOG = (
+    "Helm install failed for release 'promtail' in namespace 'observe'. Chart: grafana/promtail. Error output:\n"
+    'Error: INSTALLATION FAILED: Get "https://github.com/grafana/helm-charts/releases/download/promtail-6.17.1/promtail-6.17.1.tgz": '
+    "dial tcp: lookup github.com on 10.255.255.254:53: read udp 10.255.255.254:35260->10.255.255.254:53: i/o timeout\n"
+    "start_problem failed for 'p' (deploy attempt 1/3)\n")
+SSL_LOG = ("llm_backend.get_llm_backend - OpenAI API error occurred: litellm.APIConnectionError: GeminiException - "
+           "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1010). Retrying in 1 seconds... (Attempt 1/5)\n"
+           "RuntimeError: Max retries exceeded. Unable to reach the judge model\nJudge pre-flight check failed\n")
+
+
+class NetworkTests(unittest.TestCase):
+    def setUp(self):
+        self.r = __import__("runner")
+
+    def test_a_dns_timeout_or_dropped_tls_connection_is_named_as_the_internet(self):
+        for log in (HELM_DNS_LOG, SSL_LOG):
+            kind, why = self.r.classify_incomplete(log)
+            self.assertEqual(kind, "network", log[:60])
+            self.assertIn("internet connection", why)
+
+    def test_a_rejected_key_or_a_cluster_dns_lookup_is_not_read_as_the_internet(self):
+        self.assertEqual(self.r.classify_incomplete("litellm.AuthenticationError: API key not valid\nMax retries exceeded. Unable to x")[0], "key")
+        self.assertNotEqual(self.r.classify_incomplete("dial tcp: lookup mongodb-rate on 10.96.0.10:53: i/o timeout\nstart_problem failed (deploy attempt 1/1)\n")[0], "network")
+
+    def test_the_reachability_check_names_the_host_and_the_reason(self):
+        from unittest import mock
+        with mock.patch.object(self.r.socket, "getaddrinfo", side_effect=OSError("timed out")):
+            bad = self.r.network_problems(["github.com"])
+        self.assertEqual(len(bad), 1)
+        self.assertIn("github.com (name lookup failed", bad[0])
+
+    def test_hosts_follow_the_model_and_any_gateway(self):
+        self.assertEqual(self.r.network_hosts({}, "gemini/x"), ["github.com", "generativelanguage.googleapis.com"])
+        self.assertEqual(self.r.network_hosts({"AGENT_API_BASE": "https://gw.example.com:8443/v1"}, "gemini/x"), ["github.com", "gw.example.com"])
+        self.assertEqual(self.r.max_network_wait_min({"RELIOPS_NET_WAIT_MIN": "0"}), 0.0)
+        self.assertEqual(self.r.max_network_wait_min({}), 30.0)
+
+    def _campaign(self, down_for):
+        """Runs one problem while the network is down for the first `down_for` checks."""
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        r = self.r
+        calls = {"n": 0}
+
+        def check(hosts, timeout=6.0):
+            calls["n"] += 1
+            return ["github.com (name lookup failed: timed out)"] if calls["n"] <= down_for else []
+
+        records = []
+        tmp = Path(tempfile.mkdtemp())
+        with mock.patch.object(r, "sregym_dir", return_value=tmp), mock.patch.object(r, "merged_env_vars", return_value={"RELIOPS_NET_WAIT_MIN": "1"}), \
+             mock.patch.object(r, "preflight_warnings", return_value=[]), mock.patch.object(r, "network_problems", side_effect=check), \
+             mock.patch.object(r, "cluster_node_problems", return_value=None), mock.patch.object(r.time, "sleep"), \
+             mock.patch.object(r, "_stream", side_effect=lambda *a, **k: iter(["line\n"])), \
+             mock.patch.object(r, "_latest_result_row", return_value={"Diagnosis.success": True, "Mitigation.success": True}), \
+             mock.patch.object(r, "_find_transcript", return_value=None), mock.patch.object(r, "_start_recorder", return_value=None), \
+             mock.patch.object(r, "_stop_recorder"), mock.patch.object(r, "_git_commit_safe", return_value="abc"), \
+             mock.patch.object(r, "_problem_log_path", side_effect=lambda p, rep, n: tmp / f"{p}-{rep}.log"):
+            self.addCleanup(r._halt, None)
+            log = "".join(r.stream_campaign(agent="reliops_v1", action_space="typed", model="gemini/x", judge_model="gemini/x",
+                                            problems=["p1"], repeat_n=1, force_build=False, on_result=records.append))
+        return log, records
+
+    def test_a_short_outage_is_waited_out_and_the_run_then_starts(self):
+        log, records = self._campaign(down_for=2)
+        self.assertIn("[network] cannot reach github.com", log)
+        self.assertIn("connection is back", log)
+        self.assertEqual(len(records), 1)
+
+    def test_a_long_outage_stops_the_queue_before_any_run_is_wasted(self):
+        log, records = self._campaign(down_for=999)
+        self.assertEqual(records, [])
+        self.assertIn("has been down for 1 minutes", log)
+        self.assertIn("internet connection is down", self.r.halt_reason())
