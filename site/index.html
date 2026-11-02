@@ -174,11 +174,26 @@ footer{color:var(--muted);font-size:12px}
   function get(name){
     return fetch(BASE + name + "?t=" + Date.now(), {cache:"no-store"}).then(function(r){ if (!r.ok) throw new Error(name+" "+r.status); return r.json(); });
   }
+  // Requests: the small live file every 20 s while the tab is visible; the big results file only when the live file shows that the
+  // Lab published something new (both are written together), plus a 5-minute safety refresh. Paging and filters never fetch.
+  var snapFetchedAt = 0, snapRetries = 0;
   function loadLive(){
-    return get("live.json").then(function(d){ live = d; liveAt = Date.now(); renderLive(); }).catch(function(){ renderLive(true); });
+    return get("live.json").then(function(d){
+      var changed = !!live && d.generated_at !== live.generated_at;
+      live = d; liveAt = Date.now(); renderLive();
+      if (changed) snapRetries = 0;
+      var age = Date.now() - snapFetchedAt;
+      if (snap ? (changed || age > 300000) : age > 60000) loadSnap();
+    }).catch(function(){ renderLive(true); });
   }
   function loadSnap(){
-    return get("snapshot.json").then(function(d){ snap = d; buildFilters(); renderAll(); }).catch(function(e){
+    snapFetchedAt = Date.now();
+    return get("snapshot.json").then(function(d){
+      snap = d; buildFilters(); renderAll();
+      // The two files are cached separately by the host. If the results file is older than the live file, look again shortly (at most 3 times).
+      var t = Date.parse(d.generated_at);
+      if (live && live.generated_at && isFinite(t) && t/1000 < live.generated_at - 5 && snapRetries < 3){ snapRetries++; setTimeout(loadSnap, 15000); }
+    }).catch(function(e){
       var n = $("notice"); n.hidden = false; n.className = "notice err"; n.textContent = "Could not load the results data. It may not have been published yet.";
     });
   }
@@ -378,10 +393,10 @@ footer{color:var(--muted);font-size:12px}
   $("f-exp").addEventListener("change", filterChanged);
   $("f-purpose").addEventListener("change", filterChanged);
   $("f-by").addEventListener("change", filterChanged);
-  setInterval(function(){ renderLive(); }, 1000);
-  setInterval(loadLive, 20000);
-  setInterval(loadSnap, 60000);
-  loadLive(); loadSnap();
+  setInterval(function(){ if (!document.hidden) renderLive(); }, 1000);
+  setInterval(function(){ if (!document.hidden) loadLive(); }, 20000);
+  document.addEventListener("visibilitychange", function(){ if (!document.hidden) loadLive(); });   // catch up when the tab comes back
+  loadSnap(); loadLive();
 })();
 </script>
 </body>
