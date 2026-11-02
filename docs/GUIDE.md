@@ -117,16 +117,18 @@ A static page that shows the experiment results and the queue's progress to peop
   object file after a hard stop) is recreated automatically; by hand, delete `results/site/.git` inside the Lab's ReliOps folder and the
   next push rebuilds it. Nothing is lost, because the data branch holds one commit that every push replaces.
 - **Hosting it on Vercel (phone-friendly, free):** the page is static and is deployed once; only the two data files change. The Lab
-  publishes them to the `results-data` branch of this repository (the default branch name), and `site/config.js` tells the page
-  to read them from `raw.githubusercontent.com`. In `.env`:
+  publishes them to the `results-data` branch of a **separate, public repository** (`ReliOps-Lab-data`), and `site/config.js` tells the
+  page to read them from `raw.githubusercontent.com`. The data must not live in the repository Vercel builds: Vercel treats every branch
+  push as a deployment, the data changes about every minute, and the Hobby plan allows 100 deployments a day (a data branch in this
+  repository produced a failed preview for every data push). Create `ReliOps-Lab-data`
+  empty and public (raw links do not work for a private repository), then in the Lab's `.env`:
 
       RELIOPS_PUBLISH=on
-      RELIOPS_PUBLISH_GIT=https://github.com/OmarElzero/ReliOps-Lab.git
+      RELIOPS_PUBLISH_GIT=https://github.com/OmarElzero/ReliOps-Lab-data.git
 
-  In Vercel: Add New Project, import this repository, set Root Directory to `site`, Framework Preset `Other`, Deploy. `site/vercel.json`
-  turns off deployments for the `results-data` branch, because Vercel's Hobby plan allows 100 deployments a day and the Lab updates
-  the data about every minute. The Lab must be running for the page to update; when it is not, the page keeps the last data
-  and says how old it is. If you use a different repository or branch, edit the address in `site/config.js`.
+  In Vercel: Add New Project, import **this** repository, set Root Directory to `site`, Framework Preset `Other`, Deploy. Do not connect
+  the data repository to Vercel. The Lab must be running for the page to update; when it is not, the page keeps the last data and says
+  how old it is. With another repository or branch, edit the address in `site/config.js`.
 - Data from teammates appears when the Lab reads it from Firestore (it uses the same saved copy and read budget as the Results tab).
 
 ## Results
