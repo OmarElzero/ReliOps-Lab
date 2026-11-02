@@ -44,6 +44,11 @@ h2{font-size:12px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.08em;
 label{font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
 select{font:inherit;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;max-width:100%}
 .scroll{overflow-x:auto}
+.cardhead{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;justify-content:space-between;margin-bottom:10px}
+.cardhead h2{margin:0}
+.pager{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;color:var(--muted);font-size:12px}
+.pager button{font:inherit;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer}
+.pager button:disabled{opacity:.4;cursor:default}
 table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
 th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
 th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
@@ -116,7 +121,7 @@ footer{color:var(--muted);font-size:12px}
   </section>
 
   <section class="card">
-    <h2>Latest runs</h2>
+    <div class="cardhead"><h2>Runs, newest first</h2><div class="pager" id="pager"></div></div>
     <div class="scroll"><table id="recent"></table></div>
   </section>
 
@@ -308,10 +313,23 @@ footer{color:var(--muted);font-size:12px}
     if (!done(r)) return el("span",{cls:"cell inc", text:"unfinished"});
     return el("span",{cls:"cell " + (r.e2e_pass ? "pass" : "fail"), text: r.e2e_pass ? "pass" : "fail"});
   }
+  var recentPage = 0, recentSize = 25;      // the page keeps its place when new data arrives; a filter change goes back to the newest
   function renderRecent(runs){
-    var t = $("recent"); clear(t);
-    var rows = runs.slice().sort(function(a,b){ return String(b.timestamp_utc).localeCompare(String(a.timestamp_utc)); }).slice(0, 30);
-    if (!rows.length){ t.appendChild(el("tr",{},[el("td",{cls:"empty",text:"No runs match."})])); return; }
+    var t = $("recent"), pg = $("pager"); clear(t); clear(pg);
+    var all = runs.slice().sort(function(a,b){ return String(b.timestamp_utc).localeCompare(String(a.timestamp_utc)); });
+    if (!all.length){ t.appendChild(el("tr",{},[el("td",{cls:"empty",text:"No runs match."})])); return; }
+    var pages = Math.max(1, Math.ceil(all.length / recentSize));
+    if (recentPage > pages - 1) recentPage = pages - 1;
+    var from = recentPage * recentSize, rows = all.slice(from, from + recentSize);
+    var newer = el("button",{type:"button", text:"‹ Newer"}), older = el("button",{type:"button", text:"Older ›"});
+    newer.disabled = recentPage === 0; older.disabled = recentPage >= pages - 1;
+    newer.addEventListener("click", function(){ recentPage = Math.max(0, recentPage - 1); renderRecent(selected()); });
+    older.addEventListener("click", function(){ recentPage = Math.min(pages - 1, recentPage + 1); renderRecent(selected()); });
+    var size = el("select",{"aria-label":"Rows per page"});
+    [25, 50, 100, 250].forEach(function(n){ var o = el("option",{value:String(n), text:n + " per page"}); if (n === recentSize) o.selected = true; size.appendChild(o); });
+    size.addEventListener("change", function(){ recentSize = parseInt(size.value, 10) || 25; recentPage = 0; renderRecent(selected()); });
+    pg.appendChild(el("span",{text:"Showing " + (from + 1) + "–" + (from + rows.length) + " of " + all.length}));
+    pg.appendChild(newer); pg.appendChild(older); pg.appendChild(size);
     var head = el("tr"); ["When","Variant","Problem","Outcome","Diagnosis","Mitigation","Calls","Run by"].forEach(function(h){ head.appendChild(el("th",{text:h})); });
     t.appendChild(el("thead",{},[head]));
     var body = el("tbody");
@@ -356,9 +374,10 @@ footer{color:var(--muted);font-size:12px}
     $("fresh").textContent = (live ? "live data " + ago(live.generated_at) + " · " : "") + "results " + ago(snap.generated_at);
   }
 
-  $("f-exp").addEventListener("change", renderAll);
-  $("f-purpose").addEventListener("change", renderAll);
-  $("f-by").addEventListener("change", renderAll);
+  function filterChanged(){ recentPage = 0; renderAll(); }
+  $("f-exp").addEventListener("change", filterChanged);
+  $("f-purpose").addEventListener("change", filterChanged);
+  $("f-by").addEventListener("change", filterChanged);
   setInterval(function(){ renderLive(); }, 1000);
   setInterval(loadLive, 20000);
   setInterval(loadSnap, 60000);
