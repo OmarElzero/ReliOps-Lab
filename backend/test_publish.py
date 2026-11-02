@@ -104,3 +104,17 @@ class PublisherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyncNoticeTests(unittest.TestCase):
+    def test_the_snapshot_says_whether_the_team_data_is_live_and_hides_paths_in_the_reason(self):
+        old = publish.SYNC_PROVIDER
+        publish.SYNC_PROVIDER = lambda: {"connected": True, "live": False, "error": "quota at /home/omar/key.json", "synced_at": "2026-11-02T00:00:00Z",
+                                         "reads_today": 100, "read_budget": 8000, "secret": "x"}
+        try:
+            snap = publish.build_snapshot([run(1)], "firestore-saved-copy", False, True)
+        finally:
+            publish.SYNC_PROVIDER = old
+        self.assertFalse(snap["sync"]["live"])
+        self.assertNotIn("/home/omar", json.dumps(snap))
+        self.assertNotIn("secret", snap["sync"])

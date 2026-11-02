@@ -1309,6 +1309,7 @@ def key_mark(body: KeyMarkIn):
 _SHARE_TTL_S = 15.0
 _share_cache: dict = {"at": 0.0, "runs": ("local", [])}
 _publisher: Optional[publish.Publisher] = None
+publish.SYNC_PROVIDER = lambda: firebase_sync.sync_info("runs")
 
 
 def _share_runs() -> tuple[str, list[dict]]:

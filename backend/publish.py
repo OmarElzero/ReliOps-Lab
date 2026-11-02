@@ -52,6 +52,10 @@ def _clean_text(value):
     return _PATH.sub("<path>", _EMAIL.sub("<email>", value))[:400]
 
 
+# Set by the app: returns firebase_sync.sync_info("runs"), so the page can say whether the team's runs are live or a saved copy.
+SYNC_PROVIDER: Callable[[], dict] | None = None
+
+
 def env_on(name: str, default: bool = False) -> bool:
     v = os.environ.get(name)
     return default if v is None else v.strip().lower() in ("1", "on", "true", "yes")
@@ -73,7 +77,16 @@ def build_snapshot(runs: list[dict], source: str, include_final: bool = None, na
     include_final = env_on("RELIOPS_PUBLISH_FINAL") if include_final is None else include_final
     names = env_on("RELIOPS_PUBLISH_NAMES", True) if names is None else names
     kept = sanitize_runs(runs, include_final, names)
+    sync = None
+    if SYNC_PROVIDER is not None:
+        try:
+            info = SYNC_PROVIDER() or {}
+            sync = {"connected": bool(info.get("connected")), "live": bool(info.get("live")), "error": _clean_text(info.get("error") or ""),
+                    "synced_at": info.get("synced_at"), "reads_today": info.get("reads_today"), "read_budget": info.get("read_budget")}
+        except Exception:  # noqa: BLE001 - the page works without it
+            sync = None
     return {
+        "sync": sync,
         "schema": 1,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source": source,
