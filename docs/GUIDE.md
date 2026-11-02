@@ -60,6 +60,13 @@ Rotating several keys is **off** until you turn it on in **Setup & quick run →
 
 ### Guards against a broken setup
 
+- **The agent cannot start (our agents only).** Before the first run the Lab checks that SREGym's `agents.yaml` has an entry for
+  `reliops_v1` / `reliops_v2` and that `clients/<agent>/driver.py` exists in the SREGym clone. If not, nothing is started and the
+  message names the fix (`python3 scripts/apply_sregym_patches.py` and `bash scripts/sync_agent.sh`). If the agent still dies at
+  start (SREGym's "not found in registry", or "No module named 'clients....'" from an image built without our code), the queue
+  stops at the first such run instead of after three, and the reason says what to do. Other unrecognised endings now quote the last
+  error line of the log and the agent's exit code instead of only "ended without a result".
+
 - **Stops after repeated empty runs.** If 3 runs in a row end incomplete (no result row, or SREGym marks the run incomplete), the queue stops and says why, instead of spending the night on empty runs. Finished runs are kept and only missing cells run on the next start. Change the limit with `RELIOPS_MAX_INCOMPLETE=5` in `.env`; `0` turns the stop off. Incomplete runs are never counted as failures in Results.
 - **Checks before the first run.** The log starts with a `[check]` line if `AGENT_API_BASE` is set (SREGym then lets the agent reach only that host, so a Gemini model sent to a gateway usually fails with 401 "Invalid credential"), or if the agent image looks older than `agent/react_v1/driver.py` (run `scripts/sync_agent.sh` and tick Force-build once).
 - **A step that stops takes the whole queue with it.** When a step stops itself (3 incomplete in a row, a broken cluster, every key dead), the later steps are not started, because they would hit the same fault. The log says how many were left.

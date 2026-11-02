@@ -300,6 +300,12 @@ _ABORT_RE = re.compile(r"Benchmark campaign aborted: ([\s\S]{0,200})")
 _MODEL_EMPTY_RE = re.compile(r"model call unusable|ended without\s+submission:\s+model_failure", re.I)
 _JUDGE_PREFLIGHT_RE = re.compile(r"pre-flight check (?:failed|error)|pre-flight[^\n]{0,40}\bfail", re.I)
 _API_BASE_RE = re.compile(r"agent_api_base:\s*(\S+?),")
+# The agent could not start at all. SREGym's own wording (main.py): "Agent 'x' not found in registry" when agents.yaml has no entry,
+# Python's "No module named 'clients.x'" when the agent image was built without our code.
+_AGENT_UNKNOWN_RE = re.compile(r"Agent '([\w.-]+)' not found in registry")
+_AGENT_NOMODULE_RE = re.compile(r"No module named ['\"]?(clients\.[\w.]+)")
+_AGENT_EXIT_RE = re.compile(r"Agent process exited with return code (-?\d+)")
+_LAST_ERROR_RE = re.compile(r"^.*?\b((?:[\w.]+\.)?\w*(?:Error|Exception)\b[^\n]*)$", re.M)
 _DEPLOY_FAILED_RE = re.compile(r"start_problem failed|deploy attempts? failed", re.I)
 _DEPLOY_ATTEMPT_RE = re.compile(r"deploy attempt (\d+)/(\d+)")
 # A pod listed as blocking with a "deleting=" stamp is stuck in Terminating: "name (phase=Running; node=kind-worker3; ... deleting=...".
@@ -316,6 +322,14 @@ def classify_incomplete(log_text: str) -> tuple[str, str]:
     text = log_text or ""
     if not text.strip():
         return "other", "No log was recorded for this run."
+    unknown = _AGENT_UNKNOWN_RE.search(text)
+    if unknown:
+        return "agent", (f"SREGym does not know the agent '{unknown.group(1)}' (it is not in agents.yaml). "
+                         "In the ReliOps folder run: python3 scripts/apply_sregym_patches.py")
+    nomodule = _AGENT_NOMODULE_RE.search(text)
+    if nomodule:
+        return "agent", (f"The agent image has no code for {nomodule.group(1).split('.')[1]} ({nomodule.group(1)} is missing). "
+                         "In the ReliOps folder run: bash scripts/sync_agent.sh, then tick 'Force-build the agent image' for the next run")
     if _DEPLOY_FAILED_RE.search(text) or _CLEANUP_RE.search(text):
         parts = []
         nodes = sorted({n for n in _NODE_TIMEOUT_RE.findall(text) if n != "nodes"})
@@ -350,7 +364,34 @@ def classify_incomplete(log_text: str) -> tuple[str, str]:
     abort = _ABORT_RE.search(text)
     if abort:
         return "other", "Benchmark aborted: " + re.sub(r"\s+", " ", abort.group(1)).strip()[:140]
+    exited = [m for m in _AGENT_EXIT_RE.findall(text) if m != "0"]
+    errors = _LAST_ERROR_RE.findall(text)
+    if exited or errors:
+        last = re.sub(r"\s+", " ", errors[-1]).strip()[:160] if errors else ""
+        head = f"The agent process exited with return code {exited[-1]}" if exited else "The run ended without a result"
+        return "other", head + (f". Last error in the log: {last}" if last else "") + " (see the log)."
     return "other", "The run ended without a result (see the log)."
+
+
+def agent_setup_problem(agent: str) -> str | None:
+    """A problem with how our agent is installed in the SREGym clone that makes every run fail at once, or None.
+    Only checked for our own agents and only when the clone is there (anything else is left to SREGym)."""
+    if agent not in OUR_AGENTS:
+        return None
+    clone = sregym_dir()
+    registry = clone / "agents.yaml"
+    if not registry.is_file():
+        return None
+    try:
+        if not re.search(rf"name:\s*{re.escape(agent)}\b", registry.read_text(encoding="utf-8")):
+            return (f"SREGym's agents.yaml has no entry for {agent}. In the ReliOps folder run: python3 scripts/apply_sregym_patches.py "
+                    "(and bash scripts/sync_agent.sh).")
+    except OSError:
+        return None
+    if not (clone / "clients" / agent / "driver.py").is_file():
+        return (f"The SREGym clone has no clients/{agent}/driver.py. In the ReliOps folder run: bash scripts/sync_agent.sh, "
+                "then tick 'Force-build the agent image' for the next run.")
+    return None
 
 
 def cluster_node_problems(timeout: int = 15) -> list[str] | None:
@@ -1492,6 +1533,12 @@ def stream_campaign(
     pool = key_pool(base_env)
     for w in preflight_warnings(base_env, model, agent):
         yield w + "\n"
+    setup_problem = agent_setup_problem(agent)
+    if setup_problem:
+        yield (f"\n[stopped before the first run: {setup_problem} Every run would fail the same way, so nothing was started. "
+               "Nothing is lost; run the queue again (or press Continue) after fixing it.]\n")
+        _halt(setup_problem)
+        return
     via_base = bool((base_env.get("AGENT_API_BASE") or "").strip())
     streak_limit = max_incomplete_streak(base_env)
     retry_limit = max_external_retries(base_env)
@@ -1645,6 +1692,12 @@ def stream_campaign(
             continue
 
         incomplete_streak = incomplete_streak + 1 if run_incomplete(row) else 0
+        if incomplete_kind == "agent" and i < total_runs and not _stop_event.is_set():
+            # The agent cannot start, so every further run would end the same way within seconds.
+            yield (f"\n[stopped: {incomplete_reason}. Every run would end the same way. Finished runs are kept; "
+                   "after fixing it, press Continue and only the missing cells run.]\n")
+            _halt(incomplete_reason or "the agent cannot start")
+            return
         if streak_limit and incomplete_kind == "cluster" and i < total_runs and not _stop_event.is_set():
             # A broken cluster does not heal between runs, and each attempt costs a long wait (about 27 minutes in a real
             # log), so the queue stops at the first one instead of waiting for the streak limit.

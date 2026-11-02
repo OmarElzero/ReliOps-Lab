@@ -571,6 +571,56 @@ class SetupGuardTests(unittest.TestCase):
         self.assertEqual(self.r.classify_incomplete("some output\n"), ("other", "The run ended without a result (see the log)."))
         self.assertEqual(self.r.classify_incomplete("")[0], "other")
 
+    def test_an_agent_that_cannot_start_is_named_and_stops_the_queue_at_the_first_run(self):
+        log = "Agent 'reliops_v2' not found in registry. Available agents: dict_keys(['stratus'])\n"
+        kind, why = self.r.classify_incomplete(log)
+        self.assertEqual(kind, "agent")
+        self.assertIn("reliops_v2", why)
+        self.assertIn("apply_sregym_patches", why)
+        self.addCleanup(self.r._halt, None)
+        out, records = self._run([{"run_status": "incomplete"}] * 5, stream=log.splitlines(True))
+        self.assertEqual(len(records), 1)                    # not three
+        self.assertIn("Every run would end the same way", out)
+        self.assertIn("agents.yaml", self.r.halt_reason())
+
+    def test_an_image_without_our_agent_code_says_to_sync_and_rebuild(self):
+        kind, why = self.r.classify_incomplete("ModuleNotFoundError: No module named 'clients.reliops_v2'\n")
+        self.assertEqual(kind, "agent")
+        self.assertIn("sync_agent.sh", why)
+        self.assertIn("Force-build", why)
+
+    def test_an_unrecognised_ending_quotes_the_last_error_line_and_the_exit_code(self):
+        kind, why = self.r.classify_incomplete("[x] starting\nAgent process exited with return code 1\nKeyError: 'REACT_V1_FOO'\n")
+        self.assertEqual(kind, "other")
+        self.assertIn("return code 1", why)
+        self.assertIn("KeyError: 'REACT_V1_FOO'", why)
+        self.assertEqual(self.r.classify_incomplete("Agent process exited with return code 0\n"),
+                         ("other", "The run ended without a result (see the log)."))
+
+    def test_our_agent_not_installed_in_the_clone_stops_before_any_run(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        clone = Path(tempfile.mkdtemp())
+        with mock.patch.object(self.r, "sregym_dir", return_value=clone):
+            self.assertIsNone(self.r.agent_setup_problem("reliops_v2"))                   # no clone: left to SREGym
+            (clone / "agents.yaml").write_text("agents:\n  - name: reliops_v1\n", encoding="utf-8")
+            self.assertIn("apply_sregym_patches", self.r.agent_setup_problem("reliops_v2"))
+            (clone / "agents.yaml").write_text("agents:\n  - name: reliops_v1\n  - name: reliops_v2\n", encoding="utf-8")
+            self.assertIn("sync_agent.sh", self.r.agent_setup_problem("reliops_v2"))
+            (clone / "clients" / "reliops_v2").mkdir(parents=True)
+            (clone / "clients" / "reliops_v2" / "driver.py").write_text("", encoding="utf-8")
+            self.assertIsNone(self.r.agent_setup_problem("reliops_v2"))
+            self.assertIsNone(self.r.agent_setup_problem("stratus"))                      # not ours
+        self.addCleanup(self.r._halt, None)
+        with mock.patch.object(self.r, "agent_setup_problem", return_value="no entry for reliops_v2"), \
+             mock.patch.object(self.r, "sregym_dir", return_value=clone), \
+             mock.patch.object(self.r, "merged_env_vars", return_value={}), \
+             mock.patch.object(self.r, "preflight_warnings", return_value=[]):
+            out = "".join(self.r.stream_campaign(agent="reliops_v2", action_space="typed", model="gemini/x", judge_model="gemini/x",
+                                                 problems=["p1"], repeat_n=1, force_build=False, on_result=lambda r: self.fail("ran")))
+        self.assertIn("stopped before the first run", out)
+
     def test_key_problem_through_a_gateway_is_not_read_as_a_dead_key(self):
         log = "agent_api_base: https://opencode.ai/zen/v1, judge_api_base: unset\nAuthenticationError: Invalid credential\n"
         self.assertEqual(self.r.classify_incomplete(log)[0], "other")
