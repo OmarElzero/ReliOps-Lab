@@ -138,6 +138,29 @@ pip install -r requirements.txt
 cd backend && uvicorn app:app --host 127.0.0.1 --port 8765 --reload
 ```
 
+**Windows (WSL2) first, before Run setup.** WSL gets only part of your RAM unless you raise it, and the machine check at the top of
+the Setup tab warns below 12 GB (the manual setup lists 16 GB as the minimum for one run, 32 GB as comfortable). Create
+`%UserProfile%\.wslconfig`, then run `wsl --shutdown` in PowerShell and reopen the Lab:
+
+```ini
+[wsl2]
+memory=16GB      # example for a 24 GB laptop: leave about 8 GB for Windows
+swap=8GB
+```
+
+Also stop Windows from sleeping during runs (`powercfg /change standby-timeout-ac 0` from an admin PowerShell, lid open). Full details:
+`ReliOps/docs/MANUAL-SETUP.md` §1.
+
+**What the machine check will say before the first Setup.** `missing from PATH: kind` is expected: **Run setup** installs `kind`. The
+other tools (`kubectl`, `helm`, `uv`) and Docker must already work; if one of them is listed, install it first (`MANUAL-SETUP.md` §2).
+
+**Where commands run.** The Lab uses its **own** clone of ReliOps, `~/reliops-lab-workdir/ReliOps` (inside WSL on Windows;
+`RELIOPS_LAB_WORKDIR` changes it). Any command from the ReliOps docs (`git pull`, `bash scripts/sync_agent.sh`,
+`python3 scripts/apply_sregym_patches.py`) must be run **in that folder**. A second clone elsewhere (for example `~/ReliOps`) is never
+used by the Lab, so updating it changes nothing. To pick up new agent code: click **Run setup** again (it fetches and fast-forwards
+that clone and runs `scripts/quickstart.sh`, which calls `scripts/sync_agent.sh`), or run `git pull --ff-only` and
+`bash scripts/sync_agent.sh` in that folder, then tick **Force-build the agent image** for the next run.
+
 Open http://localhost:8765. First time: click **Run setup** (clones ReliOps + SREGym, applies the
 3 required patches, builds the kind cluster — ~10 min the first time; make sure the GitHub access
 in "Requirements" above is sorted before this step, or the clone will fail). Then pick an agent, a

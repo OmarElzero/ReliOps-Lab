@@ -1144,8 +1144,10 @@ def doctor() -> dict:
                       f"run on had 4")
         verdict = "might struggle — few CPU cores"
     if ram_gb is not None and ram_gb < 12:
-        notes.append(f"{ram_gb} GB RAM detected — ~15 GB is the smallest this project has "
-                      f"actually run a kind cluster on")
+        notes.append(f"{ram_gb} GB RAM visible here — ReliOps/docs/MANUAL-SETUP.md lists 16 GB as the minimum for one run on the "
+                      f"small apps (the machine it was tested on had 32 GB). On Windows, WSL2 gets only part of your RAM unless "
+                      f"you raise it in %UserProfile%\\.wslconfig (MANUAL-SETUP §1); a larger app can run out of memory and end "
+                      f"as an incomplete run")
         verdict = "might struggle — RAM is tight"
     if disk_free_gb is not None and disk_free_gb < 20:
         notes.append(f"only {disk_free_gb} GB free disk — SREGym's images and cluster data can "
