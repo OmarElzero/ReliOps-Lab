@@ -69,8 +69,9 @@ def clean_switches(raw) -> list[str]:
 # is stamped on every run of the variant, so the Results table keeps the variants apart.
 _BASE = ["TOKEN_LOG", "EMPTY_SUBMIT_GUARD"]
 _B2 = _BASE + ["OPTIONAL_ARGS"]
-_PROMPT = _B2 + ["FAULT_EXISTS", "SOAK", "SELFCHECK"]
-_FULL = _PROMPT + ["VERIFY_UNDO", "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM"]
+# Round 2 main design: every switch alone on B2 ("one on") and every switch removed from ALL ("one off").
+_R2_SWITCHES = ["FAULT_EXISTS", "SOAK", "SELFCHECK", "LEDGER", "VERIFY_UNDO", "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM"]
+_ALL = _B2 + _R2_SWITCHES
 
 
 def _variant(id_: str, group: str, agent_id: str, space: str, switches: list[str], help_: str, needs_notes: bool = False) -> dict:
@@ -99,10 +100,11 @@ VARIANT_PRESETS = [
     # Round 2 (ReliOps docs/plan/15-round-2-run-plan.md); same recipes as scripts/make_ladder_queues.py --round 2
     _variant("R2 NULL", "Round 2", "reliops_v2", "typed+shell", ["NULL_AGENT"], "calibration: do-nothing agent"),
     _variant("R2 B2", "Round 2", "reliops_v2", "typed+shell", _B2, "new base: B plus optional arguments"),
-    _variant("R2 PROMPT", "Round 2", "reliops_v2", "typed+shell", _PROMPT, "B2 plus fault-exists, soak and self-check"),
-    _variant("R2 FULL", "Round 2", "reliops_v2", "typed+shell", _FULL, "PROMPT plus verify/undo, health sweep, change diff, output trim"),
-] + [_variant(f"R2 FULL -{f}", "Round 2 ablations", "reliops_v2", "typed+shell", [x for x in _FULL if x != f], f"FULL without {f}")
-     for f in ("VERIFY_UNDO", "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM")]
+    _variant("R2 ALL", "Round 2", "reliops_v2", "typed+shell", _ALL, "B2 plus all eight round-2 switches"),
+] + [_variant(f"R2 B2 +{f}", "Round 2: one switch on B2", "reliops_v2", "typed+shell", _B2 + [f], f"B2 plus {f} only")
+     for f in _R2_SWITCHES] \
+  + [_variant(f"R2 ALL -{f}", "Round 2: one switch off ALL", "reliops_v2", "typed+shell", [x for x in _ALL if x != f], f"ALL without {f}")
+     for f in _R2_SWITCHES]
 
 
 AGENTS = [

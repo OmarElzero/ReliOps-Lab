@@ -886,7 +886,7 @@ class QueuePauseAndContinueTests(TmpRepoCase):
             if self.pause_during == len(done):
                 runner._stop_event.set()           # the person pressed Pause while this run was going
 
-        def todo(step, runs, manifest, label):
+        def todo(step, runs, manifest, label, only=None):
             return [] if int(step["name"].split()[-1]) in done else [("p", 1)]
 
         with mock.patch.object(self.app, "_run_lines", side_effect=fake_run_lines), \
@@ -918,6 +918,31 @@ class QueuePauseAndContinueTests(TmpRepoCase):
         log = self._run()
         self.assertIn("[QUEUE] finished", log)
         self.assertEqual(self.qs.describe(False)["status"], "finished")
+
+    def test_cell_order_runs_every_step_of_a_pair_back_to_back_within_the_share(self):
+        import queueplan
+        st = lambda n: {"name": f"step {n}", "agent_id": "a", "model_id": "m", "judge_model_id": "j",
+                        "problems": ["p1", "p2", "p3", "p4"], "repeat_n": 2}
+        q = queueplan.clean_queue({"name": "q", "steps": [st(1), st(2)], "machines": 2, "split": "repeat", "order": "cell"})
+        calls = []
+
+        def fake_run_lines(**kw):
+            calls.append((kw["cells"][0], kw["config_label"] or kw["agent"], kw["force_build"]))
+            yield "run\n"
+        q["steps"][0]["config_label"], q["steps"][1]["config_label"] = "A", "B"
+        q["steps"][0]["force_build"] = True
+        with mock.patch.object(self.app, "_run_lines", side_effect=fake_run_lines), \
+             mock.patch.object(self.app.store, "read", return_value=[]), \
+             mock.patch.object(self.app, "_collect_runs", return_value=("local", [])):
+            log = "".join(self.app._queue_lines(q, "Omar", "E", False, 1))
+        mine = queueplan.share_set(q, 1)
+        self.assertEqual(len(calls), 2 * len(mine))
+        self.assertTrue(all(queueplan.unit(*c) in mine for c, _, _ in calls))
+        self.assertEqual([lab for _, lab, _ in calls], ["A", "B"] * len(mine))      # A then B for each pair
+        self.assertEqual([c for c, _, _ in calls][0::2], [c for c, _, _ in calls][1::2])
+        self.assertEqual([fb for _, _, fb in calls], [True] + [False] * (len(calls) - 1))
+        self.assertIn("cell order", log)
+        self.assertIn("[QUEUE] finished", log)
 
     def test_a_queue_that_stopped_itself_can_be_continued_too(self):
         def halting(**kw):

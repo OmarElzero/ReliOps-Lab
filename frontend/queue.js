@@ -40,7 +40,7 @@
   });
 
   // ---- state ----------------------------------------------------------------------------------
-  const blankQueue = () => ({ queue_id: null, name: "", steps: [] });
+  const blankQueue = () => ({ queue_id: null, name: "", steps: [], machines: 1, shares: null, split: "problem", order: "step" });
   let Q = blankQueue();
   let saved = [];
   let manifests = [];
@@ -96,10 +96,14 @@
   }
 
   function openQueue(q) {
-    Q = q ? JSON.parse(JSON.stringify({ queue_id: q.queue_id, name: q.name, steps: q.steps || [] })) : blankQueue();
+    Q = q ? JSON.parse(JSON.stringify({ queue_id: q.queue_id, name: q.name, steps: q.steps || [],
+                                        machines: q.machines || 1, shares: q.shares || null, split: q.split || "problem", order: q.order || "step" })) : blankQueue();
     dirty = false;
     pref.set("lab_queue_id", Q.queue_id || "");
     $("q-name").value = Q.name;
+    $("q-machines").value = String(Q.machines || 1);
+    $("q-split").value = Q.split || "problem";
+    $("q-order").value = Q.order || "step";
     loadExpName();
     renderAll(); refreshPreview(true); renderOpen();
   }
@@ -108,7 +112,8 @@
   async function saveQueue(quiet) {
     Q.name = $("q-name").value.trim();
     if (!Q.name) { $("q-name").focus(); setStatus("Give the queue a name first.", "warn"); return false; }
-    const { ok, data } = await jsonPost("/api/queue", { queue_id: Q.queue_id, name: Q.name, steps: Q.steps, created_by: who() });
+    const { ok, data } = await jsonPost("/api/queue", { queue_id: Q.queue_id, name: Q.name, steps: Q.steps, created_by: who(),
+                                                        machines: Q.machines || 1, shares: Q.shares, split: Q.split || "problem", order: Q.order || "step" });
     if (!ok) { setStatus(data.error || "Could not save the queue.", "warn"); return false; }
     Q.queue_id = data.queue.queue_id;
     dirty = false;
@@ -129,15 +134,89 @@
     clearTimeout(previewTimer);
     if (!Q.steps.length) { preview = null; renderSteps(); renderTotals(); return; }
     previewTimer = setTimeout(async () => {
-      const { ok, data } = await jsonPost("/api/queue/preview", { queue_id: Q.queue_id, name: Q.name, steps: Q.steps, experiment: expName() });
+      const { ok, data } = await jsonPost("/api/queue/preview", { queue_id: Q.queue_id, name: Q.name, steps: Q.steps, experiment: expName(),
+                                                                  machines: Q.machines || 1, shares: Q.shares, split: Q.split || "problem", order: Q.order || "step", share: myShare() || null });
       preview = ok ? data : null;
-      renderSteps(); renderTotals(); renderExperiments();
+      renderSteps(); renderTotals(); renderExperiments(); renderShares();
     }, now ? 0 : 350);
   }
   const stepPreview = (s) => (preview && preview.steps.find((p) => p.step_id === s.step_id)) || null;
 
+  // ---- machine shares: one queue split across several machines ---------------------------------------
+  // Everyone sees the whole queue. Each machine picks its share (remembered on this machine, per queue) and runs only
+  // the problems of that share; 0 = this machine runs everything.
+  const shareKey = () => "lab_share_" + (Q && Q.queue_id ? Q.queue_id : "new");
+  function myShare() {
+    const n = Q.machines || 1;
+    const k = Number(pref.get(shareKey(), "0")) || 0;
+    return n > 1 && k >= 1 && k <= n ? k : 0;
+  }
+  const ago = (iso) => {
+    const t = Date.parse(iso || ""); if (!t) return "";
+    const m = Math.round((Date.now() - t) / 60000);
+    return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+  };
+  function renderShares() {
+    const n = Q.machines || 1, box = $("q-share-box"), panel = $("q-shares");
+    box.hidden = n <= 1; panel.hidden = n <= 1; $("q-split").hidden = n <= 1;
+    if (n <= 1) return;
+    const shares = (preview && preview.shares) || [];
+    const sel = $("q-share"), k = myShare();
+    sel.innerHTML = "";
+    sel.append(h("option", { value: "0", text: "Every problem (no split)" }));
+    for (let i = 1; i <= n; i++) {
+      const sh = shares[i - 1];
+      const unitWord = Q.split === "repeat" ? "pair" : "problem";
+      sel.append(h("option", { value: String(i), text: `Share ${i} of ${n}` + (sh ? ` · ${plural(sh.problems.length, unitWord)}, ${sh.left} left` : "") }));
+    }
+    sel.value = String(k);
+    const note = $("q-share-note");
+    const mine = k && shares[k - 1];
+    const others = mine ? mine.people.filter((x) => x.name !== who() && Date.now() - Date.parse(x.last || 0) < 3 * 3600 * 1000) : [];
+    note.className = "hint" + (others.length ? " warn-text" : "");
+    note.textContent = !k
+      ? "Pick your share so the machines never run the same cells. Agree who takes which share first."
+      : others.length
+        ? `${others.map((x) => x.name).join(", ")} recorded runs in share ${k} ${ago(others[0].last)}. Two machines on one share run the same cells twice; check before you start.`
+        : `Only the problems of share ${k} run here. The grid still shows the whole queue; the other shares are dimmed.`;
+    const wasOpen = !!panel.querySelector("details[open]");
+    panel.innerHTML = "";
+    if (!shares.length) return;
+    const t = h("table", {}, h("thead", {}, h("tr", {},
+      h("th", { text: "Share" }), h("th", { text: Q.split === "repeat" ? "Problem #repeat" : "Problems" }), h("th", { text: "Done" }), h("th", { text: "Left" }), h("th", { text: "Run by" }))));
+    const tb = h("tbody");
+    shares.forEach((sh) => {
+      const people = sh.people.length ? sh.people.map((x) => `${x.name} (${ago(x.last)})`).join(", ") : "nobody yet";
+      tb.append(h("tr", { class: sh.share === k ? "me" : "" },
+        h("td", { text: `${sh.share}${sh.share === k ? " · this machine" : ""}` }),
+        h("td", { class: "probs", text: sh.problems.join(", ") }),
+        h("td", { text: `${sh.done} of ${sh.total}` }),
+        h("td", { text: String(sh.left) }),
+        h("td", { text: people })));
+    });
+    t.append(tb);
+    const det = h("details", {}, h("summary", { text: `Machine shares: who runs what (${n} machines, ${shares.reduce((x, sh) => x + sh.left, 0)} runs left in all)` }), t);
+    det.open = wasOpen;
+    panel.append(det);
+  }
+  $("q-share").addEventListener("change", (e) => { pref.set(shareKey(), e.target.value); renderShares(); refreshPreview(true); });
+  $("q-order").addEventListener("change", (e) => { Q.order = e.target.value === "cell" ? "cell" : "step"; markDirty(); });
+  $("q-split").addEventListener("change", (e) => {
+    Q.split = e.target.value === "repeat" ? "repeat" : "problem";
+    Q.shares = null;                                           // hand-made shares are lists of problems
+    markDirty(); renderShares();
+  });
+  $("q-machines").addEventListener("change", (e) => {
+    const n = Math.max(1, Math.min(20, Math.round(Number(e.target.value) || 1)));
+    e.target.value = String(n);
+    if (n === (Q.machines || 1)) return;
+    Q.machines = n;
+    if (Q.shares && Q.shares.length !== n) Q.shares = null;   // hand-made shares only fit the count they were made for
+    markDirty(); renderShares();
+  });
+
   // ---- rendering ------------------------------------------------------------------------------
-  function renderAll() { renderHead(); renderSteps(); renderTotals(); }
+  function renderAll() { renderHead(); renderSteps(); renderTotals(); renderShares(); }
 
   function renderHead() {
     if (dirty) setStatus("Unsaved changes", "dirty");
@@ -169,11 +248,13 @@
     (sp ? sp.cells : []).forEach((c) => { if (!byProblem.has(c.problem)) byProblem.set(c.problem, []); byProblem.get(c.problem).push(c); });
     const grid = h("div", { class: "camp-grid" });
     byProblem.forEach((cs, problem) => {
-      const row = h("div", { class: "camp-row" }, h("span", { class: "camp-name", text: problem, title: problem }));
+      const other = cs.length && cs[0].mine === false;
+      const row = h("div", { class: "camp-row" + (other ? " other" : "") }, h("span", { class: "camp-name", text: problem, title: problem + (other ? " (another machine's share)" : "") }));
       cs.forEach((c) => {
         const isNow = run && run.problem === problem && run.repeat === c.repeat && c.status !== "pass" && c.status !== "fail";
         const sym = isNow ? "…" : { pass: "✓", fail: "✗", incomplete: "?", missing: "·" }[c.status];
-        row.append(h("span", { class: `cell ${isNow ? "running" : c.status}`, text: sym, title: `${problem}, repeat ${c.repeat}: ${isNow ? "running now" : c.status}` }));
+        const by = c.by ? ` · run by ${c.by}` : "";
+        row.append(h("span", { class: `cell ${isNow ? "running" : c.status}${c.mine === false ? " other" : ""}`, text: sym, title: `${problem}, repeat ${c.repeat}: ${isNow ? "running now" : c.status}${by}` }));
       });
       grid.append(row);
     });
@@ -215,7 +296,7 @@
           h("span", { class: "b-fail", style: `width:${(100 * c.fail) / n}%` }),
           h("span", { class: "b-inc", style: `width:${(100 * c.incomplete) / n}%` })));
         li.append(h("div", { class: "step-counts" },
-          h("span", {}, h("b", { text: c.pass + c.fail }), ` of ${sp.total} done`),
+          h("span", {}, h("b", { text: c.pass + c.fail }), ` of ${sp.total} done${myShare() ? " in your share" : ""}`),
           h("span", {}, h("b", { text: c.pass }), " passed"), h("span", {}, h("b", { text: c.fail }), " failed"),
           c.incomplete ? h("span", { title: "Ran, but no outcome was recorded. Never counted as a failure; run again on the next start." }, h("b", { text: c.incomplete }), " incomplete") : null,
           h("span", {}, h("b", { text: s.enabled === false ? 0 : sp.todo }), " to run")));
@@ -232,8 +313,10 @@
     const on = Q.steps.filter((s) => s.enabled !== false);
     const total = preview ? preview.total_runs : on.reduce((a, s) => a + s.problems.length * s.repeat_n, 0);
     const left = preview ? preview.runs_left : total;
+    const k = myShare();
     $("q-total-line").textContent = !Q.steps.length ? "No steps yet"
-      : `${plural(on.length, "step")} · ${plural(total, "run")} · ${left} left`;
+      : `${plural(on.length, "step")} · ${plural(total, "run")} · ${left} left` + (k ? ` in share ${k} of ${Q.machines}` : "");
+    $("q-total-sub").textContent = k && preview ? `Whole queue: ${preview.all_total_runs} runs, ${preview.all_runs_left} left across all machines.` : "";
     const eta = $("q-eta");
     if (eta) eta.textContent = left ? "≈ " + fmtDur(left * minPerRun() * 60) : "nothing left to run";
     const busy = jobBusy();
@@ -603,6 +686,12 @@
     body.innerHTML = "";
     const on = Q.steps.filter((s) => s.enabled !== false);
     body.append(h("p", { class: "hint", text: `"${Q.name}" will run ${plural(on.length, "step")} in this order, recorded under the experiment "${(preview && preview.experiment_label) || expName()}". Cells that already have a result under that name are skipped.` }));
+    if (myShare()) {
+      const sh = preview && preview.shares && preview.shares[myShare() - 1];
+      body.append(h("p", { class: "hint", text: `This machine runs share ${myShare()} of ${Q.machines} only${sh ? ": " + sh.problems.join(", ") : ""}. The other machines run the rest under the same experiment name.` }));
+    } else if ((Q.machines || 1) > 1) {
+      body.append(h("p", { class: "step-issue", text: `This queue is split across ${Q.machines} machines but no share is picked, so this machine would run every problem. Pick your share under "This machine runs" unless you mean that.` }));
+    }
     const list = h("ol", { class: "q-steps", style: "margin-top:12px" });
     let issue = false;
     Q.steps.forEach((s) => {
@@ -631,6 +720,7 @@
     $("q-log").textContent = ""; lastId = 0; lastRecorded = -1;
     const p = new URLSearchParams({ queue_id: Q.queue_id, experiment: expName() });
     if (restart) p.set("restart", "true");
+    if (myShare()) p.set("share", String(myShare()));
     if (who()) p.set("run_by", who());
     openStream("/api/queue/run?" + p.toString());
     setTimeout(pollState, 600);
@@ -666,7 +756,8 @@
     const what = { paused: "Paused", halted: "Stopped by itself", interrupted: "Cut off" }[qstate.status];
     const why = qstate.status === "halted" && qstate.reason ? `: ${qstate.reason}. Fix that first` : qstate.status === "interrupted" ? " (the Lab or the machine went down)" : "";
     box.className = "q-paused" + (qstate.problem ? " problem" : "");
-    box.textContent = qstate.problem || `${what} "${qstate.queue_name}" · experiment "${qstate.experiment}"${where}${why}. ${left}. Continue keeps every finished run and runs only what is missing.`;
+    const shareTxt = qstate.share ? ` · share ${qstate.share} of ${qstate.machines || "?"}` : "";
+    box.textContent = qstate.problem || `${what} "${qstate.queue_name}" · experiment "${qstate.experiment}"${shareTxt}${where}${why}. ${left}. Continue keeps every finished run and runs only what is missing${qstate.share ? " in the same share" : ""}.`;
     btn.disabled = !qstate.can_continue;
   }
   $("q-continue").addEventListener("click", async () => {

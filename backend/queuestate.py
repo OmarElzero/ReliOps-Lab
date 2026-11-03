@@ -44,10 +44,12 @@ def read() -> dict[str, Any] | None:
     return data if isinstance(data, dict) and data.get("queue_id") else None
 
 
-def begin(queue: dict, experiment: str, run_by: str | None) -> None:
-    """The queue starts (or continues). Until `end` is called the state says 'running'."""
+def begin(queue: dict, experiment: str, run_by: str | None, share: int | None = None) -> None:
+    """The queue starts (or continues). Until `end` is called the state says 'running'. `share` is the machine share
+    this machine runs (None = every problem), so Continue keeps to the same share."""
     _write({"status": "running", "queue_id": queue.get("queue_id"), "queue_name": queue.get("name"),
-            "experiment": experiment, "run_by": run_by or "", "started_at": _now(), "updated_at": _now(),
+            "experiment": experiment, "run_by": run_by or "", "share": share, "machines": queue.get("machines") or 1,
+            "started_at": _now(), "updated_at": _now(),
             "step": None, "step_name": "", "reason": "", "left": None})
 
 

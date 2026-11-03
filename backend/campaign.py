@@ -112,12 +112,18 @@ def grid(manifest: dict, runs: list[dict], metric: str = "e2e_pass") -> dict:
             "todo": [(c["problem"], c["repeat"]) for c in cells if c["status"] in ("missing", "incomplete")]}
 
 
-def slice_cells(cells: list[tuple[str, int]], k: int, n: int) -> list[tuple[str, int]]:
+def slice_cells(cells: list[tuple[str, int]], k: int, n: int, manifest: dict | None = None) -> list[tuple[str, int]]:
     """Machine k of n takes every n-th cell. Deterministic, so five laptops given the same manifest and
-    their own k never overlap and never need to talk to each other."""
+    their own k never overlap and never need to talk to each other. With the manifest, the n-th cells are counted over
+    the campaign's whole grid, not over what is left, so a slice does not shift (and overlap another) while the other
+    machines finish cells; `cells` (what is left) is then kept to this machine's part."""
     if n < 1 or not 1 <= k <= n:
         raise ValueError("slice must be k of n with 1 <= k <= n")
-    return [c for i, c in enumerate(sorted(cells)) if i % n == k - 1]
+    if manifest is None:
+        return [c for i, c in enumerate(sorted(cells)) if i % n == k - 1]
+    every = sorted((p, r) for p in manifest["problems"] for r in range(1, int(manifest["repeat_n"]) + 1))
+    mine = {c for i, c in enumerate(every) if i % n == k - 1}
+    return [c for c in sorted(cells) if tuple(c) in mine]
 
 
 def manifest_runs_summary(manifest: dict, runs: list[dict], metric: str = "e2e_pass") -> dict | None:

@@ -532,10 +532,13 @@ def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str],
         _, all_runs = _collect_runs(5000)
         todo = campaign.grid(manifest, all_runs)["todo"]
         try:
-            cell_list = campaign.slice_cells(todo, slice_k, slice_n)
+            cell_list = campaign.slice_cells(todo, slice_k, slice_n, manifest)
         except ValueError as e:
             yield f"{e}\n"
             return
+        if cells is not None:                      # a queue step on one machine share: only those cells
+            wanted = {tuple(c) for c in cells}
+            cell_list = [c for c in cell_list if tuple(c) in wanted]
         run_class = "frozen"
         repeat_n = manifest["repeat_n"]
         if not cell_list:
@@ -686,7 +689,12 @@ class QueueIn(BaseModel):
     name: str
     steps: list[dict]
     created_by: str = ""
+    machines: int = 1          # how many machines share this queue (1 = one machine runs it all)
+    shares: Optional[list] = None   # optional hand-made problem lists, one per machine
+    split: str = "problem"          # shares made of problems, or of (problem, repeat) pairs
+    order: str = "step"             # run step by step, or every step of one (problem, repeat) back to back
     experiment: str = ""       # only used by the preview: the name typed in the run bar
+    share: Optional[int] = None     # only used by the preview: the machine share picked on this machine
 
 
 def _queues() -> list[dict]:
@@ -722,12 +730,15 @@ def delete_queue(queue_id: str):
 
 
 @app.get("/api/queue/preview")
-def queue_preview(queue_id: str, experiment: Optional[str] = None):
+def queue_preview(queue_id: str, experiment: Optional[str] = None, share: Optional[int] = None):
     q = _find_queue(queue_id)
     if q is None:
         return JSONResponse({"error": "unknown queue"}, status_code=404)
     _, runs = _collect_runs(5000)
-    return queueplan.preview(q, runs, store.read("manifests"), experiment)
+    try:
+        return queueplan.preview(q, runs, store.read("manifests"), experiment, share)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
 
 
 @app.post("/api/queue/preview")
@@ -738,14 +749,16 @@ def queue_preview_draft(body: QueueIn):
     draft["name"] = draft["name"].strip() or "draft"
     try:
         q = queueplan.clean_queue(draft)
+        _, runs = _collect_runs(5000)
+        return queueplan.preview(q, runs, store.read("manifests"), body.experiment, body.share)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    _, runs = _collect_runs(5000)
-    return queueplan.preview(q, runs, store.read("manifests"), body.experiment)
 
 
-def _runs_left(queue: dict, label: str, runs: Optional[list] = None) -> int:
-    """Cells the queue still has to run under this experiment label (enabled steps only)."""
+def _runs_left(queue: dict, label: str, runs: Optional[list] = None, share: Optional[int] = None) -> int:
+    """Cells the queue still has to run under this experiment label (enabled steps only; this machine's share only,
+    when one is picked)."""
+    only = queueplan.share_set(queue, share)
     manifests = store.read("manifests")
     if runs is None:
         _, runs = _collect_runs(5000)
@@ -756,35 +769,46 @@ def _runs_left(queue: dict, label: str, runs: Optional[list] = None) -> int:
         manifest = next((m for m in manifests if m.get("manifest_id") == step.get("manifest_id")), None) if step.get("manifest_id") else None
         if step.get("manifest_id") and manifest is None:
             continue
-        n += len(queueplan.todo(step, runs, manifest, label))
+        n += len(queueplan.todo(step, runs, manifest, label, only))
     return n
 
 
-def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: bool = False):
+def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: bool = False, share: Optional[int] = None):
     """Runs the queue and remembers how it ended (queuestate), so the Continue button can pick up from there."""
-    queuestate.begin(queue, experiment, run_by)
+    queuestate.begin(queue, experiment, run_by, share)
     outcome: dict = {"status": "interrupted"}
     try:
-        yield from _queue_steps(queue, run_by, experiment, restart, outcome)
+        yield from _queue_steps(queue, run_by, experiment, restart, outcome, share)
     finally:
         queuestate.end(**outcome)
 
 
-def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: bool, outcome: dict):
+def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: bool, outcome: dict,
+                 share: Optional[int] = None):
     steps = queue["steps"]
+    only = queueplan.share_set(queue, share)
     manifests = store.read("manifests")
     runner._stop_event.clear()
     _, all_runs = _collect_runs(5000)
     label = queueplan.experiment_label(experiment, all_runs, restart=restart)
     yield f"##### [QUEUE] {queue['name']}: {len(steps)} step(s) #####\n"
     yield f"##### [QUEUE] experiment: {label}{' (restarted from scratch)' if restart else ''} #####\n"
+    if only is not None:
+        mine = [p for p in queueplan.share_lists(queue)[share - 1]]
+        what = "problem-repeat pair(s)" if queue.get("split") == "repeat" else "problem(s)"
+        yield (f"##### [QUEUE] this machine runs share {share} of {queue.get('machines')}: {len(mine)} {what}, "
+               f"{', '.join(mine)}. The other shares are left to the other machines. #####\n")
 
     def paused(i: int, step_name: str):
-        left = _runs_left(queue, label)
+        left = _runs_left(queue, label, share=share)
         outcome.update(status="paused" if left else "finished", step=i, step_name=step_name, left=left)
         return (f"\n##### [QUEUE] paused after the current run, in step {i}/{len(steps)} ({step_name}); {left} run(s) left under \"{label}\". "
                 "Every finished run is recorded. Press Continue to carry on from here. #####\n") if left else \
                "\n##### [QUEUE] finished #####\n"
+
+    if queue.get("order") == "cell":
+        yield from _queue_by_cell(queue, steps, only, manifests, label, run_by, outcome, paused, share)
+        return
 
     for i, step in enumerate(steps, start=1):
         if runner._stop_event.is_set():
@@ -799,10 +823,11 @@ def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: b
             yield f"##### [QUEUE] step {i}/{len(steps)} cannot run: frozen campaign {step['manifest_id']} not found #####\n"
             continue
         _, runs = _collect_runs(5000)
-        cell_list = queueplan.todo(step, runs, manifest, label)
+        cell_list = queueplan.todo(step, runs, manifest, label, only)
         yield f"\n##### [QUEUE] step {i}/{len(steps)} start: {step['name']} | runs {len(cell_list)} to do #####\n"
         if not cell_list:
-            yield f"##### [QUEUE] step {i}/{len(steps)} nothing to do: every cell already has a result #####\n"
+            yield (f"##### [QUEUE] step {i}/{len(steps)} nothing to do: every cell "
+                   f"{'of this machine’s share ' if only is not None else ''}already has a result #####\n")
             continue
         if runner._stop_event.is_set():      # Pause pressed while the step was being prepared
             yield paused(i, step["name"])
@@ -814,20 +839,77 @@ def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: b
             repeat_n=step["repeat_n"], run_by=run_by, config_label=step.get("config_label") or None,
             run_class=step["run_class"], record_walkthrough=bool(step.get("record_walkthrough", True)),
             agent_switches=step.get("agent_switches") or None,
-            manifest_id=step.get("manifest_id"), cells=None if step.get("manifest_id") else cell_list,
+            manifest_id=step.get("manifest_id"),
+            cells=cell_list if (only is not None or not step.get("manifest_id")) else None,
             purpose=step.get("purpose") or None, experiment=label)
         yield f"##### [QUEUE] step {i}/{len(steps)} end #####\n"
         halted = runner.halt_reason()
         if halted:
             # The step stopped itself because the setup looks broken; the later steps would hit the same thing.
             left = len(steps) - i
-            outcome.update(status="halted", step=i, step_name=step["name"], reason=halted, left=_runs_left(queue, label))
+            outcome.update(status="halted", step=i, step_name=step["name"], reason=halted, left=_runs_left(queue, label, share=share))
             yield (f"\n##### [QUEUE] stopped after step {i}/{len(steps)} ({halted}); {left} later step(s) were not started. "
                    "Fix the cause, then press Continue: finished runs are kept and only missing cells run. #####\n")
             return
         if runner._stop_event.is_set():
             yield paused(i, step["name"])
             return
+    outcome.update(status="finished", left=0)
+    yield "\n##### [QUEUE] finished #####\n"
+
+
+def _queue_by_cell(queue: dict, steps: list, only, manifests: list, label: str, run_by: Optional[str], outcome: dict,
+                   paused, share: Optional[int]):
+    """Cell order: for each (problem, repeat) of this machine's share, every step that still needs it, back to back.
+    The configurations of one pair then run minutes apart on the same machine, so a slow hour of the model service
+    or a tired cluster falls on all of them alike instead of on whichever step happened to run then."""
+    _, runs = _collect_runs(5000)
+    plan = []
+    for i, step in enumerate(steps, start=1):
+        if not step.get("enabled", True):
+            yield f"##### [QUEUE] step {i}/{len(steps)} skipped (switched off): {step['name']} #####\n"
+            continue
+        manifest = next((m for m in manifests if m.get("manifest_id") == step.get("manifest_id")), None) \
+            if step.get("manifest_id") else None
+        if step.get("manifest_id") and manifest is None:
+            yield f"##### [QUEUE] step {i}/{len(steps)} cannot run: frozen campaign {step['manifest_id']} not found #####\n"
+            continue
+        plan.append((i, step, set(queueplan.todo(step, runs, manifest, label, only))))
+    pos = {p: n for n, p in enumerate(queueplan.queue_problems(queue))}
+    pairs = sorted({c for _, _, t in plan for c in t}, key=lambda c: (c[1], pos.get(c[0], 0)))
+    total = sum(len(t) for _, _, t in plan)
+    yield (f"##### [QUEUE] cell order: {len(pairs)} problem-repeat pair(s), every step of a pair back to back; "
+           f"{total} run(s) to do #####\n")
+    built = False
+    for n, (problem, rep) in enumerate(pairs, start=1):
+        for i, step, todo in plan:
+            if (problem, rep) not in todo:
+                continue
+            if runner._stop_event.is_set():
+                yield paused(i, step["name"])
+                return
+            force = bool(step.get("force_build")) and not built
+            built = built or force
+            yield f"\n##### [QUEUE] step {i}/{len(steps)} start: {step['name']} | runs 1 to do #####\n"
+            yield f"[cell] {problem}, repeat {rep} (pair {n} of {len(pairs)})\n"
+            yield from _run_lines(
+                agent=step["agent_id"], model=step["model_id"], judge_model=step["judge_model_id"],
+                problems=step["problems"], action_space=step.get("action_space"), force_build=force,
+                repeat_n=step["repeat_n"], run_by=run_by, config_label=step.get("config_label") or None,
+                run_class=step["run_class"], record_walkthrough=bool(step.get("record_walkthrough", True)),
+                agent_switches=step.get("agent_switches") or None, manifest_id=step.get("manifest_id"),
+                cells=[(problem, rep)], purpose=step.get("purpose") or None, experiment=label)
+            yield f"##### [QUEUE] step {i}/{len(steps)} end #####\n"
+            halted = runner.halt_reason()
+            if halted:
+                outcome.update(status="halted", step=i, step_name=step["name"], reason=halted,
+                               left=_runs_left(queue, label, share=share))
+                yield (f"\n##### [QUEUE] stopped at {problem}, repeat {rep}, step {i}/{len(steps)} ({halted}). "
+                       "Fix the cause, then press Continue: finished runs are kept and only missing cells run. #####\n")
+                return
+            if runner._stop_event.is_set():
+                yield paused(i, step["name"])
+                return
     outcome.update(status="finished", left=0)
     yield "\n##### [QUEUE] finished #####\n"
 
@@ -841,7 +923,7 @@ def queue_state():
         if q is None:
             return {"state": {**st, "can_continue": False, "problem": "The queue was deleted, so it cannot be continued."}}
         try:
-            st["left"] = _runs_left(q, queueplan.experiment_label(st["experiment"], _collect_runs(5000)[1]))
+            st["left"] = _runs_left(q, queueplan.experiment_label(st["experiment"], _collect_runs(5000)[1]), share=st.get("share"))
         except Exception:  # noqa: BLE001 - the stored count is still shown
             pass
         if st["left"] == 0:
@@ -859,12 +941,19 @@ def queue_continue(run_by: Optional[str] = None):
     if q is None:
         return _refusal(["The queue that was running has been deleted, so it cannot be continued.\n"])
     exp = st["experiment"]
-    return _job_sse(lambda: _queue_lines(q, run_by or st.get("run_by") or None, exp, False), "queue", q["name"],
-                    {"queue_id": q["queue_id"], "experiment": exp})
+    share = st.get("share") or None
+    try:
+        queueplan.share_set(q, share)
+    except ValueError:
+        return _refusal([f"The queue now has fewer machine shares than the share this machine was running ({share}). "
+                         "Pick a share and press Run queue.\n"])
+    return _job_sse(lambda: _queue_lines(q, run_by or st.get("run_by") or None, exp, False, share), "queue", q["name"],
+                    {"queue_id": q["queue_id"], "experiment": exp, "share": share})
 
 
 @app.get("/api/queue/run")
-def queue_run(queue_id: str, run_by: Optional[str] = None, experiment: str = "", restart: bool = False):
+def queue_run(queue_id: str, run_by: Optional[str] = None, experiment: str = "", restart: bool = False,
+              share: Optional[int] = None):
     q = _find_queue(queue_id)
     if q is None:
         return _refusal(["unknown queue\n"])
@@ -873,8 +962,13 @@ def queue_run(queue_id: str, run_by: Optional[str] = None, experiment: str = "",
     experiment = (experiment or "").strip()
     if not experiment:
         return _refusal(["Give this experiment a name first (the box next to Run queue). Every run is recorded under it.\n"])
-    return _job_sse(lambda: _queue_lines(q, run_by, experiment, restart), "queue", q["name"],
-                    {"queue_id": queue_id, "experiment": experiment})
+    share = share or None
+    try:
+        queueplan.share_set(q, share)
+    except ValueError as e:
+        return _refusal([f"{e}\n"])
+    return _job_sse(lambda: _queue_lines(q, run_by, experiment, restart, share), "queue", q["name"],
+                    {"queue_id": queue_id, "experiment": experiment, "share": share})
 
 
 # ---- Problem cards ------------------------------------------------------------------
@@ -1003,7 +1097,7 @@ def campaign_grid(manifest_id: str, metric: str = "e2e_pass", k: int = 1, n: int
     _, runs = _collect_runs(5000)
     g = campaign.grid(manifest, runs, metric)
     try:
-        mine = campaign.slice_cells(g["todo"], k, n)
+        mine = campaign.slice_cells(g["todo"], k, n, manifest)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     g["slice"] = {"k": k, "n": n, "cells": [{"problem": p, "repeat": r} for p, r in mine]}

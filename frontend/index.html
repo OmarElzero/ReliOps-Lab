@@ -36,6 +36,17 @@
     <section class="card q-head">
       <input id="q-name" class="q-name" aria-label="Queue name" placeholder="Name this queue, e.g. Phase B baseline" autocomplete="off">
       <span id="q-state" class="chip" hidden></span>
+      <label class="q-machines" title="Split this queue across several machines. Everyone sees the whole queue; each machine picks its share below Run queue and runs only that share's problems (every configuration of a problem stays on one machine).">
+        Machines <input id="q-machines" type="number" min="1" max="20" step="1" value="1" aria-label="How many machines share this queue">
+      </label>
+      <select id="q-split" hidden aria-label="How the queue is split across machines" title="By problem: each machine takes whole problems (all repeats). By problem and repeat: each machine takes (problem, repeat) pairs, which evens out the load when the problems do not divide by the number of machines. Either way, every configuration of a pair runs on the same machine.">
+        <option value="problem">split by problem</option>
+        <option value="repeat">split by problem and repeat</option>
+      </select>
+      <select id="q-order" aria-label="Run order" title="Step by step: every run of step 1, then step 2, and so on. Problem by problem: for each problem and repeat, every step back to back, so the configurations being compared run close together in time (better for comparing them).">
+        <option value="step">run step by step</option>
+        <option value="cell">run problem by problem</option>
+      </select>
       <div class="q-tools">
         <select id="q-open" aria-label="Open a saved queue"></select>
         <button id="q-new" class="secondary small" type="button">New</button>
@@ -73,12 +84,18 @@
         <datalist id="q-exp-list"></datalist>
         <p class="hint" id="q-exp-note">Every run is recorded under this name. Use the same name to continue, a new name to start fresh.</p>
       </div>
+      <div class="q-exp" id="q-share-box" hidden>
+        <label for="q-share">This machine runs</label>
+        <select id="q-share" aria-label="Which share of the queue this machine runs"></select>
+        <p class="hint" id="q-share-note"></p>
+      </div>
       <div class="q-actions">
         <button id="q-run" class="primary" type="button" disabled>▶ Run queue</button>
         <button id="q-continue" class="primary" type="button" hidden title="Carry on the queue that was paused, from the first cell that has no result yet">▶ Continue</button>
         <button id="q-stop" class="secondary" type="button" disabled title="Finish the run in progress, record it, then pause. Continue picks up from there.">Pause after current run</button>
         <button id="q-restart" class="secondary danger" type="button" disabled title="Start the whole queue again from step 1">↻ Restart</button>
       </div>
+      <div class="q-shares" id="q-shares" hidden></div>
     </div>
 
     <section class="card now" id="q-now" hidden>

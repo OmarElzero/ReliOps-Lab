@@ -302,5 +302,93 @@ class QueueApiTests(TmpRepoCase):
         self.assertIn("[[DONE]]", r.text)
 
 
+class MachineShareTests(unittest.TestCase):
+    """One queue, shown whole to everyone; each machine picks share k of N and runs only that share's problems."""
+
+    def _queue(self, **kw):
+        probs = [f"p{i}" for i in range(1, 8)]
+        raw = {"name": "R2", "steps": [step(problems=probs, repeat_n=1, config_label="A"),
+                                       step(problems=probs, repeat_n=1, config_label="B")], **kw}
+        return queueplan.clean_queue(raw)
+
+    def test_round_robin_by_problem_covers_everything_once(self):
+        q = self._queue(machines=3)
+        lists = queueplan.share_lists(q)
+        self.assertEqual(lists, [["p1", "p4", "p7"], ["p2", "p5"], ["p3", "p6"]])
+        self.assertEqual(sorted(p for x in lists for p in x), sorted(queueplan.queue_problems(q)))
+        self.assertIsNone(queueplan.share_set(q, None))
+        self.assertEqual(queueplan.share_set(q, 2), {"p2", "p5"})
+        with self.assertRaises(ValueError):
+            queueplan.share_set(q, 4)
+
+    def test_hand_made_shares_are_kept_and_unnamed_problems_are_placed(self):
+        q = self._queue(machines=2, shares=[["p1", "p2", "p3"], ["p4"]])
+        self.assertEqual(queueplan.share_lists(q), [["p1", "p2", "p3", "p7"], ["p4", "p5", "p6"]])  # each unnamed one goes to the smaller share
+        with self.assertRaises(ValueError):
+            self._queue(machines=2, shares=[["p1"], ["p1"]])
+        with self.assertRaises(ValueError):
+            self._queue(machines=2, shares=[["p1"]])
+        with self.assertRaises(ValueError):
+            self._queue(machines=25)
+
+    def test_every_configuration_of_a_problem_stays_on_one_machine(self):
+        q = self._queue(machines=3)
+        runs = []
+        for k in (1, 2, 3):
+            only = queueplan.share_set(q, k)
+            for s in q["steps"]:
+                for p, _ in queueplan.todo(s, runs, None, None, only):
+                    self.assertIn(p, only)
+        mine = [{p for p, _ in queueplan.todo(s, runs, None, None, queueplan.share_set(q, 1))} for s in q["steps"]]
+        self.assertEqual(mine[0], mine[1])
+
+    def test_preview_counts_the_share_but_shows_every_cell_and_who_ran_each_share(self):
+        q = self._queue(machines=3)
+        runs = [dict(run(1, "p1", 1, True, label="A"), experiment="X", run_by="Omar"),
+                dict(run(2, "p2", 1, False, label="A"), experiment="X", run_by="Mona")]
+        pv = queueplan.preview(q, runs, [], "X", share=1)
+        self.assertEqual(pv["total_runs"], 6)              # 3 problems x 2 steps
+        self.assertEqual(pv["runs_left"], 5)               # p1 under A is done
+        self.assertEqual(pv["all_total_runs"], 14)
+        self.assertEqual(pv["all_runs_left"], 12)
+        self.assertEqual(len(pv["steps"][0]["cells"]), 7)  # the whole grid is still returned
+        self.assertEqual(sum(c["mine"] for c in pv["steps"][0]["cells"]), 3)
+        sh = pv["shares"]
+        self.assertEqual([x["done"] for x in sh], [1, 1, 0])
+        self.assertEqual(sh[0]["people"][0]["name"], "Omar")
+        self.assertEqual(sh[1]["people"][0]["name"], "Mona")
+        whole = queueplan.preview(q, runs, [], "X")
+        self.assertIsNone(whole["share"])
+        self.assertEqual(whole["runs_left"], 12)
+
+    def test_split_by_repeat_balances_and_keeps_configs_of_a_pair_together(self):
+        probs = [f"p{i}" for i in range(1, 13)]
+        q = queueplan.clean_queue({"name": "R2", "machines": 5, "split": "repeat",
+                                   "steps": [step(problems=probs, repeat_n=3, config_label="A"),
+                                             step(problems=probs, repeat_n=3, config_label="B")]})
+        lists = queueplan.share_lists(q)
+        self.assertEqual(sorted(len(x) for x in lists), [7, 7, 7, 7, 8])
+        self.assertEqual(len({u for x in lists for u in x}), 36)
+        cells_by_share = []
+        for k in range(1, 6):
+            only = queueplan.share_set(q, k)
+            a, b = (set(queueplan.todo(s, [], None, None, only)) for s in q["steps"])
+            self.assertEqual(a, b)                       # both configurations of a (problem, repeat) on one machine
+            cells_by_share.append(a)
+        self.assertEqual(sum(len(x) for x in cells_by_share), 36)
+        self.assertEqual(len(set().union(*cells_by_share)), 36)
+        with self.assertRaises(ValueError):
+            queueplan.clean_queue({"name": "x", "split": "cell", "steps": [step()]})
+
+    def test_a_campaign_slice_does_not_shift_as_other_machines_finish(self):
+        import campaign
+        manifest = {"problems": ["a", "b", "c", "d"], "repeat_n": 1}
+        every = [("a", 1), ("b", 1), ("c", 1), ("d", 1)]
+        before = campaign.slice_cells(every, 2, 2, manifest)
+        after = campaign.slice_cells([("c", 1), ("d", 1)], 2, 2, manifest)   # machine 1 finished a and b
+        self.assertEqual(before, [("b", 1), ("d", 1)])
+        self.assertEqual(after, [("d", 1)])                                     # still never takes c
+
+
 if __name__ == "__main__":
     unittest.main()
