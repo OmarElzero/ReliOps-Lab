@@ -861,8 +861,9 @@ def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: b
 def _queue_by_cell(queue: dict, steps: list, only, manifests: list, label: str, run_by: Optional[str], outcome: dict,
                    paused, share: Optional[int]):
     """Cell order: for each (problem, repeat) of this machine's share, every step that still needs it, back to back.
-    The configurations of one pair then run minutes apart on the same machine, so a slow hour of the model service
-    or a tired cluster falls on all of them alike instead of on whichever step happened to run then."""
+    The configurations of one pair then run close together on the same machine, so a slow hour of the model service
+    or a tired cluster falls on all of them alike instead of on whichever step happened to run then. Each pair starts
+    one step later than the one before, so no configuration is always the first (or last) of its block."""
     _, runs = _collect_runs(5000)
     plan = []
     for i, step in enumerate(steps, start=1):
@@ -882,13 +883,14 @@ def _queue_by_cell(queue: dict, steps: list, only, manifests: list, label: str, 
            f"{total} run(s) to do #####\n")
     built = False
     for n, (problem, rep) in enumerate(pairs, start=1):
-        for i, step, todo in plan:
+        rot = (n - 1) % len(plan) if plan else 0          # each pair starts one step later, so no step is always first
+        for i, step, todo in plan[rot:] + plan[:rot]:
             if (problem, rep) not in todo:
                 continue
             if runner._stop_event.is_set():
                 yield paused(i, step["name"])
                 return
-            force = bool(step.get("force_build")) and not built
+            force = any(st.get("force_build") for _, st, _ in plan) and not built
             built = built or force
             yield f"\n##### [QUEUE] step {i}/{len(steps)} start: {step['name']} | runs 1 to do #####\n"
             yield f"[cell] {problem}, repeat {rep} (pair {n} of {len(pairs)})\n"

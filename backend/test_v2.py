@@ -938,7 +938,7 @@ class QueuePauseAndContinueTests(TmpRepoCase):
         mine = queueplan.share_set(q, 1)
         self.assertEqual(len(calls), 2 * len(mine))
         self.assertTrue(all(queueplan.unit(*c) in mine for c, _, _ in calls))
-        self.assertEqual([lab for _, lab, _ in calls], ["A", "B"] * len(mine))      # A then B for each pair
+        self.assertEqual([lab for _, lab, _ in calls], ["A", "B", "B", "A"] * (len(mine) // 2))  # order rotates per pair
         self.assertEqual([c for c, _, _ in calls][0::2], [c for c, _, _ in calls][1::2])
         self.assertEqual([fb for _, _, fb in calls], [True] + [False] * (len(calls) - 1))
         self.assertIn("cell order", log)
