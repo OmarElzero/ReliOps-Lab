@@ -1689,6 +1689,10 @@ def stream_campaign(
             env[pool_target(pool)] = picked[1]["value"]
         if os.environ.get("REACT_V1_LOG_OBS") is None:
             env["REACT_V1_LOG_OBS"] = "on"  # record what each command returned, for the story
+        if os.environ.get("REACT_V1_LOG_OBS_MAX") is None:
+            # the agent sees up to 8,000 characters of each output; the agents' default record keeps 3,000, so stories showed
+            # less than the agent saw (pods named in a thought but missing from "Sees")
+            env["REACT_V1_LOG_OBS_MAX"] = "9000"
         cmd = [
             "uv", "run", "main.py",
             "--agent", agent,

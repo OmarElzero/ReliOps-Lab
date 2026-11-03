@@ -208,3 +208,19 @@ class DashboardApiTests(TmpRepoCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class HistoryTests(unittest.TestCase):
+    def test_each_experiment_lists_every_version_with_end_to_end_diagnosis_and_fix(self):
+        def r(rid, exp, label, e2e, diag, mit, problem="p1", ts="2026-11-02T10:00:00Z"):
+            return {"run_id": rid, "timestamp_utc": ts, "problem_id": problem, "agent_id": "reliops_v2", "model_id": "m",
+                    "judge_model_id": "j", "action_space": "typed+shell", "config_label": label, "run_class": "exploration",
+                    "repeat_index": 1, "run_by": "omar", "purpose": "dev", "experiment": exp,
+                    "e2e_pass": e2e, "diagnosis_pass": diag, "mitigation_pass": mit}
+        runs = [r("1", "Dev - R1", "B", True, True, True), r("2", "Dev - R1", "B", False, True, False, "p2"),
+                r("3", "Dev - R1", "c2", None, None, None), r("4", "Dev - R2", "R2 FULL", True, True, True, ts="2026-11-04T09:00:00Z")]
+        d = dashboard.build(runs, {}, "e2e_pass", [], [], [], "local")
+        self.assertEqual([h["experiment"] for h in d["history"]], ["Dev - R2", "Dev - R1"])
+        r1 = {c["config_label"]: c for c in d["history"][1]["configs"]}
+        self.assertEqual(r1["B"]["e2e"], [1, 2]); self.assertEqual(r1["B"]["diagnosis"], [2, 2]); self.assertEqual(r1["B"]["mitigation"], [1, 2])
+        self.assertEqual(r1["c2"]["unfinished"], 1)

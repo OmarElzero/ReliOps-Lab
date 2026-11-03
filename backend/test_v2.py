@@ -1413,7 +1413,7 @@ class AgentSwitchTests(unittest.TestCase):
 
     def test_v1_runs_get_no_switch_variables(self):
         _, seen, records = self._campaign("reliops_v1", None)
-        self.assertFalse([k for k in seen[0] if k.startswith("REACT_V1_") and k != "REACT_V1_ACTION_SPACE" and k != "REACT_V1_LOG_OBS"])
+        self.assertFalse([k for k in seen[0] if k.startswith("REACT_V1_") and k not in ("REACT_V1_ACTION_SPACE", "REACT_V1_LOG_OBS", "REACT_V1_LOG_OBS_MAX")])
         self.assertEqual(records[0]["agent_switches"], "")
 
     def test_tokens_are_read_from_either_key_format(self):

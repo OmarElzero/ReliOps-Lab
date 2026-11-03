@@ -88,6 +88,7 @@
     renderKpis();
     renderNotes();
     renderPeople();
+    renderHistory();
     renderProvenance();
     renderSummary();
     renderCategories();
@@ -314,6 +315,40 @@
         Object.entries(p.purposes).map(([k, v]) => `${k} ${v}`).join(", "),
         p.first === p.last ? (p.first || "—") : `${p.first} to ${p.last}`].forEach((x) => tr.appendChild(el("td", x)));
       t.appendChild(tr);
+    });
+    box.appendChild(t);
+  }
+
+  function renderHistory() {
+    const box = $("dash-history");
+    box.innerHTML = "";
+    const hist = DATA.history || [];
+    if (!hist.length) { box.appendChild(el("p", "No runs match these filters.", "hint")); return; }
+    const frac = (x) => (x && x[1] ? `${x[0]} / ${x[1]}` : "—");
+    const t = el("table", undefined, "results-table");
+    const h = el("tr");
+    ["Experiment / agent version", "Runs", "End to end", "Diagnosis", "Fix", "Unfinished", "Problems", "Repeats", "Last run"].forEach((x) => h.appendChild(el("th", x)));
+    t.appendChild(h);
+    hist.forEach((e) => {
+      const tr = el("tr", undefined, "hist-exp");
+      const name = el("td", undefined, "r-problem");
+      name.appendChild(linkButton(e.experiment, () => addFilter("experiment", e.experiment), "show only this experiment"));
+      name.appendChild(el("div", `${e.people.join(", ")} · ${Object.entries(e.purposes).map(([k, v]) => `${k} ${v}`).join(", ")}`, "cfg-sub"));
+      tr.appendChild(name);
+      tr.appendChild(el("td", String(e.runs)));
+      const span = el("td", `${e.configs.length} version${e.configs.length === 1 ? "" : "s"}`); span.colSpan = 6; tr.appendChild(span);
+      tr.appendChild(el("td", e.first && e.last && e.first !== e.last.slice(0, 10) ? `${e.first} to ${e.last.slice(0, 10)}` : (e.last || "—")));
+      t.appendChild(tr);
+      e.configs.forEach((c) => {
+        const r = el("tr");
+        const cfg = el("td", undefined, "r-config hist-cfg");
+        cfg.appendChild(linkButton(c.config_label, () => addFilter("config_label", c.config_label), "show only this version"));
+        cfg.appendChild(el("div", `${c.agent_id} · ${c.action_space}`, "cfg-sub"));
+        r.appendChild(cfg);
+        [String(c.runs), frac(c.e2e), frac(c.diagnosis), frac(c.mitigation), String(c.unfinished), String(c.problems),
+          String(c.repeats), (c.last || "—").replace("T", " ")].forEach((x) => r.appendChild(el("td", x)));
+        t.appendChild(r);
+      });
     });
     box.appendChild(t);
   }

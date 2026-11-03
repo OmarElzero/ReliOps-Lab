@@ -211,6 +211,31 @@ def build(all_runs: list[dict], f: dict, metric: str, manifests: list[dict], lab
                        "last": days[-1] if days else None})
     people.sort(key=lambda p: (-p["runs"], p["name"]))
 
+    # every experiment (queue start) with each agent version's results side by side: a history of past queues and campaigns
+    by_exp: dict[str, list[dict]] = defaultdict(list)
+    for r in runs:
+        by_exp[(r.get("experiment") or "").strip() or "(no experiment name)"].append(r)
+    history = []
+    for exp, rs in by_exp.items():
+        configs: dict[tuple, list[dict]] = defaultdict(list)
+        for r in rs:
+            configs[(r.get("config_label") or "-", r.get("agent_id") or "?", r.get("action_space") or "?")].append(r)
+        rows_ = []
+        for (label, agent, space), crs in configs.items():
+            e2e, dg, mt = _cell(crs, "e2e_pass"), _cell(crs, "diagnosis_pass"), _cell(crs, "mitigation_pass")
+            reps = Counter((r.get("problem_id"), r.get("repeat_index")) for r in crs if isinstance(r.get("e2e_pass"), bool))
+            rows_.append({"config_label": label, "agent_id": agent, "action_space": space, "runs": len(crs),
+                          "e2e": [e2e["pass"], e2e["n"]], "diagnosis": [dg["pass"], dg["n"]], "mitigation": [mt["pass"], mt["n"]],
+                          "unfinished": e2e["incomplete"], "problems": len({r.get("problem_id") for r in crs}),
+                          "repeats": max((r.get("repeat_index") or 1) for r in crs) if crs else 0,
+                          "last": max((r.get("timestamp_utc") or "") for r in crs)[:16]})
+        rows_.sort(key=lambda x: (-(x["e2e"][0] / x["e2e"][1] if x["e2e"][1] else -1), x["config_label"]))
+        stamps = sorted((r.get("timestamp_utc") or "") for r in rs if r.get("timestamp_utc"))
+        history.append({"experiment": exp, "runs": len(rs), "first": stamps[0][:10] if stamps else None,
+                        "last": stamps[-1][:16] if stamps else None, "people": sorted({_val(r, "run_by") for r in rs}),
+                        "purposes": dict(Counter(r.get("purpose") for r in rs)), "configs": rows_})
+    history.sort(key=lambda h: h["last"] or "", reverse=True)
+
     trim = sorted(runs, key=lambda r: r.get("timestamp_utc") or "", reverse=True)[:RUN_LIMIT]
     cols = ("run_id", "timestamp_utc", "problem_id", "category", "app", "purpose", "purpose_source", "agent_id", "model_id",
             "action_space", "config_label", "agent_switches", "experiment", "judge_model_id", "run_class", "repeat_index", "e2e_pass", "diagnosis_pass",
@@ -228,7 +253,7 @@ def build(all_runs: list[dict], f: dict, metric: str, manifests: list[dict], lab
             "tagged_failures": sum(1 for r in runs if outcome(r, metric) == "fail" and (r.get("failure_mode_tag") or "").strip()),
             "failures": sum(1 for r in runs if outcome(r, metric) == "fail")}
     return {"metric": metric, "filters": f or {}, "kpis": kpis, "groups": groups, "matrix": matrix, "categories": categories,
-            "tags": [{"tag": t, "n": n} for t, n in tags.most_common()], "timeline": timeline, "people": people, "provenance": prov,
+            "tags": [{"tag": t, "n": n} for t, n in tags.most_common()], "timeline": timeline, "people": people, "history": history, "provenance": prov,
             "notes": notes, "runs": rows, "runs_truncated": len(runs) > RUN_LIMIT, "options": options(all_runs, metric)}
 
 
