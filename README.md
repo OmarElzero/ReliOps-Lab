@@ -138,18 +138,21 @@ pip install -r requirements.txt
 cd backend && uvicorn app:app --host 127.0.0.1 --port 8765 --reload
 ```
 
-**Windows (WSL2) first, before Run setup.** WSL gets only part of your RAM unless you raise it, and the machine check at the top of
-the Setup tab warns below 12 GB (the manual setup lists 16 GB as the minimum for one run, 32 GB as comfortable). Create
-`%UserProfile%\.wslconfig`, then run `wsl --shutdown` in PowerShell and reopen the Lab:
+**Windows (WSL2): memory.** The cluster runs inside WSL, so the memory WSL has is what the runs use; Windows keeps the rest (it needs
+roughly 4 GB). The machine check at the top of the Setup tab shows how much WSL has. If it shows 10 GB or more, leave it alone. If it
+shows less (WSL often gets only half by default), create `%UserProfile%\.wslconfig`, run `wsl --shutdown` in PowerShell and reopen the
+Lab. Never set more than your laptop has:
 
 ```ini
 [wsl2]
-memory=16GB      # example for a 24 GB laptop: leave about 8 GB for Windows
+memory=11GB      # 16 GB laptop (about 5 GB left for Windows); 24 GB laptop: 16GB; 32 GB laptop: 24GB
 swap=8GB
 ```
 
-Also stop Windows from sleeping during runs (`powercfg /change standby-timeout-ac 0` from an admin PowerShell, lid open). Full details:
-`ReliOps/docs/MANUAL-SETUP.md` §1.
+How much a run really needs on a 16 GB laptop has not been measured yet (the manual setup lists 16 GB of machine RAM as the minimum, and
+its tested laptop had 32 GB). If runs end as "app failed to deploy" or get killed, memory is the first suspect: close the browser's
+heavy tabs and other apps during runs. Also stop Windows from sleeping (`powercfg /change standby-timeout-ac 0` from an admin
+PowerShell, lid open). Details: `ReliOps/docs/MANUAL-SETUP.md` §1.
 
 **What the machine check will say before the first Setup.** `missing from PATH: kind` is expected: **Run setup** installs `kind`. The
 other tools (`kubectl`, `helm`, `uv`) and Docker must already work; if one of them is listed, install it first (`MANUAL-SETUP.md` §2).
