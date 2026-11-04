@@ -665,19 +665,63 @@ def _stream(
     yield f"\n[exit code {proc.returncode}]\n"
 
 
-def ensure_clone() -> Iterator[str]:
-    """Clones (or updates) ReliOps into DEFAULT_WORKDIR. Handles the two failure modes seen in
+_GIT_AUTH_MARKERS = (
+    "could not read Username", "could not read Password", "Authentication failed",
+    "terminal prompts disabled", "Repository not found", "403",
+)
+
+_GIT_AUTH_HELP = (
+    "\nThat's a GitHub auth failure, not a network problem — ReliOps is a private repo, "
+    "so a plain anonymous clone can't read it. Two things need to be true, once per "
+    "machine (not once per run):\n"
+    "  1. The repo owner adds you as a Collaborator: "
+    "github.com/OmarElzero/ReliOps/settings/access — a private repo won't clone for "
+    "anyone without access, even with a correct token.\n"
+    "  2. Your machine has git credentials for GitHub that don't need a terminal prompt "
+    "(this GUI can't show you one). Easiest: install the GitHub CLI and run "
+    "`gh auth login` once — it wires up git for you. Or generate a Personal Access "
+    "Token (classic, 'repo' scope) at github.com/settings/tokens, run "
+    "`git config --global credential.helper store`, then clone the repo manually one "
+    "time by hand, pasting your GitHub username and the token as the password when "
+    "asked — after that, this tool's own clone will reuse the same saved credentials.\n"
+)
+
+
+def ensure_clone(ok: list | None = None) -> Iterator[str]:
+    """Clones (or updates) ReliOps into DEFAULT_WORKDIR. Handles the failure modes seen in
     practice: a leftover, non-empty directory from an earlier interrupted/failed setup attempt
-    (git clone refuses to clone into it — we now clear it out first), and a clone that itself
-    failed (we now stop before `git checkout`, instead of running it in a directory that was
-    never actually a git repo and getting a confusing second error on top of the first)."""
+    (git clone refuses to clone into it — we now clear it out first), a clone that itself
+    failed (we stop before `git checkout`, instead of running it in a directory that was
+    never actually a git repo), and an existing clone that cannot be UPDATED because git has no
+    GitHub credentials on this machine: that used to scroll past as "fatal: could not read Username"
+    while Setup carried on with the old agent code, so one machine ran something different from the
+    team's and nobody noticed. Now it says so plainly and stops.
+
+    If `ok` is given, True is appended when the clone is present and current, False when Setup should stop."""
     DEFAULT_WORKDIR.mkdir(parents=True, exist_ok=True)
 
     if (reliops_dir() / ".git").exists():
         yield "ReliOps clone already present — fetching the latest and switching to the working branch.\n"
-        yield from _stream(["git", "fetch", "origin", RELIOPS_BRANCH], cwd=reliops_dir())
+        out: list[str] = []
+        res: list[int] = []
+        yield from _stream(["git", "fetch", "origin", RELIOPS_BRANCH], cwd=reliops_dir(), result=res, capture=out)
         yield from _stream(["git", "checkout", RELIOPS_BRANCH], cwd=reliops_dir())
-        yield from _stream(["git", "pull", "--ff-only", "origin", RELIOPS_BRANCH], cwd=reliops_dir())
+        pull_res: list[int] = []
+        yield from _stream(["git", "pull", "--ff-only", "origin", RELIOPS_BRANCH], cwd=reliops_dir(), result=pull_res, capture=out)
+        if (res and res[0] != 0) or (pull_res and pull_res[0] != 0):
+            joined = "".join(out)
+            head = (_git_commit_safe() or "")[:8] or "unknown"
+            if any(m in joined for m in _GIT_AUTH_MARKERS):
+                yield _GIT_AUTH_HELP
+                yield (f"\n[stopped: this machine could not update the ReliOps code (it is still on commit {head}), so a run here would not "
+                       "match the team's. Nothing was built. Fix the GitHub sign-in above, then press Run setup again.]\n")
+                if ok is not None:
+                    ok.append(False)
+                return
+            yield (f"\n[warning: git could not update the ReliOps code (still on commit {head}); see the lines above. If the other machines are "
+                   "on a newer commit, results from this one will not match theirs. Continuing with what is here.]\n")
+        if ok is not None:
+            ok.append(True)
         return
 
     if reliops_dir().exists():
@@ -695,29 +739,15 @@ def ensure_clone() -> Iterator[str]:
     )
     if clone_result and clone_result[0] != 0:
         joined = "".join(clone_output)
-        auth_markers = (
-            "could not read Username", "could not read Password", "Authentication failed",
-            "terminal prompts disabled", "Repository not found", "403",
-        )
-        if any(m in joined for m in auth_markers):
-            yield (
-                "\nThat's a GitHub auth failure, not a network problem — ReliOps is a private repo, "
-                "so a plain anonymous clone can't read it. Two things need to be true, once per "
-                "machine (not once per run):\n"
-                "  1. The repo owner adds you as a Collaborator: "
-                "github.com/OmarElzero/ReliOps/settings/access — a private repo won't clone for "
-                "anyone without access, even with a correct token.\n"
-                "  2. Your machine has git credentials for GitHub that don't need a terminal prompt "
-                "(this GUI can't show you one). Easiest: install the GitHub CLI and run "
-                "`gh auth login` once — it wires up git for you. Or generate a Personal Access "
-                "Token (classic, 'repo' scope) at github.com/settings/tokens, run "
-                "`git config --global credential.helper store`, then clone the repo manually one "
-                "time by hand, pasting your GitHub username and the token as the password when "
-                "asked — after that, this tool's own clone will reuse the same saved credentials.\n"
-            )
+        if any(m in joined for m in _GIT_AUTH_MARKERS):
+            yield _GIT_AUTH_HELP
         yield "git clone failed — stopping before checkout (see the exit code above).\n"
+        if ok is not None:
+            ok.append(False)
         return
     yield from _stream(["git", "checkout", RELIOPS_BRANCH], cwd=reliops_dir())
+    if ok is not None:
+        ok.append(True)
 
 
 KNOWN_PROVIDERS = ["GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"]
@@ -1370,7 +1400,10 @@ def _sync_model_keys_to_clone() -> None:
 
 
 def stream_setup() -> Iterator[str]:
-    yield from ensure_clone()
+    clone_ok: list[bool] = []
+    yield from ensure_clone(clone_ok)
+    if clone_ok and not clone_ok[0]:
+        return
     quickstart = reliops_dir() / "scripts" / "quickstart.sh"
     if not quickstart.is_file():
         yield (

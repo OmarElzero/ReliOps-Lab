@@ -202,7 +202,8 @@ def try_auto_connect() -> str:
     if found is None:
         _client = None
         _resolved_label = None
-        _status = "not configured — no credentials found in .env or the default file"
+        import runner
+        _status = f"not configured — no credentials found in {runner.lab_env_path()} or the default file"
         if _PROBLEM_HINT:
             _status += f" ({_PROBLEM_HINT})"
         return _status

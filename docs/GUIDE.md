@@ -217,3 +217,10 @@ so without this check a run would record the switch and not apply it.
 ## Deleting a saved queue
 
 Delete asks for a password. Put `LAB_DELETE_PASSWORD=your-password` in the Lab's own `.env` (next to `backend/` and `frontend/`; the file is git-ignored). Nothing needs restarting: the server reads it on every delete. Without that line nobody can delete a queue on that machine, so a teammate who pulled the code but has no password cannot remove a queue by mistake. The check is on the server, a wrong password waits a second before answering, and a deletion is shared with the other machines like any other queue change, so keep the password on the machines that should be able to delete. Results already recorded are never deleted with a queue.
+
+## Run setup says "could not read Username for 'https://github.com'"
+
+Git on that machine has no GitHub sign-in (the ReliOps repo is private). Run setup now **stops** with the steps to fix it and says which commit the clone is still on,
+instead of carrying on with old agent code that would not match the other machines. Once per machine: be added as a collaborator on the ReliOps repo, then run
+`gh auth login` (or save a personal access token with `git config --global credential.helper store` and one manual `git pull`), and press Run setup again.
+If git fails for another reason (no network), Setup warns with the commit it is on and continues.

@@ -747,6 +747,78 @@ class ServiceAccountPasteTests(unittest.TestCase):
         self.assertIsNone(self.fb._credential_from_env())
 
 
+class EnsureCloneTests(unittest.TestCase):
+    """Setup on a machine where git has no GitHub credentials must say so and stop, not carry on with old code."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "ReliOps" / ".git").mkdir(parents=True)
+        for target, ret in (("DEFAULT_WORKDIR", self.tmp), ("reliops_dir", self.tmp / "ReliOps")):
+            if target == "DEFAULT_WORKDIR":
+                p = mock.patch.object(runner, target, ret)
+            else:
+                p = mock.patch.object(runner, target, return_value=ret)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(runner, "_git_commit_safe", return_value="ba37a7b8aaaa")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _fake_stream(self, outcomes):
+        """outcomes: git subcommand -> (exit code, output text)"""
+        def fake(cmd, cwd=None, env=None, result=None, capture=None):
+            code, text = outcomes.get(cmd[1], (0, ""))
+            yield "$ " + " ".join(cmd) + "\n"
+            if text:
+                if capture is not None:
+                    capture.append(text)
+                yield text
+            if result is not None:
+                result.append(code)
+            yield f"\n[exit code {code}]\n"
+        return fake
+
+    def test_no_github_login_stops_setup_and_names_the_commit(self):
+        auth = (128, "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n")
+        with mock.patch.object(runner, "_stream", self._fake_stream({"fetch": auth, "pull": (1, auth[1])})):
+            ok = []
+            text = "".join(runner.ensure_clone(ok))
+        self.assertEqual(ok, [False])
+        self.assertIn("gh auth login", text)
+        self.assertIn("still on commit ba37a7b8", text)
+        self.assertIn("Nothing was built", text)
+
+    def test_setup_function_does_not_start_quickstart_after_that(self):
+        auth = (128, "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n")
+        calls = []
+        base = self._fake_stream({"fetch": auth, "pull": (1, auth[1])})
+
+        def spy(cmd, **kw):
+            calls.append(cmd)
+            return base(cmd, **kw)
+
+        with mock.patch.object(runner, "_stream", spy):
+            text = "".join(runner.stream_setup())
+        self.assertIn("Run setup again", text)
+        self.assertFalse(any(c[:2] == ["bash", "scripts/quickstart.sh"] for c in calls))
+
+    def test_a_network_failure_warns_but_continues(self):
+        net = (128, "fatal: unable to access 'https://github.com/x': Could not resolve host\n")
+        with mock.patch.object(runner, "_stream", self._fake_stream({"fetch": net, "pull": (1, net[1])})):
+            ok = []
+            text = "".join(runner.ensure_clone(ok))
+        self.assertEqual(ok, [True])
+        self.assertIn("warning: git could not update", text)
+        self.assertNotIn("gh auth login", text)
+
+    def test_a_clean_update_is_silent_about_problems(self):
+        with mock.patch.object(runner, "_stream", self._fake_stream({})):
+            ok = []
+            text = "".join(runner.ensure_clone(ok))
+        self.assertEqual(ok, [True])
+        self.assertNotIn("warning", text)
+
+
 if __name__ == "__main__":
     unittest.main()
 
