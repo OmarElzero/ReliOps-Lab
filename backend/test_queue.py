@@ -94,9 +94,24 @@ class PlanTests(unittest.TestCase):
 
     def test_preview_totals_skip_switched_off_steps(self):
         q = queueplan.clean_queue({"name": "q", "steps": [step(), step(enabled=False, config_label="x")]})
-        p = queueplan.preview(q, [run(1, "p1", 1, True)], [])
+        p = queueplan.preview(q, [run(1, "p1", 1, True, experiment="E")], [], "E")
         self.assertEqual((p["total_runs"], p["runs_left"]), (4, 3))
         self.assertEqual(p["steps"][1]["todo"], 0)
+
+    def test_no_experiment_name_counts_nothing(self):
+        """A machine that has not typed the name must not see other experiments' runs as progress (a teammate's board showed
+        three shares 'finished' that belonged to an older experiment)."""
+        q = queueplan.clean_queue({"name": "q", "machines": 2, "steps": [step()]})
+        runs = [run(1, "p1", 1, True, experiment="older experiment"), run(2, "p1", 2, True, experiment="older experiment"), run(3, "p2", 1, True)]
+        for blank in (None, "", "   "):
+            p = queueplan.preview(q, runs, [], blank)
+            self.assertTrue(p["needs_name"])
+            self.assertEqual((p["total_runs"], p["runs_left"]), (4, 4))
+            self.assertEqual(sum(sh["done"] for sh in p["shares"]), 0)
+            self.assertEqual({sh["state"] for sh in p["shares"]}, {"not taken"})
+        named = queueplan.preview(q, runs, [], "older experiment")
+        self.assertFalse(named["needs_name"])
+        self.assertEqual(named["runs_left"], 2)
 
 
 class JobTests(unittest.TestCase):
@@ -319,7 +334,7 @@ class QueueApiTests(TmpRepoCase):
             r = c.get("/api/queue/run", params={"queue_id": q["queue_id"], "experiment": "Night one", "restart": "true"})
             self.assertIn("experiment: Night one (restart 2)", r.text)
             self.assertEqual(len(seen), 2)
-            pv = c.get("/api/queue/preview", params={"queue_id": q["queue_id"]}).json()
+            pv = c.get("/api/queue/preview", params={"queue_id": q["queue_id"], "experiment": "Night one"}).json()
             self.assertEqual(pv["runs_left"], 0)
             self.assertEqual(pv["steps"][0]["counts"]["pass"], 4)
         st = c.get("/api/state").json()
@@ -817,6 +832,39 @@ class EnsureCloneTests(unittest.TestCase):
             text = "".join(runner.ensure_clone(ok))
         self.assertEqual(ok, [True])
         self.assertNotIn("warning", text)
+
+
+class QueueBoardStabilityTests(unittest.TestCase):
+    """The queue board used to jump: it sat inside the sticky bar, was rebuilt on every refresh, an old answer could overwrite a
+    newer one, a failed request blanked it, and its rows changed height with the text."""
+    front = os.path.join(os.path.dirname(__file__), "..", "frontend")
+
+    def read(self, name):
+        with open(os.path.join(self.front, name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_board_is_outside_the_sticky_bar(self):
+        html = self.read("index.html")
+        self.assertIn('</div>\n    <div class="q-shares" id="q-shares" hidden></div>', html)   # the bar's div is closed before the board
+
+    def test_only_the_newest_answer_draws_and_failures_keep_the_last_numbers(self):
+        js = self.read("queue.js")
+        self.assertIn("if (seq !== previewSeq) return;", js)
+        self.assertIn("++previewFails < 3", js)
+        self.assertIn("if (sig === previewSig && preview) return;", js)
+
+    def test_board_and_select_update_in_place(self):
+        js = self.read("queue.js")
+        self.assertIn("let o = sel.options[i];", js)
+        self.assertIn("panel.dataset.sig === sig", js)
+        css = self.read("style.css")
+        self.assertIn("table-layout: fixed", css)
+        self.assertIn("-webkit-line-clamp: 2", css)
+
+    def test_no_name_shows_a_prompt_not_other_experiments_work(self):
+        js = self.read("queue.js")
+        self.assertIn("preview.needs_name", js)
+        self.assertIn("Type the experiment name above", js)
 
 
 if __name__ == "__main__":

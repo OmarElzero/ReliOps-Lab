@@ -243,6 +243,10 @@ def _matches(step: dict, run: dict) -> bool:
             and (not step["manifest_id"] or run.get("manifest_id") == step["manifest_id"]))
 
 
+# matches no run: used when no experiment name has been typed
+_NO_EXPERIMENT = "\0no experiment name"
+
+
 def cells(step: dict, runs: list[dict], manifest: dict | None = None, experiment: str | None = None) -> list[dict]:
     """[{problem, repeat, status}] for every cell of the step: pass / fail / incomplete (ran, no
     known outcome) / missing. Latest matching run per cell wins."""
@@ -293,6 +297,9 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
     shows the whole queue. `shares` gives the progress of every share and who has been running it."""
     base = (experiment or "").strip()
     label = experiment_label(base, runs) if base else None
+    # No name typed yet: nothing is recorded under it, so every cell is to do. It must NOT fall back to "any experiment":
+    # a machine that had not typed the name showed other experiments' runs as this one's progress (a board full of "finished").
+    scope = label if label else _NO_EXPERIMENT
     by_id = {m.get("manifest_id"): m for m in manifests}
     only = share_set(queue, share)
     lists = share_lists(queue)
@@ -302,7 +309,7 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
     out, total, left, all_total, all_left = [], 0, 0, 0, 0
     for s in queue["steps"]:
         manifest = by_id.get(s["manifest_id"]) if s["manifest_id"] else None
-        cs = cells(s, runs, manifest, label)
+        cs = cells(s, runs, manifest, scope)
         for c in cs:
             c["mine"] = in_share(only, c["problem"], c["repeat"])
         mine = [c for c in cs if c["mine"]]
@@ -356,7 +363,7 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
                        if c else None)
         sh["state"] = claims.share_state(sh, c, now)
     everything = claims.claim_for(taken, 0)
-    return {"steps": out, "total_runs": total, "runs_left": left, "experiment_label": label,
+    return {"steps": out, "total_runs": total, "runs_left": left, "experiment_label": label, "needs_name": not label,
             "experiments": experiment_names(runs), "machines": int(queue.get("machines") or 1),
             "share": share if only is not None else None, "shares": per_share,
             "all_total_runs": all_total, "all_runs_left": all_left,

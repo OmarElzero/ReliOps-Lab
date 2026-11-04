@@ -292,7 +292,8 @@ pre.log, #log {
 .q-exp { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .q-exp label { font-size: 12px; font-weight: 600; color: var(--muted); }
 .q-exp input { min-height: 34px; }
-.q-exp .hint { margin: 0; font-size: 12px; }
+.q-exp .hint { margin: 0; font-size: 12px; min-height: 4.6em; }   /* room for the longest note: the bar must not grow and shrink */
+.q-exp #q-share-note { min-height: 4.6em; }
 .q-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .q-actions button.primary { padding-inline: 20px; font-size: 15px; min-height: 40px; }
 
@@ -485,14 +486,23 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 /* machine shares: one queue split across several machines */
 .q-machines { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
 .q-machines input { width: 4.2em; min-height: 30px; }
-.q-shares { flex: 1 1 100%; min-width: 0; overflow-x: auto; }
+/* The queue board is its own block under the run bar (not inside the sticky bar), with a fixed layout: rows keep one height
+   and columns keep their place whatever the status text or the problem list says. Full text is in the tooltip. */
+.q-shares { margin: 12px 0 0; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; min-width: 0; }
+.q-shares[hidden] { display: none; }
+.q-shares .board-scroll { max-height: 340px; overflow: auto; }
 .q-shares summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--muted); }
 .q-shares details[open] summary { margin-bottom: 6px; }
-.q-shares table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.q-shares th, .q-shares td { text-align: left; padding: 5px 8px; border-top: 1px solid var(--border); vertical-align: top; }
-.q-shares th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border-top: 0; }
+.q-shares table { width: 100%; min-width: 760px; table-layout: fixed; border-collapse: collapse; font-size: 12.5px; }
+.q-shares th, .q-shares td { text-align: left; padding: 5px 8px; border-top: 1px solid var(--border); vertical-align: middle; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-shares th { position: sticky; top: 0; background: var(--surface); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border-top: 0; z-index: 1; }
+.q-shares col.c-share { width: 104px; } .q-shares col.c-by { width: 190px; } .q-shares col.c-status { width: 270px; }
+.q-shares col.c-done { width: 66px; } .q-shares col.c-pf { width: 84px; } .q-shares col.c-left { width: 48px; }
 .q-shares tr.me td { background: var(--accent-soft); }
-.q-shares td.probs { font: 11.5px var(--mono); color: var(--muted); max-width: 420px; }
+.q-shares td.probs { font: 11.5px var(--mono); color: var(--muted); white-space: normal; }
+.q-shares td.probs .clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 16px; height: 32px; }
+.q-shares .st { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+.q-shares .pick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .q-shares .warn-text { color: var(--warn); }
 .cell.other { opacity: .35; }
 .camp-row.other .camp-name { opacity: .5; }

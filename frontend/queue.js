@@ -138,13 +138,28 @@
   }
 
   // ---- preview (cell counts from recorded runs) ---------------------------------------------------
+  // Answers can arrive late and out of order (a slow one used to overwrite a newer one), and a failed request used to blank the
+  // numbers and the board until the next success. Now: only the newest request may draw, a failure keeps the last good numbers
+  // (three in a row clear them), and an answer identical to what is on screen redraws nothing.
+  let previewSeq = 0, previewFails = 0, previewSig = "";
   function refreshPreview(now) {
     clearTimeout(previewTimer);
-    if (!Q.steps.length) { preview = null; renderSteps(); renderTotals(); return; }
+    if (!Q.steps.length) { previewSeq++; preview = null; previewSig = ""; renderSteps(); renderTotals(); return; }
     previewTimer = setTimeout(async () => {
+      const seq = ++previewSeq;
       const { ok, data } = await jsonPost("/api/queue/preview", { queue_id: Q.queue_id, name: Q.name, steps: Q.steps, experiment: expName(),
                                                                   machines: Q.machines || 1, shares: Q.shares, split: Q.split || "problem", order: Q.order || "step", share: myShare() || null });
-      preview = ok ? data : null;
+      if (seq !== previewSeq) return;                       // a newer request exists; this answer is old
+      if (!ok) {
+        if (++previewFails < 3) return;                     // keep the last good numbers
+        preview = null; previewSig = "";
+      } else {
+        previewFails = 0;
+        const sig = JSON.stringify(data) + "|" + Math.floor(Date.now() / 60000) + "|" + expName() + "|" + (Q.machines || 1) + "|" + (Q.split || "") + "|" + myShare();
+        if (sig === previewSig && preview) return;          // nothing changed (the minute is in the key so "5 min ago" still moves)
+        previewSig = sig;
+        preview = data;
+      }
       renderSteps(); renderTotals(); renderExperiments(); renderShares();
     }, now ? 0 : 350);
   }
@@ -189,14 +204,21 @@
     if (n <= 1) return;
     const shares = (preview && preview.shares) || [];
     const sel = $("q-share"), k = myShare();
-    sel.innerHTML = "";
-    sel.append(h("option", { value: "0", text: "Every problem (no split)" }));
+    // update the options in place: rebuilding the <select> closes an open drop-down and moves the focus
+    const unitWord = Q.split === "repeat" ? "pair" : "problem";
+    const texts = ["Every problem (no split)"];
     for (let i = 1; i <= n; i++) {
       const sh = shares[i - 1];
-      const unitWord = Q.split === "repeat" ? "pair" : "problem";
-      sel.append(h("option", { value: String(i), text: `Share ${i} of ${n}` + (sh ? ` · ${plural(sh.problems.length, unitWord)}, ${sh.left} left` : "") }));
+      texts.push(`Share ${i} of ${n}` + (sh ? ` · ${plural(sh.problems.length, unitWord)}, ${sh.left} left` : ""));
     }
-    sel.value = String(k);
+    while (sel.options.length > texts.length) sel.remove(sel.options.length - 1);
+    texts.forEach((t, i) => {
+      let o = sel.options[i];
+      if (!o) { o = document.createElement("option"); sel.append(o); }
+      if (o.value !== String(i)) o.value = String(i);
+      if (o.text !== t) o.text = t;
+    });
+    if (sel.value !== String(k)) sel.value = String(k);
     const note = $("q-share-note");
     const mine = k && shares[k - 1];
     const busy = busyElsewhere(mine);
@@ -209,38 +231,59 @@
         : others.length
           ? `${others.map((x) => x.name).join(", ")} recorded runs in share ${k} ${ago(others[0].last)}. Two machines on one share run the same cells twice; check before you start.`
           : `Only the problems of share ${k} run here. The grid still shows the whole queue; the other shares are dimmed.`;
-    const wasOpen = panel.querySelector("details") ? !!panel.querySelector("details[open]") : true;
-    panel.innerHTML = "";
     const vers = (preview && preview.machine_versions) || [];
+    const names = ((preview && preview.experiments) || []).slice(0, 3).map((e) => e.name);
+    const sig = JSON.stringify([shares, vers, k, Q.split, preview && preview.needs_name, names, Math.floor(Date.now() / 60000)]);
+    if (panel.dataset.sig === sig && panel.firstChild) return;          // same board as on screen: leave the DOM alone
+    panel.dataset.sig = sig;
+    const wasOpen = panel.querySelector("details") ? !!panel.querySelector("details[open]") : true;
+    const oldScroll = panel.querySelector(".board-scroll");
+    const keepTop = oldScroll ? oldScroll.scrollTop : 0, keepLeft = oldScroll ? oldScroll.scrollLeft : 0;
+    panel.innerHTML = "";
+    if (preview && preview.needs_name) {
+      // No experiment name on this machine yet: progress is counted per name, so there is nothing to show. (It used to count the
+      // runs of every experiment, and a teammate saw other experiments' work as finished shares.)
+      panel.append(h("p", { class: "hint warn-text", text: "Type the experiment name above to see this queue's board. Progress, claims and who is running which share are counted per experiment name; with no name nothing is counted." }));
+      if (names.length) {
+        panel.append(h("div", { class: "pick" }, ...names.map((nm) => h("button", { type: "button", class: "secondary", title: "Use this experiment name",
+          text: "Use: " + nm, onclick: () => { const i = $("q-exp"); i.value = nm; i.dispatchEvent(new Event("input")); } }))));
+      }
+      return;
+    }
     if (vers.length > 1) {
       panel.append(h("p", { class: "hint warn-text" },
         "Machines differ in their tools: " + vers.map((g) => `${g.people.join(", ")}: ${g.versions} (${plural(g.n, "run")})`).join(" | ") +
         ". Runs from different versions are still recorded, but check that a difference between machines is not a difference between versions."));
     }
     if (!shares.length) return;
-    const t = h("table", {}, h("thead", {}, h("tr", {},
-      h("th", { text: "Share" }), h("th", { text: "Taken by" }), h("th", { text: "Status" }), h("th", { text: "Done" }), h("th", { text: "Pass / fail" }),
-      h("th", { text: "Left" }), h("th", { text: Q.split === "repeat" ? "Problem #repeat" : "Problems" }))));
+    const col = (c) => h("col", { class: c });
+    const t = h("table", {}, h("colgroup", {}, col("c-share"), col("c-by"), col("c-status"), col("c-done"), col("c-pf"), col("c-left"), col("c-probs")),
+      h("thead", {}, h("tr", {},
+        h("th", { text: "Share" }), h("th", { text: "Taken by" }), h("th", { text: "Status" }), h("th", { text: "Done" }), h("th", { text: "Pass / fail" }),
+        h("th", { text: "Left" }), h("th", { text: Q.split === "repeat" ? "Problem #repeat" : "Problems" }))));
     const tb = h("tbody");
     shares.forEach((sh) => {
       const c = sh.claim;
       const who_ = c ? `${c.run_by || "?"}${c.machine ? " · " + c.machine : ""}` : (sh.people.length ? sh.people.map((x) => x.name).join(", ") : "nobody yet");
+      const status = stateText(sh), me = sh.share === k ? " · this machine" : "", plist = sh.problems.join(", ");
       tb.append(h("tr", { class: sh.share === k ? "me" : "" },
-        h("td", { text: `${sh.share}${sh.share === k ? " · this machine" : ""}` }),
-        h("td", { text: who_, title: c && c.started_at ? `since ${fmtWhen(c.started_at)}` : "" }),
-        h("td", {}, h("span", { class: "st st-" + sh.state.replace(" ", "-"), text: stateText(sh) })),
+        h("td", { text: `${sh.share}${me}`, title: `${sh.share}${me}` }),
+        h("td", { text: who_, title: who_ + (c && c.started_at ? `\nsince ${fmtWhen(c.started_at)}` : "") }),
+        h("td", {}, h("span", { class: "st st-" + sh.state.replace(" ", "-"), text: status, title: status })),
         h("td", { text: `${sh.done} of ${sh.total}` }),
         h("td", { text: `${sh.passed} / ${sh.failed}` }),
         h("td", { text: String(sh.left) }),
-        h("td", { class: "probs", text: sh.problems.join(", ") })));
+        h("td", { class: "probs" }, h("div", { class: "clamp", text: plist, title: plist }))));
     });
     t.append(tb);
     const count = (st) => shares.filter((sh) => sh.state === st).length;
     const bits = [[count("running"), "running"], [count("finished"), "finished"], [count("paused") + count("stopped") + count("ended"), "stopped or paused"],
                   [count("silent"), "silent"], [count("not taken"), "not taken"]].filter(([x]) => x).map(([x, w]) => `${x} ${w}`);
-    const det = h("details", {}, h("summary", { text: `Queue board: ${bits.join(" · ") || "no shares"} · ${shares.reduce((x, sh) => x + sh.left, 0)} runs left in all` }), t);
+    const scroll = h("div", { class: "board-scroll" }, t);
+    const det = h("details", {}, h("summary", { text: `Queue board: ${bits.join(" · ") || "no shares"} · ${shares.reduce((x, sh) => x + sh.left, 0)} runs left in all` }), scroll);
     det.open = wasOpen;
     panel.append(det);
+    scroll.scrollTop = keepTop; scroll.scrollLeft = keepLeft;
   }
   $("q-share").addEventListener("change", (e) => { pref.set(shareKey(), e.target.value); renderShares(); refreshPreview(true); });
   $("q-order").addEventListener("change", (e) => { Q.order = e.target.value === "cell" ? "cell" : "step"; markDirty(); });
