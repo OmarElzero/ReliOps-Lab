@@ -496,3 +496,5 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 .q-shares .warn-text { color: var(--warn); }
 .cell.other { opacity: .35; }
 .camp-row.other .camp-name { opacity: .5; }
+
+#q-split, #q-order { width: auto; flex: 0 0 auto; max-width: 100%; }

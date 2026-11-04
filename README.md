@@ -154,8 +154,10 @@ its tested laptop had 32 GB). If runs end as "app failed to deploy" or get kille
 heavy tabs and other apps during runs. Also stop Windows from sleeping (`powercfg /change standby-timeout-ac 0` from an admin
 PowerShell, lid open). Details: `ReliOps/docs/MANUAL-SETUP.md` §1.
 
-**What the machine check will say before the first Setup.** `missing from PATH: kind` is expected: **Run setup** installs `kind`. The
-other tools (`kubectl`, `helm`, `uv`) and Docker must already work; if one of them is listed, install it first (`MANUAL-SETUP.md` §2).
+**What the machine check will say before the first Setup.** `missing from PATH: kind` is expected: **Run setup** downloads `kind` 0.30.0 from
+GitHub (to `/usr/local/bin` with sudo, or to `~/.local/bin` when there is no passwordless sudo). If that fails, the check prints the one-line
+install command. The check also names the installed kind version: the team's setup uses 0.30.0; another version usually works (SREGym pins its
+own Kubernetes node image in `kind-config.yaml`) but is untested. The other tools (`kubectl`, `helm`, `uv`) and Docker must already work; if one of them is listed, install it first (`MANUAL-SETUP.md` §2).
 
 **Where commands run.** The Lab uses its **own** clone of ReliOps, `~/reliops-lab-workdir/ReliOps` (inside WSL on Windows;
 `RELIOPS_LAB_WORKDIR` changes it). Any command from the ReliOps docs (`git pull`, `bash scripts/sync_agent.sh`,

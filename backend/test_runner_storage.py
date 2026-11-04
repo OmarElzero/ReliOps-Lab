@@ -132,5 +132,27 @@ class StoryTests(unittest.TestCase):
             runner.render_story({"run_id": "x", "transcript_rel": "nope.jsonl"})
 
 
+class KindVersionTests(unittest.TestCase):
+    def test_note_only_when_kind_differs_from_the_tested_version(self):
+        self.assertIsNone(runner.kind_version_note(None))                      # not installed: reported elsewhere
+        self.assertIsNone(runner.kind_version_note(f"kind version {runner.KIND_TESTED}"))
+        self.assertIsNone(runner.kind_version_note(f"kind v{runner.KIND_TESTED} go1.24 linux/amd64"))
+        old = runner.kind_version_note("kind v0.25.0 go1.22 linux/amd64")
+        self.assertIn("0.25.0", old)
+        self.assertIn(runner.KIND_TESTED, old)
+        self.assertIn("kind-config.yaml", old)
+        self.assertIn("could not be read", runner.kind_version_note("present"))
+
+    def test_doctor_reports_kind_and_how_to_install_it_when_missing(self):
+        with mock.patch.object(runner, "_tool_version", side_effect=lambda c: None if c == "kind" else "x 1"):
+            d = runner.doctor()
+        self.assertIsNone(d["tools"]["kind"])
+        self.assertTrue(any(runner.KIND_INSTALL in n for n in d["notes"]))
+        self.assertEqual(d["kind_tested"], runner.KIND_TESTED)
+        with mock.patch.object(runner, "_tool_version", side_effect=lambda c: "kind v0.25.0" if c == "kind" else "x 1"):
+            d = runner.doctor()
+        self.assertTrue(any("0.25.0" in n for n in d["notes"]))
+
+
 if __name__ == "__main__":
     unittest.main()

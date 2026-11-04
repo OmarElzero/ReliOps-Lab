@@ -1119,6 +1119,25 @@ def _tool_version(cmd: str) -> str | None:
         return "present"
 
 
+KIND_TESTED = "0.30.0"   # the version the team's setup (scripts/quickstart.sh) installs and was tested with
+KIND_INSTALL = ("curl -Lo ./kind https://kind.sigs.k8s.io/dl/v" + KIND_TESTED + "/kind-linux-amd64 && chmod +x ./kind "
+                "&& sudo mv ./kind /usr/local/bin/kind")
+
+
+def kind_version_note(version_line: str | None) -> str | None:
+    """A note when the installed kind is not the version the team's setup uses; None when it matches or is not installed."""
+    if not version_line:
+        return None
+    m = re.search(r"(\d+\.\d+\.\d+)", version_line)
+    if not m:
+        return f"kind is installed but its version could not be read ({version_line!r}); the team's setup uses {KIND_TESTED}"
+    if m.group(1) == KIND_TESTED:
+        return None
+    return (f"kind {m.group(1)} is installed; the team's setup uses {KIND_TESTED}. SREGym pins its own Kubernetes node image in "
+            f"kind-config.yaml, so a different kind version usually still works, but it is untested here. If the cluster fails to "
+            f"build, install {KIND_TESTED}: {KIND_INSTALL}")
+
+
 def doctor() -> dict:
     """A rough "can this machine run SREGym?" check — CPU/RAM/disk, Docker, and the CLI tools
     Setup needs. Thresholds come from CLAUDE.md's own machine notes: the cloud sandbox (4 CPU,
@@ -1177,14 +1196,20 @@ def doctor() -> dict:
         notes.append("missing from PATH: " + ", ".join(missing_tools) +
                       " — Run setup installs `kind` for you; the rest need installing by hand, "
                       "see ReliOps/docs/MANUAL-SETUP.md §0–2")
+        if "kind" in missing_tools:
+            notes.append("To install kind yourself (needs sudo, or put it in ~/.local/bin): " + KIND_INSTALL)
         verdict = "blocked — missing tools: " + ", ".join(missing_tools)
 
+    kind_note = kind_version_note(tools.get("kind"))
+    if kind_note:
+        notes.append(kind_note)
     return {
         "cpu_cores": cpu,
         "ram_gb": ram_gb,
         "disk_free_gb": disk_free_gb,
         "docker_running": docker_running,
         "tools": tools,
+        "kind_tested": KIND_TESTED,
         "verdict": verdict,
         "notes": notes,
     }
