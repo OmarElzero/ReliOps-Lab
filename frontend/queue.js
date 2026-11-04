@@ -81,7 +81,9 @@
   const expKey = () => "lab_exp_" + (Q && Q.queue_id ? Q.queue_id : "new");
   const expName = () => ($("q-exp") ? $("q-exp").value.trim() : "");
   const roundOf = (label) => { const m = /^(.*?)(?: \(restart (\d+)\))?$/.exec(label || ""); return { base: (m && m[1]) || "", n: m && m[2] ? Number(m[2]) : 1 }; };
-  function loadExpName() { $("q-exp").value = pref.get(expKey(), pref.get("lab_exp_last", "")); }
+  // A queue remembers only the name typed for it. It never borrows the last name typed on another queue: a shared queue opened
+  // fresh used to arrive with an old name already filled in, and every cell then looked done.
+  function loadExpName() { $("q-exp").value = pref.get(expKey(), ""); }
   function renderExperiments() {
     const dl = $("q-exp-list");
     dl.innerHTML = "";
@@ -91,8 +93,14 @@
     if (!name) { note.textContent = "Give this experiment a name; every run is recorded under it."; return; }
     const known = ((preview && preview.experiments) || []).find((e) => e.name === name);
     const r = roundOf(preview && preview.experiment_label);
+    const li = (preview && preview.label_info) || { runs: 0, people: [], commits: [] };
+    const differentCode = li.runs && li.commits && li.commits.length && preview.this_commit && !li.commits.includes(preview.this_commit);
+    note.className = "hint" + (differentCode ? " warn-text" : "");
     note.textContent = !known ? "New name: nothing recorded under it yet, so every cell is to do."
-      : `${plural(known.runs, "run")} already recorded${r.n > 1 ? ` (counting round ${r.n})` : ""}. Same name continues; a new name starts fresh.`;
+      : `${plural(li.runs || known.runs, "run")} already recorded under this name${li.people && li.people.length ? " by " + li.people.join(", ") : ""}`
+        + `${li.first ? " (" + fmtWhen(li.first) + (li.last && li.last !== li.first ? " to " + fmtWhen(li.last) : "") + ")" : ""}${r.n > 1 ? `, counting round ${r.n}` : ""}. `
+        + (differentCode ? `They were recorded with agent code ${li.commits.join(", ")}; yours is ${preview.this_commit}. If this is a new attempt, type a new name. ` : "")
+        + "Same name continues from there; a new name starts fresh. Deleting a queue never deletes these results.";
   }
 
   function openQueue(q) {
@@ -792,14 +800,19 @@
     if (!(await saveQueue(true))) return;
     const r = roundOf(preview && preview.experiment_label);
     const next = r.n + 1;
+    const li = (preview && preview.label_info) || { runs: 0 };
+    const shared = (Q.machines || 1) > 1
+      ? `\nThis queue is shared by ${Q.machines} machines. Restart starts a new round for ALL of them, not only your share: the others join it when they press Run queue. Only one person should press Restart.`
+        + (r.n > 1 && li.runs ? ` "${preview.experiment_label}" already has ${plural(li.runs, "run")} (${(li.people || []).join(", ")}): someone has restarted already, so press Cancel and use Run queue to join it.` : "") + "\n"
+      : "";
     const msg = `Restart "${Q.name}" from scratch?\n\n`
       + `Every step runs again from the beginning, recorded as "${r.base || expName()} (restart ${next})".\n`
-      + `Results already recorded are kept; nothing is deleted.\n\nOnly press OK if you really mean to run it all again.`;
+      + `Results already recorded are kept; nothing is deleted.\n${shared}\nOnly press OK if you really mean to run it all again.`;
     if (!confirm(msg)) return;
     startQueue(true);
   });
   $("q-exp").addEventListener("input", () => {
-    pref.set(expKey(), expName()); pref.set("lab_exp_last", expName());
+    pref.set(expKey(), expName());
     renderTotals(); refreshPreview();
   });
 

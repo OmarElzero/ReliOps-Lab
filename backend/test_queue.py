@@ -198,6 +198,35 @@ class QueueApiTests(TmpRepoCase):
         self.assertEqual(c.get("/api/queues").json()["queues"], [])
         self.assertEqual(c.get("/api/queue/preview", params={"queue_id": "nope"}).status_code, 404)
 
+    def test_deleting_a_queue_keeps_its_results_and_a_new_name_starts_fresh(self):
+        import json
+        c = self.client
+        q = self.save([step(problems=["p1", "p2"], repeat_n=1)])
+        row = {"run_id": "r1", "timestamp_utc": "2026-11-04T12:00:00Z", "problem_id": "p1", "repeat_index": 1, "repeat_n": 1,
+               "agent_id": "reliops_v1", "model_id": "m", "judge_model_id": "j", "action_space": "typed", "config_label": "base",
+               "agent_switches": "", "experiment": "Old name", "run_by": "Omar", "run_class": "exploration", "git_commit": "0d38838abcdef",
+               "row": {"Diagnosis.success": False, "Mitigation.success": False}}
+        (self.tmp / "results" / "gui_runs.jsonl").write_text(json.dumps(row) + "\n")
+        with mock.patch.dict(os.environ, {"LAB_DELETE_PASSWORD": "pw"}):
+            self.assertEqual(c.delete(f"/api/queue/{q['queue_id']}", headers={"X-Delete-Password": "pw"}).status_code, 200)
+        self.assertEqual(c.get("/api/queues").json()["queues"], [])
+        again = self.save([step(problems=["p1", "p2"], repeat_n=1)])            # the same queue made again, with a new id
+        old_name = c.get("/api/queue/preview", params={"queue_id": again["queue_id"], "experiment": "Old name"}).json()
+        self.assertEqual((old_name["runs_left"], old_name["total_runs"]), (1, 2))      # the result under the old name is still there
+        info = old_name["label_info"]
+        self.assertEqual((info["runs"], info["people"], info["commits"]), (1, ["Omar"], ["0d38838a"]))
+        self.assertIn("this_commit", old_name)
+        fresh = c.get("/api/queue/preview", params={"queue_id": again["queue_id"], "experiment": "New name"}).json()
+        self.assertEqual((fresh["runs_left"], fresh["label_info"]["runs"]), (2, 0))      # a new name starts fresh
+
+    def test_a_queue_does_not_borrow_the_last_name_typed_on_another_queue(self):
+        here = os.path.dirname(__file__)
+        js = open(os.path.join(here, "..", "frontend", "queue.js")).read()
+        self.assertIn('function loadExpName() { $("q-exp").value = pref.get(expKey(), ""); }', js)
+        self.assertNotIn("lab_exp_last", js)
+        for needle in ("Deleting a queue never deletes these results", "Restart starts a new round for ALL of them"):
+            self.assertIn(needle, js)
+
     def test_delete_needs_the_password(self):
         c = self.client
         q = self.save([step()])

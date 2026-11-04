@@ -763,6 +763,17 @@ def delete_queue(queue_id: str, x_delete_password: Optional[str] = Header(defaul
     return {"ok": True}
 
 
+_head_cache: dict = {"at": 0.0, "sha": ""}
+
+
+def _this_commit() -> str:
+    """Short commit of this machine's ReliOps clone, the same one runs are stamped with. Cached for 20 s."""
+    import time
+    if time.time() - _head_cache["at"] > 20:
+        _head_cache.update(at=time.time(), sha=(runner._git_commit_safe() or "")[:8])
+    return _head_cache["sha"]
+
+
 @app.get("/api/queue/preview")
 def queue_preview(queue_id: str, experiment: Optional[str] = None, share: Optional[int] = None):
     q = _find_queue(queue_id)
@@ -770,7 +781,7 @@ def queue_preview(queue_id: str, experiment: Optional[str] = None, share: Option
         return JSONResponse({"error": "unknown queue"}, status_code=404)
     _, runs = _collect_runs(5000)
     try:
-        return queueplan.preview(q, runs, store.read("manifests"), experiment, share, claims.for_label)
+        return {**queueplan.preview(q, runs, store.read("manifests"), experiment, share, claims.for_label), "this_commit": _this_commit()}
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -784,7 +795,7 @@ def queue_preview_draft(body: QueueIn):
     try:
         q = queueplan.clean_queue(draft)
         _, runs = _collect_runs(5000)
-        return queueplan.preview(q, runs, store.read("manifests"), body.experiment, body.share, claims.for_label)
+        return {**queueplan.preview(q, runs, store.read("manifests"), body.experiment, body.share, claims.for_label), "this_commit": _this_commit()}
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 

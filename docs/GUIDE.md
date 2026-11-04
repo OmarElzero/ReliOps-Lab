@@ -161,6 +161,12 @@ A dashboard computed from exactly the runs the filters leave in view.
 
 The caveats box at the top lists what to check before quoting a number: mixed purposes, runs without an outcome, a judge that has not been checked against hand labels, an unfinished frozen campaign.
 
+## The experiment name, deleting queues and Restart
+
+Results belong to the **experiment name**, not to the queue. Deleting a queue, or making the same queue again, never removes results: type the same name and every cell that already has a result under it is skipped. A queue remembers only the name typed for it on this browser; a queue opened for the first time starts with an empty name and Run queue stays off until you type one. Under the name the Lab says how many runs are recorded under it, by whom, when, and with which agent commit; if that commit is not the one this machine runs, it tells you to type a new name when this is a new attempt.
+
+**Restart** starts a new round (`name (restart 2)`) for the whole queue, for every share and every machine, not only yours. The other machines join the newest round when they press Run queue. On a shared queue only one person presses it; if the newest round already has runs, the confirmation tells you someone has restarted and to use Run queue instead.
+
 ## Campaigns
 
 **Queue results** (top of the tab) gives one line per experiment, which is the name typed when a queue starts. Open the arrow to see each configuration, then each problem: solved, partly solved or not solved, a mark for every repeat (hover for who ran it, when, and any reason it has no result), the time and the tokens. Problems that need a look come first. The rules are the queue's own: the latest run of a (problem, repeat) cell counts, a run with no outcome is shown as "no result" and never as a failure, and a "(restart 2)" round belongs to the same experiment. It reads the shared results when they are connected, so the whole team's runs for one experiment name appear together. Time is the whole run (from the start of the problem to the recorded result). Runs recorded before this existed only have SREGym's diagnosis and mitigation timers; their time is labelled "agent time".
