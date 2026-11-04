@@ -89,9 +89,11 @@ def _slug(text: str, n: int = 40) -> str:
 
 def _dup_signature(r: dict):
     """Two rows with the same problem/config/repeat AND the same diagnosis, reasoning and timing are almost
-    certainly one result recorded twice (e.g. copied rows), not two independent runs."""
+    certainly one result recorded twice (e.g. copied rows), not two independent runs. The whole-run duration is part of the
+    signature: runs that failed before any result have an empty diagnosis, no ttd and no tokens, so without it three separate
+    failed attempts at the same problem looked like one run recorded three times."""
     return (r.get("problem_id"), r.get("config_label"), r.get("action_space"), r.get("repeat_index"),
-            r.get("diagnosis_text") or "", r.get("judge_reasoning") or "", r.get("ttd_s"), r.get("total_tokens"))
+            r.get("diagnosis_text") or "", r.get("judge_reasoning") or "", r.get("ttd_s"), r.get("total_tokens"), r.get("duration_s"))
 
 
 def experiment_names(runs: list[dict]) -> list[dict]:

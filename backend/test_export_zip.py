@@ -23,3 +23,12 @@ def test_zip_contents_missing_and_duplicates():
     readme = z.read("README.md").decode()
     assert "POSSIBLE DUPLICATE" in readme and "no transcript" in readme and "timeout" in readme
     assert len(z.read("runs.jsonl").decode().strip().splitlines()) == 3
+
+
+def test_failed_attempts_are_not_duplicates():
+    """Three separate failed attempts (no diagnosis, no tokens, different durations) are three runs, not one recorded thrice."""
+    import export
+    base = {"problem_id": "p", "config_label": "c", "action_space": "typed", "repeat_index": 1}
+    a, b = {**base, "duration_s": 1142.8}, {**base, "duration_s": 871.3}
+    assert export._dup_signature(a) != export._dup_signature(b)
+    assert export._dup_signature(a) == export._dup_signature(dict(a))
