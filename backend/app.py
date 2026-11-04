@@ -1337,11 +1337,8 @@ def _key_source(var: str) -> tuple[str, str, bool]:
 
     The shape is the first 4 characters and the length, never the key."""
     lab = runner.read_env_file(runner.lab_env_path())
-    clone = runner.read_env_file(runner.reliops_dir() / ".env")
     if lab.get(var):
         src, val = "Lab .env", lab[var]
-    elif clone.get(var):
-        src, val = "ReliOps clone .env", clone[var]
     elif os.environ.get(var):
         src, val = "shell environment (not in any .env)", os.environ[var]
     else:

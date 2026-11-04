@@ -2,9 +2,11 @@
 
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -592,6 +594,62 @@ class QueueBoardTests(TmpRepoCase):
         js = open(os.path.join(os.path.dirname(__file__), "..", "frontend", "queue.js")).read()
         for needle in ("Queue board", "busyElsewhere", "Taken by", "no sign of life", "setInterval"):
             self.assertIn(needle, js)
+
+
+class LabEnvOnlyTests(unittest.TestCase):
+    """The Lab reads its own .env and never the cloned ReliOps repo's one (reliops-lab-workdir/ReliOps/.env)."""
+
+    def setUp(self):
+        import app as app_module
+        self.app = app_module
+        self.tmp = Path(tempfile.mkdtemp())
+        self.lab_env = self.tmp / "lab" / ".env"
+        self.clone = self.tmp / "clone"
+        self.lab_env.parent.mkdir()
+        self.clone.mkdir()
+        self.lab_env.write_text("GEMINI_API_KEY=from-lab\nLAB_DELETE_PASSWORD=lab-pw\n", encoding="utf-8")
+        (self.clone / ".env").write_text(
+            "GEMINI_API_KEY=from-clone\nAGENT_API_BASE=http://stale\nLAB_DELETE_PASSWORD=clone-pw\nONLY_IN_CLONE=1\n", encoding="utf-8")
+        for target, ret in (("lab_env_path", self.lab_env), ("reliops_dir", self.clone)):
+            p = mock.patch.object(runner, target, return_value=ret)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_only_the_lab_env_is_read(self):
+        env = runner.merged_env_vars()
+        self.assertEqual(env.get("GEMINI_API_KEY"), "from-lab")
+        self.assertNotIn("AGENT_API_BASE", env)
+        self.assertNotIn("ONLY_IN_CLONE", env)
+
+    def test_a_name_set_only_in_the_clone_is_not_used(self):
+        self.lab_env.write_text("OTHER=1\n", encoding="utf-8")
+        env = runner.merged_env_vars()
+        self.assertNotIn("GEMINI_API_KEY", env)
+        self.assertFalse(runner.saved_providers().get("GEMINI_API_KEY"))
+
+    def test_delete_password_comes_from_the_lab_env(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LAB_DELETE_PASSWORD", None)
+            self.assertEqual(self.app._delete_password(), "lab-pw")
+            self.lab_env.write_text("OTHER=1\n", encoding="utf-8")
+            self.assertEqual(self.app._delete_password(), "")
+
+    def test_key_health_never_names_the_clone(self):
+        self.lab_env.write_text("OTHER=1\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GEMINI_API_KEY", None)
+            self.assertEqual(self.app._key_source("GEMINI_API_KEY")[0], "not set")
+
+    def test_saving_a_key_writes_only_the_lab_env(self):
+        before = (self.clone / ".env").read_text(encoding="utf-8")
+        runner.write_key("GEMINI_API_KEY", "new-value")
+        self.assertIn("new-value", self.lab_env.read_text(encoding="utf-8"))
+        self.assertEqual((self.clone / ".env").read_text(encoding="utf-8"), before)
+
+    def test_setup_still_hands_the_keys_to_quickstart(self):
+        runner._sync_model_keys_to_clone()
+        self.assertEqual(runner.read_env_file(self.clone / ".env").get("GEMINI_API_KEY"), "from-lab")
+        self.assertEqual(runner.read_env_file(self.clone / ".env").get("AGENT_API_BASE"), "http://stale")  # not touched
 
 
 if __name__ == "__main__":

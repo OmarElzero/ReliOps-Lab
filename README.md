@@ -182,13 +182,12 @@ the first time you click **Run setup**. It does not duplicate SREGym or the agen
 runs the same commands `ReliOps/scripts/quickstart.sh` and `ReliOps/docs/MANUAL-SETUP.md` describe,
 from a form instead of a terminal, and streams the output back.
 
-**Two folders, one `.env`.** Because of the above, there are technically two places a `.env` could
-live: this project's own root, and the separate cloned-repo folder. Only **this project's own
-`.env`** matters — it's what the "Keys & Firebase" form reads and writes, and what the status pill
-reflects. You never need to touch the clone's `.env` directly: `scripts/quickstart.sh` reads its
-own copy of that file off disk as part of how the main repo works stand-alone (see
-`ReliOps/docs/MANUAL-SETUP.md`), so this tool mirrors your saved model keys into it automatically
-whenever you save a key or run Setup — one save here is enough.
+**Two folders, one `.env`.** There are technically two places a `.env` could live: this project's own
+root, and the separate cloned-repo folder (`~/reliops-lab-workdir/ReliOps/.env`). The Lab reads **only this
+project's own `.env`**, for the "Keys & Firebase" form, the status pill, the delete password and every setting
+passed to a run. The clone's `.env` is never read, so an old line left in it cannot change a run. Run setup copies
+your saved model keys into the clone's `.env` once, only because `scripts/quickstart.sh` insists on finding that
+file; nothing else is copied and nothing reads it back.
 
 **Problem sets** are read live from `ReliOps/experiments/*.csv` — any CSV with a `problem_id`
 column shows up as a selectable set automatically, so a new set the team adds there (e.g. a

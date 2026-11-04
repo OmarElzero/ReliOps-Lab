@@ -197,15 +197,13 @@ def default_firebase_key_path() -> Path:
 
 
 def merged_env_vars() -> dict[str, str]:
-    """This tool's own .env (lab_env_path()) is the source of truth for every key the GUI itself
-    cares about — model keys, Firebase credentials — because it's the file a person actually opens
-    and edits (see lab_dir()'s docstring). The cloned repo's own .env (reliops_dir()/.env) is read
-    too and used for anything the lab .env doesn't set, since someone following
-    docs/MANUAL-SETUP.md by hand may have set things up there directly before ever opening this
-    GUI; the lab .env wins on any key both define."""
-    merged = read_env_file(reliops_dir() / ".env")
-    merged.update(read_env_file(lab_env_path()))
-    return merged
+    """Everything the Lab reads from a .env comes from this tool's own file (lab_env_path(), next to
+    backend/), and from nowhere else. The cloned ReliOps repo's .env (reliops_dir()/.env, under
+    reliops-lab-workdir) is NOT read any more: a stale line left in it (an old key, AGENT_API_BASE,
+    a switch) used to leak into runs without anyone seeing it, because that file is not the one a
+    person has open. Only Setup touches the clone's .env, and only to hand scripts/quickstart.sh the
+    model keys it insists on finding there (_sync_model_keys_to_clone)."""
+    return read_env_file(lab_env_path())
 
 
 _key_counter = 0
@@ -1339,18 +1337,14 @@ def write_pool(var_names: list[str], owners: dict[str, str]) -> None:
 
 def write_key(provider: str, value: str) -> None:
     """Saves an API key into this tool's own .env (lab_env_path()) — the file next to backend/
-    and frontend/, stays on this machine, never sent anywhere by this tool. Also mirrors it into
-    the cloned ReliOps repo's .env, once that clone exists, because scripts/quickstart.sh reads
-    its own copy of that file directly off disk (see _sync_model_keys_to_clone's docstring) — so a
-    key saved here still works for Setup without you having to save it twice."""
+    and frontend/, stays on this machine, never sent anywhere by this tool. It is not copied into
+    the cloned ReliOps repo here; Setup does that itself when it needs to (_sync_model_keys_to_clone)."""
     _write_key_to(lab_env_path(), provider, value)
-    if reliops_dir().exists():
-        _write_key_to(reliops_dir() / ".env", provider, value)
 
 
 def _sync_model_keys_to_clone() -> None:
-    """Mirrors just the known model-key vars from this tool's own .env (lab_env_path()) into the
-    cloned ReliOps repo's .env. scripts/quickstart.sh checks for and reads ReliOps/.env directly
+    """Run by Setup only. Mirrors just the known model-key vars from this tool's own .env (lab_env_path()) into the
+    cloned ReliOps repo's .env, which the Lab itself never reads. scripts/quickstart.sh checks for and reads ReliOps/.env directly
     off disk during Setup — it has no way to know about keys saved anywhere else — so without this,
     Setup would find no .env there, create a blank one from .env.example, and stop asking you to
     fill in a key you'd already saved in this tool."""
@@ -1689,9 +1683,8 @@ def stream_campaign(
     switches_text = "+".join(switches)
     if switches:
         yield f"[agent] {agent} with switches: {switches_text}\n"
-    # merged_env_vars() (this tool's own .env, falling back to the clone's) rather than reading
-    # reliops_dir()/.env directly — these go straight into the subprocess's env via Popen, so the
-    # actual test run gets your key whether you saved it here or edited the clone's .env by hand.
+    # merged_env_vars() is this tool's own .env only (never the clone's). These go straight into the
+    # subprocess's env via Popen, so the test run gets exactly what is in the Lab's .env.
     for k, v in merged_env_vars().items():
         base_env.setdefault(k, v)
 
