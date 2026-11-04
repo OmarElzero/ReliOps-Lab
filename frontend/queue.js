@@ -1017,7 +1017,9 @@
     if (tab && document.getElementById("tab-" + tab)) showTab(tab);
     await pollState();
     loadQueueState();
-    for (;;) { await sleep(jobBusy() ? 3000 : 8000); await pollState(); }
+    // An error while drawing one update must not end the loop: the page would then stop following the queue (no running
+    // problem, no counts, no new results) until it is reloaded.
+    for (;;) { await sleep(jobBusy() ? 3000 : 8000); try { await pollState(); } catch (e) { console.error("state refresh failed", e); } }
   }
   init();
 })();
