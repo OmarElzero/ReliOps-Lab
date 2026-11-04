@@ -406,3 +406,31 @@ class MachineVersionTests(unittest.TestCase):
         self.assertEqual([g["n"] for g in got], [2, 1])
         self.assertEqual(got[0]["people"], ["Omar"])
         self.assertEqual(got[1]["people"], ["Sara"])
+
+
+class CellOrderProgressTests(unittest.TestCase):
+    def _job(self):
+        import jobs
+        return jobs.Job("queue", "q", {})
+
+    def test_cell_line_names_the_problem_and_totals_survive_every_step_line(self):
+        j = self._job()
+        j.add("##### [QUEUE] cell order: 12 problem-repeat pair(s), every step of a pair back to back; 12 run(s) to do #####\n")
+        j.add("\n##### [QUEUE] step 1/1 start: R2 NULL · 12 problems × 1 | runs 1 to do #####\n")
+        self.assertEqual(j.progress["step_runs"], 12)
+        self.assertIsNone(j.progress["problem"])
+        j.add("[cell] gc_capacity_degradation, repeat 1 (pair 2 of 12)\n")
+        self.assertEqual((j.progress["problem"], j.progress["repeat"], j.progress["pair"]), ("gc_capacity_degradation", 1, 2))
+        j.add("===== [1/1] problem=gc_capacity_degradation agent=reliops_v2 action_space=typed+shell =====\n")
+        j.add("----- recorded result for gc_capacity_degradation: parsed row found -----\n")
+        self.assertEqual(j.progress["step_recorded"], 1)
+        # the next cell's step line must not wipe the count or the total
+        j.add("\n##### [QUEUE] step 1/1 start: R2 NULL · 12 problems × 1 | runs 1 to do #####\n")
+        self.assertEqual((j.progress["step_recorded"], j.progress["step_runs"]), (1, 12))
+
+    def test_step_by_step_order_still_resets_per_step(self):
+        j = self._job()
+        j.add("\n##### [QUEUE] step 1/2 start: A | runs 5 to do #####\n")
+        j.add("----- recorded result for p: x -----\n")
+        j.add("\n##### [QUEUE] step 2/2 start: B | runs 7 to do #####\n")
+        self.assertEqual((j.progress["step_runs"], j.progress["step_recorded"]), (7, 0))

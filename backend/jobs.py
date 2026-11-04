@@ -19,6 +19,11 @@ _TRIM = 10000
 _STEP_RE = re.compile(r"\[QUEUE\] step (\d+)/(\d+) start: (.*?) \| runs (\d+) to do")
 _RUN_RE = re.compile(r"===== \[(\d+)/(\d+)\] problem=(\S+)(?: repeat=(\d+)/(\d+))?")
 _DONE_RE = re.compile(r"recorded result for (\S+): ")
+# Cell order (one queue run per problem-repeat pair): the queue prints the total once, then a "step start" line and a
+# "[cell]" line before every single run. The total must not be reset by each step line, and the [cell] line names the
+# problem at once instead of only when SREGym's banner appears.
+_CELLS_RE = re.compile(r"\[QUEUE\] cell order: \d+ problem-repeat pair\(s\).*?; (\d+) run\(s\) to do")
+_CELL_RE = re.compile(r"^\[cell\] (\S+), repeat (\d+) \(pair (\d+) of (\d+)\)", re.M)
 
 
 class Job:
@@ -48,9 +53,16 @@ class Job:
 
     def _track(self, chunk: str) -> None:
         p = self.progress
+        for m in _CELLS_RE.finditer(chunk):
+            p.update(cells=True, step_runs=int(m.group(1)), step_recorded=0)
         for m in _STEP_RE.finditer(chunk):
-            p.update(step=int(m.group(1)), steps=int(m.group(2)), step_name=m.group(3), step_runs=int(m.group(4)),
-                     step_recorded=0, problem=None, repeat=None)
+            if p.get("cells"):
+                p.update(step=int(m.group(1)), steps=int(m.group(2)), step_name=m.group(3), problem=None, repeat=None)
+            else:
+                p.update(step=int(m.group(1)), steps=int(m.group(2)), step_name=m.group(3), step_runs=int(m.group(4)),
+                         step_recorded=0, problem=None, repeat=None)
+        for m in _CELL_RE.finditer(chunk):
+            p.update(problem=m.group(1), repeat=int(m.group(2)), pair=int(m.group(3)), pairs=int(m.group(4)))
         for m in _RUN_RE.finditer(chunk):
             p.update(run_k=int(m.group(1)), run_total=int(m.group(2)), problem=m.group(3),
                      repeat=int(m.group(4)) if m.group(4) else 1,
