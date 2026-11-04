@@ -835,7 +835,7 @@ _RUN_LOG_HEADER_FALLBACK = [
 # and this tool never silently drops the diagnosis text again.
 LAB_EXTRA_COLUMNS = [
     "judge_model_id", "run_by", "run_class", "config_label", "agent_switches", "experiment", "incomplete_reason",
-    "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel", "manifest_id", "machine_versions",
+    "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel", "manifest_id", "machine_versions", "duration_s",
 ]
 
 
@@ -1016,6 +1016,7 @@ def append_csv_run(record: dict) -> Path:
         "judge_checklist": record.get("judge_checklist"),
         "manifest_id": record.get("manifest_id"),
         "machine_versions": record.get("machine_versions", ""),
+        "duration_s": record.get("duration_s", ""),
         "transcript_rel": record.get("transcript_rel"),
     })
     for col in ("diagnosis_d1", "diagnosis_d2", "diagnosis_d3", "diagnosis_composite", "git_commit",
@@ -1859,6 +1860,7 @@ def stream_campaign(
             "manifest_id": manifest_id,
             "git_commit": commit,
             "machine_versions": versions,
+            "duration_s": round(time.time() - started_at, 1),   # the whole run, start of the problem to the recorded result
             "key_slot": key_slot,
             # Why the run has no result (empty for a complete run); the Results table shows it.
             "incomplete_kind": incomplete_kind,

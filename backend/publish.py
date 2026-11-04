@@ -40,7 +40,7 @@ RUN_FIELDS = (
     "action_space", "config_label", "agent_switches", "experiment", "purpose", "run_class", "repeat_index", "repeat_n",
     "diagnosis_pass", "mitigation_pass", "e2e_pass", "run_status", "incomplete_reason",
     "diagnosis_d1", "diagnosis_d2", "diagnosis_d3", "diagnosis_composite",
-    "total_tokens", "num_llm_calls", "num_tool_calls", "ttd_s", "ttm_s", "failure_mode_tag", "machine_versions",
+    "total_tokens", "num_llm_calls", "num_tool_calls", "ttd_s", "ttm_s", "failure_mode_tag", "machine_versions", "duration_s",
 )
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PATH = re.compile(r"(?:[A-Za-z]:\\|/home/|/Users/|/root/)[^\s'\"]*")

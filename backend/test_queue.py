@@ -193,9 +193,37 @@ class QueueApiTests(TmpRepoCase):
         self.assertEqual([x["name"] for x in listed], ["renamed"])
         pv = c.get("/api/queue/preview", params={"queue_id": q["queue_id"]}).json()
         self.assertEqual((pv["total_runs"], pv["runs_left"]), (4, 4))
-        self.assertEqual(c.delete(f"/api/queue/{q['queue_id']}").status_code, 200)
+        with mock.patch.dict(os.environ, {"LAB_DELETE_PASSWORD": "pw"}):
+            self.assertEqual(c.delete(f"/api/queue/{q['queue_id']}", headers={"X-Delete-Password": "pw"}).status_code, 200)
         self.assertEqual(c.get("/api/queues").json()["queues"], [])
         self.assertEqual(c.get("/api/queue/preview", params={"queue_id": "nope"}).status_code, 404)
+
+    def test_delete_needs_the_password(self):
+        c = self.client
+        q = self.save([step()])
+        url = f"/api/queue/{q['queue_id']}"
+        env = {k: v for k, v in os.environ.items() if k != "LAB_DELETE_PASSWORD"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("time.sleep"):
+            self.assertTrue(c.get("/api/queue/delete-lock").json()["locked_off"])
+            r = c.delete(url, headers={"X-Delete-Password": ""})          # no password set on this machine: locked for everyone
+            self.assertEqual(r.status_code, 403)
+            self.assertIn("LAB_DELETE_PASSWORD", r.json()["error"])
+        with mock.patch.dict(os.environ, {"LAB_DELETE_PASSWORD": "s3cret"}), mock.patch("time.sleep") as slept:
+            self.assertFalse(c.get("/api/queue/delete-lock").json()["locked_off"])
+            self.assertNotIn("s3cret", c.get("/api/queue/delete-lock").text)
+            self.assertEqual(c.delete(url).status_code, 403)                                         # no header
+            self.assertEqual(c.delete(url, headers={"X-Delete-Password": "wrong"}).status_code, 403)
+            self.assertTrue(slept.called)                                                            # guessing is slowed down
+            self.assertEqual(len(c.get("/api/queues").json()["queues"]), 1)                          # still there
+            self.assertEqual(c.delete(url, headers={"X-Delete-Password": "s3cret"}).status_code, 200)
+        self.assertEqual(c.get("/api/queues").json()["queues"], [])
+
+    def test_the_delete_dialog_sends_the_password_from_a_masked_field(self):
+        js = open(os.path.join(os.path.dirname(__file__), "..", "frontend", "queue.js")).read()
+        html = open(os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html")).read()
+        self.assertIn('id="dd-pass" type="password"', html)
+        self.assertIn("X-Delete-Password", js)
+        self.assertNotIn("confirm(`Delete the queue", js)     # the old one-click confirm is gone
 
     def test_saved_problem_set_shows_up_with_csv_details(self):
         c = self.client
@@ -388,6 +416,57 @@ class MachineShareTests(unittest.TestCase):
         after = campaign.slice_cells([("c", 1), ("d", 1)], 2, 2, manifest)   # machine 1 finished a and b
         self.assertEqual(before, [("b", 1), ("d", 1)])
         self.assertEqual(after, [("d", 1)])                                     # still never takes c
+
+
+class QueueSummaryTests(unittest.TestCase):
+    def _run(self, i, problem, rep, passed, **kw):
+        r = {"run_id": f"r{i}", "timestamp_utc": f"2026-11-04T10:{i:02d}:00Z", "problem_id": problem, "repeat_index": rep,
+             "agent_id": "reliops_v2", "model_id": "m", "judge_model_id": "j", "action_space": "typed", "config_label": "B2",
+             "agent_switches": "", "experiment": "R2 main", "run_by": "omar", "e2e_pass": passed,
+             "diagnosis_pass": passed, "total_tokens": 1000, "duration_s": 300}
+        r.update(kw)
+        return r
+
+    def test_groups_by_experiment_config_and_problem_and_the_latest_run_counts(self):
+        import queuesummary
+        runs = [self._run(1, "p1", 1, False), self._run(2, "p1", 1, True),          # re-run of the same cell: the latest counts
+                self._run(3, "p1", 2, True), self._run(4, "p2", 1, False),
+                self._run(5, "p3", 1, None, duration_s=None, ttd_s=60, ttm_s=30),    # no outcome: incomplete, never a failure
+                self._run(6, "p1", 1, True, config_label="ALL"),                    # another configuration, same experiment
+                self._run(7, "p9", 1, True, experiment="Other"),
+                self._run(8, "p9", 1, True, experiment="")]                         # no experiment name: not summarized
+        out = queuesummary.summarize(runs)
+        self.assertEqual(sorted(e["name"] for e in out), ["Other", "R2 main"])
+        e = next(x for x in out if x["name"] == "R2 main")
+        self.assertEqual((e["runs"], e["cells"], e["passed"], e["failed"], e["incomplete"]), (6, 5, 3, 1, 1))
+        b2 = next(c for c in e["configs"] if c["config_label"] == "B2")
+        self.assertEqual((b2["passed"], b2["failed"], b2["incomplete"], b2["attempts_extra"]), (2, 1, 1, 1))
+        self.assertEqual([p["problem"] for p in b2["problem_rows"]], ["p2", "p3", "p1"])      # what needs a look comes first
+        self.assertEqual([p["verdict"] for p in b2["problem_rows"]], ["not solved", "incomplete", "solved"])
+        self.assertAlmostEqual(b2["pass_rate"], 2 / 3)                                          # the incomplete cell is not in the rate
+        self.assertEqual((b2["problems_solved"], b2["problems"]), (1, 3))
+
+    def test_time_is_the_whole_run_or_labelled_agent_time(self):
+        import queuesummary
+        whole = queuesummary.run_seconds({"duration_s": 412.5, "ttd_s": 10, "ttm_s": 5})
+        self.assertEqual(whole, (412.5, "run"))
+        self.assertEqual(queuesummary.run_seconds({"ttd_s": 60, "ttm_s": 30}), (90.0, "agent"))
+        self.assertEqual(queuesummary.run_seconds({}), (None, ""))
+        out = queuesummary.summarize([self._run(1, "p1", 1, True, duration_s=None, ttd_s=60, ttm_s=30)])
+        self.assertEqual(out[0]["configs"][0]["time_kind"], "agent")
+        self.assertEqual(out[0]["seconds"], 90.0)
+
+    def test_restart_rounds_belong_to_the_same_experiment(self):
+        import queuesummary
+        out = queuesummary.summarize([self._run(1, "p1", 1, False), self._run(2, "p1", 1, True, experiment="R2 main (restart 2)")])
+        self.assertEqual([e["name"] for e in out], ["R2 main"])
+        self.assertEqual(out[0]["configs"][0]["passed"], 1)
+
+    def test_endpoint_and_page(self):
+        here = os.path.dirname(__file__)
+        js = open(os.path.join(here, "..", "frontend", "v2.js")).read()
+        self.assertIn("/api/experiments/summary", js)
+        self.assertIn('id="exp-list"', open(os.path.join(here, "..", "frontend", "index.html")).read())
 
 
 if __name__ == "__main__":

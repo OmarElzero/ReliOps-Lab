@@ -163,6 +163,8 @@ The caveats box at the top lists what to check before quoting a number: mixed pu
 
 ## Campaigns
 
+**Queue results** (top of the tab) gives one line per experiment, which is the name typed when a queue starts. Open the arrow to see each configuration, then each problem: solved, partly solved or not solved, a mark for every repeat (hover for who ran it, when, and any reason it has no result), the time and the tokens. Problems that need a look come first. The rules are the queue's own: the latest run of a (problem, repeat) cell counts, a run with no outcome is shown as "no result" and never as a failure, and a "(restart 2)" round belongs to the same experiment. It reads the shared results when they are connected, so the whole team's runs for one experiment name appear together. Time is the whole run (from the start of the problem to the recorded result). Runs recorded before this existed only have SREGym's diagnosis and mitigation timers; their time is labelled "agent time".
+
 A **frozen campaign** fixes what is measured: agent, model, action space, judge, label, problem set (by hash) and repeats, recorded with the agent code commit. Runs that do not match the manifest are refused. The grid shows every (problem, repeat) cell as pass, fail, incomplete or missing. A machine can take a slice (machine k of n) so several laptops split one campaign without overlap.
 
 ## Judge audit
@@ -205,3 +207,7 @@ versions. Before the first run the Lab also checks that the agent code on this m
 If it does not (for example the ReliOps clone is older than the switch), the queue stops and says what to run: Run setup, then
 `bash scripts/sync_agent.sh`, then tick "Force-build the agent image". An agent silently ignores a switch it does not know,
 so without this check a run would record the switch and not apply it.
+
+## Deleting a saved queue
+
+Delete asks for a password. Put `LAB_DELETE_PASSWORD=your-password` in the Lab's own `.env` (next to `backend/` and `frontend/`; the file is git-ignored). Nothing needs restarting: the server reads it on every delete. Without that line nobody can delete a queue on that machine, so a teammate who pulled the code but has no password cannot remove a queue by mistake. The check is on the server, a wrong password waits a second before answering, and a deletion is shared with the other machines like any other queue change, so keep the password on the machines that should be able to delete. Results already recorded are never deleted with a queue.

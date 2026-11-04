@@ -680,10 +680,32 @@
     openQueue(q);
   });
   $("q-save").addEventListener("click", () => saveQueue(false));
+  // Deleting a queue needs the password set on this machine (LAB_DELETE_PASSWORD in the Lab's .env). The server checks it.
+  const dd = $("del-dialog");
   $("q-delete").addEventListener("click", async () => {
-    if (!Q.queue_id || !confirm(`Delete the queue "${Q.name}"? Results already recorded are kept.`)) return;
-    await fetch("/api/queue/" + encodeURIComponent(Q.queue_id), { method: "DELETE" });
-    await loadSaved(); openQueue(null);
+    if (!Q.queue_id) return;
+    let off = false;
+    try { off = (await jsonGet("/api/queue/delete-lock")).locked_off; } catch (e) { /* the server answers again on submit */ }
+    $("dd-text").textContent = off
+      ? `Deleting queues is locked on this machine. To unlock it, add a line LAB_DELETE_PASSWORD=your-password to the Lab's .env file. Results already recorded are kept either way.`
+      : `Delete the queue "${Q.name}"? Results already recorded are kept. Type the delete password to confirm.`;
+    $("dd-pass").value = ""; $("dd-pass").hidden = $("dd-pass-label").hidden = off;
+    $("dd-ok").disabled = off; $("dd-msg").textContent = "";
+    dd.showModal(); if (!off) $("dd-pass").focus();
+  });
+  $("dd-cancel").addEventListener("click", () => dd.close());
+  $("dd-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!Q.queue_id) return;
+    $("dd-ok").disabled = true; $("dd-msg").textContent = "";
+    let r, data = {};
+    try {
+      r = await fetch("/api/queue/" + encodeURIComponent(Q.queue_id), { method: "DELETE", headers: { "X-Delete-Password": $("dd-pass").value } });
+      data = await r.json().catch(() => ({}));
+    } catch (err) { $("dd-msg").textContent = "Could not reach the Lab."; $("dd-ok").disabled = false; return; }
+    $("dd-ok").disabled = false;
+    if (!r.ok) { $("dd-msg").textContent = data.error || "Could not delete the queue."; $("dd-pass").select(); return; }
+    dd.close(); await loadSaved(); openQueue(null);
   });
   window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
 

@@ -498,3 +498,20 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 .camp-row.other .camp-name { opacity: .5; }
 
 #q-split, #q-order { width: auto; flex: 0 0 auto; max-width: 100%; }
+
+/* Queue results (Campaigns tab): one arrow per experiment, then per configuration */
+.exp-list { display: grid; gap: 8px; margin-top: 12px; }
+.exp, .exp-cfg { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.exp > summary, .exp-cfg > summary { cursor: pointer; padding: 10px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.exp-cfg > summary { font-size: 13px; }
+.exp-name { font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
+.exp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.exp-chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); }
+.exp-chip.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.exp-chip.bad { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+.exp-chip.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.exp-body { display: grid; gap: 8px; padding: 0 10px 10px; }
+.exp-cfg { background: var(--sunken); }
+.exp-cfg .results-table-wrap { padding: 0 8px 8px; overflow-x: auto; }
+.results-table td.r-warn { color: var(--warn); font-weight: 600; }
+.results-table td .cell { display: inline-block; margin-right: 3px; }

@@ -17,7 +17,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -29,6 +29,7 @@ import firebase_sync
 import jobs
 import queueplan
 import queuestate
+import queuesummary
 import runner
 import stats
 import pins
@@ -316,6 +317,7 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             **_token_fields(r),
             "num_llm_calls": r.get("num_llm_calls"),
             "num_tool_calls": r.get("num_tool_calls"),
+            "duration_s": r.get("duration_s"),
             "failure_mode_tag": review.get("failure_mode_tag") or "",
             "first_bad_step": review.get("first_bad_step"),
             "review_note": review.get("note") or "",
@@ -369,6 +371,13 @@ def results(limit: int = 300):
     """Backs the Results tab/dashboard: every recorded run, newest first, and who ran it."""
     source, runs = _collect_runs(limit)
     return {"source": source, "runs": runs}
+
+
+@app.get("/api/experiments/summary")
+def experiments_summary(limit: int = 5000):
+    """One summary per experiment: solved / not solved per problem, time and tokens. Backs the Campaigns tab."""
+    source, runs = _collect_runs(limit)
+    return {"source": source, "experiments": queuesummary.summarize(runs)}
 
 
 @app.get("/api/summary")
@@ -720,8 +729,32 @@ def save_queue(body: QueueIn):
     return {"ok": True, "queue": store.append("queues", q)}
 
 
+def _delete_password() -> str:
+    """The password that unlocks queue deletion on this machine: LAB_DELETE_PASSWORD in the Lab's .env (or the shell).
+    Read on every call, so setting or changing it needs no restart. Empty means deletion is locked."""
+    env = runner.merged_env_vars()
+    return str(env.get("LAB_DELETE_PASSWORD") or os.environ.get("LAB_DELETE_PASSWORD") or "").strip()
+
+
+@app.get("/api/queue/delete-lock")
+def queue_delete_lock():
+    """Tells the page whether this machine has a delete password set. The password itself never leaves the server."""
+    return {"locked_off": not _delete_password()}
+
+
 @app.delete("/api/queue/{queue_id}")
-def delete_queue(queue_id: str):
+def delete_queue(queue_id: str, x_delete_password: Optional[str] = Header(default=None)):
+    """Deleting a saved queue needs the password. It is checked here, not only in the page, and the deletion is mirrored to
+    the other machines, so a teammate who does not know the password cannot remove a queue the whole team uses."""
+    import hmac
+    import time
+    secret = _delete_password()
+    if not secret:
+        return JSONResponse({"error": "Deleting queues is locked on this machine. Set LAB_DELETE_PASSWORD in the Lab's .env "
+                                      "to unlock it (see docs/GUIDE.md)."}, status_code=403)
+    if not hmac.compare_digest((x_delete_password or "").encode(), secret.encode()):
+        time.sleep(1.0)    # slows down guessing
+        return JSONResponse({"error": "Wrong password. The queue was not deleted."}, status_code=403)
     q = _find_queue(queue_id)
     if q is None:
         return JSONResponse({"error": "unknown queue"}, status_code=404)

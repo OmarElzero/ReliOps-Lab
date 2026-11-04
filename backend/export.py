@@ -13,7 +13,7 @@ RUN_COLUMNS = [
     "run_id", "timestamp_utc", "run_by", "problem_id", "repeat_index", "repeat_n", "agent_id", "model_id",
     "action_space", "config_label", "agent_switches", "run_class", "manifest_id", "judge_model_id", "diagnosis_pass",
     "mitigation_pass", "e2e_pass", "ttd_s", "ttm_s", "total_tokens", "num_llm_calls", "failure_mode_tag",
-    "first_bad_step", "review_note", "diagnosis_text", "judge_reasoning", "machine_versions",
+    "first_bad_step", "review_note", "diagnosis_text", "judge_reasoning", "machine_versions", "duration_s",
 ]
 SUMMARY_COLUMNS = [
     "config_label", "agent_id", "model_id", "action_space", "judge_model_id", "run_class", "metric", "runs", "n",

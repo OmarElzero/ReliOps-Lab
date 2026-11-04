@@ -456,6 +456,20 @@
 
   <div id="tab-campaigns" class="tab-panel" hidden>
     <section class="card">
+      <h2>Queue results</h2>
+      <p class="hint">One line per experiment (the name typed when a queue starts). Open the arrow to see every configuration, then every
+        problem: solved or not, each repeat, how long it took and the tokens it used. Problems that need a look come first.</p>
+      <div class="row">
+        <button id="exp-refresh" class="secondary" type="button">Refresh</button>
+        <button id="exp-open-all" class="secondary" type="button">Open all</button>
+        <button id="exp-close-all" class="secondary" type="button">Close all</button>
+        <input id="exp-filter" placeholder="Filter by experiment name" autocomplete="off">
+      </div>
+      <p class="hint" id="exp-info"></p>
+      <div id="exp-list" class="exp-list"></div>
+    </section>
+
+    <section class="card">
       <h2>Freeze a campaign</h2>
       <p class="hint">Records exactly what a measured run is allowed to be: agent code commit, model, action space,
         judge, config label, problem set and repeat count. Uses the settings currently chosen on the Run tab
@@ -653,6 +667,22 @@
       <span class="msg" id="sd-msg" role="alert"></span>
       <button type="button" class="secondary" id="sd-cancel">Cancel</button>
       <button type="submit" class="primary" id="sd-ok">Add step</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="del-dialog" aria-labelledby="dd-title">
+  <form method="dialog" class="dlg" id="dd-form" novalidate>
+    <div class="dlg-head"><h2 id="dd-title">Delete this queue?</h2></div>
+    <div class="dlg-body">
+      <p class="hint" id="dd-text"></p>
+      <label for="dd-pass" id="dd-pass-label">Password</label>
+      <input id="dd-pass" type="password" autocomplete="off" placeholder="Delete password">
+    </div>
+    <div class="dlg-foot">
+      <span class="msg" id="dd-msg"></span>
+      <button type="button" class="secondary" id="dd-cancel">Cancel</button>
+      <button type="submit" class="secondary danger" id="dd-ok">Delete queue</button>
     </div>
   </form>
 </dialog>
