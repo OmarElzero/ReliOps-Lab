@@ -392,3 +392,17 @@ class MachineShareTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MachineVersionTests(unittest.TestCase):
+    def test_preview_groups_runs_by_versions(self):
+        q = queueplan.clean_queue({"name": "q", "machines": 2, "steps": [step()]})
+        label = queueplan.experiment_label("E", [])
+        runs = [{"experiment": label, "run_by": "Omar", "machine_versions": "kind 0.30.0; docker 27.1.1"},
+                {"experiment": label, "run_by": "Sara", "machine_versions": "kind 0.25.0; docker 27.1.1"},
+                {"experiment": label, "run_by": "Omar", "machine_versions": "kind 0.30.0; docker 27.1.1"},
+                {"experiment": "Other", "run_by": "Zed", "machine_versions": "kind 0.1.0"}]
+        got = queueplan.preview(q, runs, [], "E")["machine_versions"]
+        self.assertEqual([g["n"] for g in got], [2, 1])
+        self.assertEqual(got[0]["people"], ["Omar"])
+        self.assertEqual(got[1]["people"], ["Sara"])

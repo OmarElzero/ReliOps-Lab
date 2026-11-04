@@ -196,3 +196,12 @@ after updating the repo so the container has the v2 code.
 
 Token counts come from the agent's transcript. Runs recorded before 31 Oct stored 0 (the wrong field names were read); when the
 transcript is still on the machine, Results now shows the real counts for those runs. Stored values are never changed.
+
+### Machine versions and stale agent code
+
+Every run records the tools of the machine that ran it (`machine_versions`: kind, kubectl, the cluster's Kubernetes version,
+Docker, Helm), and the queue's "Machine shares" panel warns when runs of one experiment come from machines with different
+versions. Before the first run the Lab also checks that the agent code on this machine knows every switch the step turns on.
+If it does not (for example the ReliOps clone is older than the switch), the queue stops and says what to run: Run setup, then
+`bash scripts/sync_agent.sh`, then tick "Force-build the agent image". An agent silently ignores a switch it does not know,
+so without this check a run would record the switch and not apply it.

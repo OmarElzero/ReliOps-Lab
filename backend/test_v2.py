@@ -1568,3 +1568,40 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(records, [])
         self.assertIn("has been down for 1 minutes", log)
         self.assertIn("internet connection is down", self.r.halt_reason())
+
+
+class SwitchKnownByAgentCodeTests(unittest.TestCase):
+    def test_stops_when_clone_does_not_know_a_switch(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from backend import runner
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            feat = root / "ReliOps" / "agent" / "react_v2"
+            feat.mkdir(parents=True)
+            (feat / "features.py").write_text('SWITCHES = {"TOKEN_LOG": 1, "SOAK": 1}\n')
+            with mock.patch.object(runner, "DEFAULT_WORKDIR", root), mock.patch.object(runner, "_git_commit_safe", return_value="0d38838dabc"):
+                self.assertIsNone(runner.agent_switch_problem("reliops_v2", ["TOKEN_LOG", "SOAK"]))
+                msg = runner.agent_switch_problem("reliops_v2", ["TOKEN_LOG", "NULL_AGENT"])
+                self.assertIn("NULL_AGENT", msg)
+                self.assertIn("0d38838d", msg)
+                self.assertNotIn("TOKEN_LOG", msg.split("know")[1].split(",")[0])
+                # the image's copy is checked too
+                (root / "ReliOps" / "external" / "envs" / "sregym" / "clients" / "reliops_v2").mkdir(parents=True)
+                (root / "ReliOps" / "external" / "envs" / "sregym" / "clients" / "reliops_v2" / "features.py").write_text('"TOKEN_LOG"')
+                self.assertIn("SOAK", runner.agent_switch_problem("reliops_v2", ["SOAK"]))
+                self.assertIsNone(runner.agent_switch_problem("other_agent", ["NULL_AGENT"]))
+                self.assertIsNone(runner.agent_switch_problem("reliops_v2", []))
+
+    def test_machine_versions_is_one_line_and_never_raises(self):
+        from unittest import mock
+        from backend import runner
+        with mock.patch.object(runner.shutil, "which", return_value=None):
+            self.assertEqual(runner.machine_versions(), "")
+        out = {("kind", "--version"): "kind version 0.30.0\n", ("helm", "version", "--short"): "v3.16.4+g1\n"}
+        def fake(cmd, timeout=8):
+            return out.get(tuple(cmd), "")
+        with mock.patch.object(runner.shutil, "which", side_effect=lambda c: "/x/" + c if c in ("kind", "helm") else None), \
+             mock.patch.object(runner, "_probe", side_effect=fake):
+            self.assertEqual(runner.machine_versions(), "kind 0.30.0; helm v3.16.4")

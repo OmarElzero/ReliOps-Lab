@@ -181,6 +181,12 @@
         : `Only the problems of share ${k} run here. The grid still shows the whole queue; the other shares are dimmed.`;
     const wasOpen = !!panel.querySelector("details[open]");
     panel.innerHTML = "";
+    const vers = (preview && preview.machine_versions) || [];
+    if (vers.length > 1) {
+      panel.append(h("p", { class: "hint warn-text" },
+        "Machines differ in their tools: " + vers.map((g) => `${g.people.join(", ")}: ${g.versions} (${plural(g.n, "run")})`).join(" | ") +
+        ". Runs from different versions are still recorded, but check that a difference between machines is not a difference between versions."));
+    }
     if (!shares.length) return;
     const t = h("table", {}, h("thead", {}, h("tr", {},
       h("th", { text: "Share" }), h("th", { text: Q.split === "repeat" ? "Problem #repeat" : "Problems" }), h("th", { text: "Done" }), h("th", { text: "Left" }), h("th", { text: "Run by" }))));

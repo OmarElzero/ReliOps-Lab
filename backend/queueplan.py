@@ -326,9 +326,20 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
             issue = "frozen campaign not found (was it created on another machine that is not synced?)"
         out.append({"step_id": s["step_id"], "cells": cs, "counts": counts, "total": len(mine), "todo": n_todo,
                     "issue": issue})
+    groups: dict[str, dict] = {}
+    if label:
+        for r in runs:
+            v = (r.get("machine_versions") or "").strip()
+            if v and (r.get("experiment") or "") == label:
+                g = groups.setdefault(v, {"versions": v, "n": 0, "people": {}})
+                g["n"] += 1
+                g["people"][r.get("run_by") or "?"] = 1
+    machine_versions = [{"versions": g["versions"], "n": g["n"], "people": sorted(g["people"])}
+                        for g in sorted(groups.values(), key=lambda g: -g["n"])]
     for sh in per_share:
         sh["people"] = [{"name": k, "last": v} for k, v in sorted(sh["people"].items(), key=lambda kv: kv[1], reverse=True)]
     return {"steps": out, "total_runs": total, "runs_left": left, "experiment_label": label,
             "experiments": experiment_names(runs), "machines": int(queue.get("machines") or 1),
             "share": share if only is not None else None, "shares": per_share,
-            "all_total_runs": all_total, "all_runs_left": all_left}
+            "all_total_runs": all_total, "all_runs_left": all_left,
+            "machine_versions": machine_versions}

@@ -835,7 +835,7 @@ _RUN_LOG_HEADER_FALLBACK = [
 # and this tool never silently drops the diagnosis text again.
 LAB_EXTRA_COLUMNS = [
     "judge_model_id", "run_by", "run_class", "config_label", "agent_switches", "experiment", "incomplete_reason",
-    "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel", "manifest_id",
+    "diagnosis_text", "judge_reasoning", "judge_checklist", "transcript_rel", "manifest_id", "machine_versions",
 ]
 
 
@@ -1015,6 +1015,7 @@ def append_csv_run(record: dict) -> Path:
         "judge_reasoning": record.get("judge_reasoning"),
         "judge_checklist": record.get("judge_checklist"),
         "manifest_id": record.get("manifest_id"),
+        "machine_versions": record.get("machine_versions", ""),
         "transcript_rel": record.get("transcript_rel"),
     })
     for col in ("diagnosis_d1", "diagnosis_d2", "diagnosis_d3", "diagnosis_composite", "git_commit",
@@ -1117,6 +1118,76 @@ def _tool_version(cmd: str) -> str | None:
         return text[0] if text else "present"
     except Exception:  # noqa: BLE001 — a tool that exists but errors on --version still "exists"
         return "present"
+
+
+def _ver(text: str | None) -> str | None:
+    m = re.search(r"v?\d+\.\d+(?:\.\d+)?", text or "")
+    return m.group(0) if m else None
+
+
+def _probe(cmd: list[str], timeout: int = 8) -> str:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return (r.stdout or "") if r.returncode == 0 else ""
+    except Exception:  # noqa: BLE001 - a tool that is missing or hangs is simply not listed
+        return ""
+
+
+def machine_versions() -> str:
+    """The tools this machine runs a test with, as one line ("kind 0.30.0; kubectl v1.32.2; k8s v1.32.11; docker 27.5.1;
+    helm v3.16.4"), recorded with every run so a difference between machines can be seen. A tool that is missing or does
+    not answer is left out; the cluster's Kubernetes version is only listed when a cluster answers."""
+    parts: list[str] = []
+    if shutil.which("kind"):
+        v = _ver(_probe(["kind", "--version"]))
+        parts.append(f"kind {v}" if v else "kind ?")
+    if shutil.which("kubectl"):
+        try:
+            info = json.loads(_probe(["kubectl", "version", "--output=json", "--request-timeout=5s"], 12) or "{}")
+        except ValueError:
+            info = {}
+        client = _ver((info.get("clientVersion") or {}).get("gitVersion"))
+        server = _ver((info.get("serverVersion") or {}).get("gitVersion"))
+        if client:
+            parts.append(f"kubectl {client}")
+        if server:
+            parts.append(f"k8s {server}")
+    if shutil.which("docker"):
+        v = _ver(_probe(["docker", "version", "--format", "{{.Server.Version}}"]))
+        if v:
+            parts.append(f"docker {v}")
+    if shutil.which("helm"):
+        v = _ver(_probe(["helm", "version", "--short"]))
+        if v:
+            parts.append(f"helm {v}")
+    return "; ".join(parts)
+
+
+def agent_switch_problem(agent: str, switches: list[str]) -> str | None:
+    """A problem that would make a run ignore a requested switch, or None. A switch name the agent code on this machine
+    does not know is silently ignored by the agent, so the run would record the switch and not apply it. Checked in the
+    Lab's ReliOps clone (agent/react_v2/features.py) and in the copy the agent image is built from
+    (clients/reliops_v2/features.py in the SREGym clone)."""
+    if not switches or agent != SWITCH_AGENT:
+        return None
+    def missing(path: Path) -> list[str] | None:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        return [n for n in switches if f'"{n}"' not in text]
+    src = reliops_dir() / "agent" / "react_v2" / "features.py"
+    gone = missing(src)
+    if gone:
+        commit = (_git_commit_safe() or "?")[:8]
+        return (f"The agent code in this machine's ReliOps clone (commit {commit}) does not know {', '.join(gone)}, so the agent would "
+                "ignore it and still record it. Press Run setup (it pulls the latest ReliOps), then run bash scripts/sync_agent.sh "
+                "and tick 'Force-build the agent image' for the next run.")
+    gone = missing(sregym_dir() / "clients" / "reliops_v2" / "features.py")
+    if gone:
+        return (f"The agent copy in the SREGym clone does not know {', '.join(gone)}. In the ReliOps folder run: bash scripts/sync_agent.sh, "
+                "then tick 'Force-build the agent image' for the next run.")
+    return None
 
 
 KIND_TESTED = "0.30.0"   # the version the team's setup (scripts/quickstart.sh) installs and was tested with
@@ -1626,7 +1697,7 @@ def stream_campaign(
     pool = key_pool(base_env)
     for w in preflight_warnings(base_env, model, agent, rebuilding=bool(force_build)):
         yield w + "\n"
-    setup_problem = agent_setup_problem(agent)
+    setup_problem = agent_setup_problem(agent) or agent_switch_problem(agent, switches)
     if setup_problem:
         yield (f"\n[stopped before the first run: {setup_problem} Every run would fail the same way, so nothing was started. "
                "Nothing is lost; run the queue again (or press Continue) after fixing it.]\n")
@@ -1643,6 +1714,9 @@ def stream_campaign(
     runs = list(cells) if cells else [(problem, rep) for problem in problems for rep in range(1, repeat_n + 1)]
     total_runs = len(runs)
     commit = _git_commit_safe()
+    versions = machine_versions()
+    if versions:
+        yield f"[machine] {versions}\n"
     net_wait_min = max_network_wait_min(base_env)
     net_hosts = network_hosts(base_env, model)
     for i, (problem, rep) in enumerate(runs, start=1):
@@ -1784,6 +1858,7 @@ def stream_campaign(
             "transcript_rel": transcript_rel,
             "manifest_id": manifest_id,
             "git_commit": commit,
+            "machine_versions": versions,
             "key_slot": key_slot,
             # Why the run has no result (empty for a complete run); the Results table shows it.
             "incomplete_kind": incomplete_kind,
