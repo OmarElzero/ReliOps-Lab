@@ -249,7 +249,11 @@
   }
 
   function cellsGrid(s, sp) {
-    const run = job && job.progress && queueRunning() && job.progress.step === Q.steps.indexOf(s) + 1 ? job.progress : null;
+    // The running cell is marked on the queue that runs, and also on another saved queue that has the same step (same name),
+    // so a copy of a queue open on the screen does not lose the highlight.
+    const jp = job && job.progress;
+    const here = jp && jobBusy() && job.kind === "queue" && (queueRunning() ? jp.step === Q.steps.indexOf(s) + 1 : jp.step_name === s.name);
+    const run = here ? jp : null;
     const byProblem = new Map();
     (sp ? sp.cells : []).forEach((c) => { if (!byProblem.has(c.problem)) byProblem.set(c.problem, []); byProblem.get(c.problem).push(c); });
     const grid = h("div", { class: "camp-grid" });
