@@ -469,6 +469,102 @@ class QueueSummaryTests(unittest.TestCase):
         self.assertIn('id="exp-list"', open(os.path.join(here, "..", "frontend", "index.html")).read())
 
 
+class QueueBoardTests(TmpRepoCase):
+    """Who took which share, what each machine is doing, and how each share ended."""
+
+    def setUp(self):
+        super().setUp()
+        try:
+            import app as app_module
+        except Exception as e:  # noqa: BLE001
+            self.skipTest(f"fastapi not available: {e}")
+        import claims
+        self.app, self.claims = app_module, claims
+        self.q = queueplan.clean_queue({"name": "Calibration", "machines": 2, "steps": [step(problems=["p1", "p2", "p3", "p4"], repeat_n=1)]})
+        self.q["queue_id"] = "q9"
+
+    def test_share_states(self):
+        c = self.claims
+        now = 1_000_000_000.0
+        stamp = lambda ago: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - ago))
+        busy = {"total": 2, "left": 2, "people": []}
+        self.assertEqual(c.share_state(busy, None, now), "not taken")
+        self.assertEqual(c.share_state({**busy, "people": [{"name": "a"}]}, None, now), "worked")
+        self.assertEqual(c.share_state(busy, {"status": "running", "updated_at": stamp(60)}, now), "running")
+        self.assertEqual(c.share_state(busy, {"status": "running", "updated_at": stamp(c.STALE_S + 60)}, now), "silent")
+        self.assertEqual(c.share_state(busy, {"status": "paused", "updated_at": stamp(60)}, now), "paused")
+        self.assertEqual(c.share_state(busy, {"status": "halted", "updated_at": stamp(60)}, now), "stopped")
+        self.assertEqual(c.share_state(busy, {"status": "interrupted", "updated_at": stamp(60)}, now), "stopped")
+        self.assertEqual(c.share_state(busy, {"status": "finished", "updated_at": stamp(60)}, now), "ended")
+        # a share whose cells all have results is finished, whatever the claim says
+        self.assertEqual(c.share_state({"total": 2, "left": 0, "people": []}, {"status": "running", "updated_at": stamp(5)}, now), "finished")
+
+    def test_the_claim_follows_the_queue_from_running_to_finished(self):
+        seen = []
+
+        def fake_run_lines(**kw):
+            yield "===== [1/1] problem=%s agent=a action_space=- =====\n" % kw["cells"][0][0]
+            seen.append(self.claims.claim_for(self.claims.for_label("E"), 1))    # what teammates would see mid-run
+            yield "----- recorded result for %s: parsed row found -----\n" % kw["cells"][0][0]
+
+        with mock.patch.object(self.app, "_run_lines", side_effect=fake_run_lines), \
+             mock.patch.object(self.app, "_collect_runs", return_value=("local", [])):
+            "".join(self.app._queue_lines(self.q, "Omar", "E", False, 1))
+        self.assertTrue(seen)
+        self.assertEqual((seen[0]["status"], seen[0]["run_by"], seen[0]["share"]), ("running", "Omar", 1))
+        self.assertEqual(seen[0]["machine"], self.claims.machine_name())
+        self.assertEqual(seen[0]["now_problem"], "p1")
+        last = self.claims.claim_for(self.claims.for_label("E"), 1)
+        self.assertEqual((last["status"], last["now_problem"]), ("finished", ""))
+        self.assertIsNone(self.claims.claim_for(self.claims.for_label("E"), 2))   # nobody took share 2
+        self.assertEqual(self.claims.for_label("another experiment"), [])
+
+    def test_a_paused_queue_says_paused(self):
+        def fake_run_lines(**kw):
+            yield "===== [1/1] problem=p1 agent=a action_space=- =====\n"
+            runner._stop_event.set()
+        self.addCleanup(runner._stop_event.clear)
+        with mock.patch.object(self.app, "_run_lines", side_effect=fake_run_lines), \
+             mock.patch.object(self.app, "_collect_runs", return_value=("local", [])):
+            "".join(self.app._queue_lines(self.q, "Omar", "E", False, 2))
+        self.assertEqual(self.claims.claim_for(self.claims.for_label("E"), 2)["status"], "paused")
+
+    def test_starting_on_a_share_someone_else_is_running_says_so(self):
+        import store
+        store.append("claims", {"experiment": "E", "share": 1, "machines": 2, "run_by": "Fady", "machine": "other-laptop",
+                                "status": "running", "started_at": "x", "now_problem": "p1"})
+        mine = self.claims.Tracker(self.q, "Omar", 1)
+        note = mine.start("E")
+        self.assertIn("Fady (other-laptop) is already running share 1", note)
+        self.assertEqual(self.claims.Tracker(self.q, "Omar", 2).start("E"), "")        # a different share: nothing to say
+        store.append("claims", {"experiment": "E", "share": 2, "machines": 2, "run_by": "Omar", "machine": self.claims.machine_name(),
+                                "status": "running", "started_at": "x"})
+        self.assertEqual(self.claims.Tracker(self.q, "Omar", 2).start("E"), "")        # my own earlier start on this machine
+
+    def test_preview_shows_who_took_what_even_before_a_first_run(self):
+        now = 1_000_000_000.0
+        stamp = lambda ago: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - ago))
+        taken = [{"experiment": "E", "share": 1, "run_by": "Fady", "machine": "lap", "status": "running", "updated_at": stamp(120),
+                  "started_at": stamp(900), "now_problem": "p1"}]
+        pv = queueplan.preview(self.q, [], [], "E", None, lambda label: taken if label == "E" else [], now)
+        s1, s2 = pv["shares"]
+        self.assertEqual((s1["state"], s1["claim"]["run_by"], s1["claim"]["now_problem"]), ("running", "Fady", "p1"))
+        self.assertEqual((s2["state"], s2["claim"]), ("not taken", None))
+        self.assertEqual((s1["passed"], s1["failed"], s1["left"]), (0, 0, 2))
+        self.assertTrue(pv["this_machine"] is not None)
+        # no claims function (an older caller): the board still works, from recorded runs alone
+        self.assertEqual([s["state"] for s in queueplan.preview(self.q, [], [], "E")["shares"]], ["not taken", "not taken"])
+        # every cell of share 1 has a result: finished, with its pass/fail counts
+        runs = [dict(run(1, "p1", 1, True), experiment="E"), dict(run(2, "p3", 1, False), experiment="E")]     # share 1 is p1 and p3
+        pv = queueplan.preview(self.q, runs, [], "E", None, lambda label: taken, now)
+        self.assertEqual((pv["shares"][0]["state"], pv["shares"][0]["passed"], pv["shares"][0]["failed"]), ("finished", 1, 1))
+
+    def test_the_page_shows_the_board_and_warns_before_a_double_start(self):
+        js = open(os.path.join(os.path.dirname(__file__), "..", "frontend", "queue.js")).read()
+        for needle in ("Queue board", "busyElsewhere", "Taken by", "no sign of life", "setInterval"):
+            self.assertIn(needle, js)
+
+
 if __name__ == "__main__":
     unittest.main()
 

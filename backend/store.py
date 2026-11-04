@@ -23,6 +23,7 @@ KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "problem_sets": ("gui_problem_sets.jsonl", ("set_id",)),
     "marks": ("gui_marks.jsonl", ("run_id",)),
     "key_status": ("gui_key_status.jsonl", ("owner_machine", "var")),
+    "claims": ("gui_claims.jsonl", ("experiment", "share")),     # who took which share of a queue (claims.py)
 }
 
 

@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 import audit
 import campaign
+import claims
 import cluster
 import export
 import firebase_sync
@@ -769,7 +770,7 @@ def queue_preview(queue_id: str, experiment: Optional[str] = None, share: Option
         return JSONResponse({"error": "unknown queue"}, status_code=404)
     _, runs = _collect_runs(5000)
     try:
-        return queueplan.preview(q, runs, store.read("manifests"), experiment, share)
+        return queueplan.preview(q, runs, store.read("manifests"), experiment, share, claims.for_label)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -783,7 +784,7 @@ def queue_preview_draft(body: QueueIn):
     try:
         q = queueplan.clean_queue(draft)
         _, runs = _collect_runs(5000)
-        return queueplan.preview(q, runs, store.read("manifests"), body.experiment, body.share)
+        return queueplan.preview(q, runs, store.read("manifests"), body.experiment, body.share, claims.for_label)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -810,20 +811,28 @@ def _queue_lines(queue: dict, run_by: Optional[str], experiment: str, restart: b
     """Runs the queue and remembers how it ended (queuestate), so the Continue button can pick up from there."""
     queuestate.begin(queue, experiment, run_by, share)
     outcome: dict = {"status": "interrupted"}
+    tracker = claims.Tracker(queue, run_by, share)       # the shared "who took which share" board; best effort
     try:
-        yield from _queue_steps(queue, run_by, experiment, restart, outcome, share)
+        for line in _queue_steps(queue, run_by, experiment, restart, outcome, share, tracker):
+            tracker.beat(line)
+            yield line
     finally:
         queuestate.end(**outcome)
+        tracker.finish(outcome)
 
 
 def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: bool, outcome: dict,
-                 share: Optional[int] = None):
+                 share: Optional[int] = None, tracker: Optional[claims.Tracker] = None):
     steps = queue["steps"]
     only = queueplan.share_set(queue, share)
     manifests = store.read("manifests")
     runner._stop_event.clear()
     _, all_runs = _collect_runs(5000)
     label = queueplan.experiment_label(experiment, all_runs, restart=restart)
+    if tracker is not None:
+        busy = tracker.start(label)
+        if busy:
+            yield busy
     yield f"##### [QUEUE] {queue['name']}: {len(steps)} step(s) #####\n"
     yield f"##### [QUEUE] experiment: {label}{' (restarted from scratch)' if restart else ''} #####\n"
     if only is not None:

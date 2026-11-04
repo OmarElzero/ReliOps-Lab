@@ -286,7 +286,7 @@ def todo(step: dict, runs: list[dict], manifest: dict | None = None, experiment:
 
 
 def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: str | None = None,
-            share: int | None = None) -> dict:
+            share: int | None = None, claims_for=None, now: float | None = None) -> dict:
     """`experiment` is the name typed in the run bar (or None). Progress is counted for its newest round.
     `share` is the machine share picked on this machine (None = all problems): total_runs and runs_left, and each
     step's total and todo, count only that share, while every cell is still returned (with `mine` set) so the screen
@@ -297,7 +297,7 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
     only = share_set(queue, share)
     lists = share_lists(queue)
     owner = {u: k for k, x in enumerate(lists, 1) for u in x}
-    per_share = [{"share": k, "problems": x, "total": 0, "done": 0, "left": 0, "people": {}, "last": ""}
+    per_share = [{"share": k, "problems": x, "total": 0, "done": 0, "left": 0, "passed": 0, "failed": 0, "people": {}, "last": ""}
                  for k, x in enumerate(lists, 1)]
     out, total, left, all_total, all_left = [], 0, 0, 0, 0
     for s in queue["steps"]:
@@ -317,6 +317,8 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
                 sh = per_share[owner.get(c["problem"], owner.get(unit(c["problem"], c["repeat"]), 1)) - 1]
                 sh["total"] += 1
                 sh["done"] += c["status"] in ("pass", "fail")
+                sh["passed"] += c["status"] == "pass"
+                sh["failed"] += c["status"] == "fail"
                 sh["left"] += _is_todo(s, c)
                 if c.get("by"):
                     sh["people"][c["by"]] = max(sh["people"].get(c["by"], ""), c.get("at") or "")
@@ -338,8 +340,19 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
                         for g in sorted(groups.values(), key=lambda g: -g["n"])]
     for sh in per_share:
         sh["people"] = [{"name": k, "last": v} for k, v in sorted(sh["people"].items(), key=lambda kv: kv[1], reverse=True)]
+    # Who took which share (claims.py): shown even before the first run of a share is recorded.
+    import claims
+    taken = claims_for(label) if (claims_for and label) else []
+    for sh in per_share:
+        c = claims.claim_for(taken, sh["share"]) if int(queue.get("machines") or 1) > 1 else None
+        sh["claim"] = ({k: c.get(k) for k in ("run_by", "machine", "status", "reason", "started_at", "updated_at", "now_problem", "step_name")}
+                       if c else None)
+        sh["state"] = claims.share_state(sh, c, now)
+    everything = claims.claim_for(taken, 0)
     return {"steps": out, "total_runs": total, "runs_left": left, "experiment_label": label,
             "experiments": experiment_names(runs), "machines": int(queue.get("machines") or 1),
             "share": share if only is not None else None, "shares": per_share,
             "all_total_runs": all_total, "all_runs_left": all_left,
-            "machine_versions": machine_versions}
+            "machine_versions": machine_versions, "this_machine": claims.machine_name(),
+            "whole_queue_claim": ({k: everything.get(k) for k in ("run_by", "machine", "status", "started_at", "updated_at", "now_problem")}
+                                  if everything else None)}

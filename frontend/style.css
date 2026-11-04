@@ -515,3 +515,10 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 .exp-cfg .results-table-wrap { padding: 0 8px 8px; overflow-x: auto; }
 .results-table td.r-warn { color: var(--warn); font-weight: 600; }
 .results-table td .cell { display: inline-block; margin-right: 3px; }
+
+/* Queue board: the state of each share */
+.st { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); }
+.st-running { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.st-finished { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.st-silent, .st-paused, .st-ended { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.st-stopped { background: var(--bad-soft); color: var(--bad); border-color: transparent; }

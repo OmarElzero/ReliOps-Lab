@@ -156,6 +156,25 @@
     const m = Math.round((Date.now() - t) / 60000);
     return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
   };
+  // Someone else is running my share right now (the claim says running and was seen recently), on another machine.
+  function busyElsewhere(sh) {
+    const c = sh && sh.claim;
+    if (!c || sh.state !== "running") return null;
+    return c.machine && preview && c.machine === preview.this_machine ? null : c;
+  }
+  function stateText(sh) {
+    const c = sh.claim || {}, since = (iso) => ago(iso);
+    switch (sh.state) {
+      case "finished": return "✓ finished";
+      case "running": return `running now${c.now_problem ? ": " + c.now_problem : ""} · seen ${since(c.updated_at)}`;
+      case "silent": return `no sign of life since ${since(c.updated_at)}; it may have stopped`;
+      case "paused": return `paused ${since(c.updated_at)}`;
+      case "stopped": return `stopped ${since(c.updated_at)}${c.reason ? " (" + c.reason + ")" : ""}`;
+      case "ended": return `queue ended ${since(c.updated_at)} with ${sh.left} left`;
+      case "worked": return `last run ${since(sh.last)}`;
+      default: return "not taken yet";
+    }
+  }
   function renderShares() {
     const n = Q.machines || 1, box = $("q-share-box"), panel = $("q-shares");
     box.hidden = n <= 1; panel.hidden = n <= 1; $("q-split").hidden = n <= 1;
@@ -172,14 +191,17 @@
     sel.value = String(k);
     const note = $("q-share-note");
     const mine = k && shares[k - 1];
+    const busy = busyElsewhere(mine);
     const others = mine ? mine.people.filter((x) => x.name !== who() && Date.now() - Date.parse(x.last || 0) < 3 * 3600 * 1000) : [];
-    note.className = "hint" + (others.length ? " warn-text" : "");
+    note.className = "hint" + (busy || others.length ? " warn-text" : "");
     note.textContent = !k
       ? "Pick your share so the machines never run the same cells. Agree who takes which share first."
-      : others.length
-        ? `${others.map((x) => x.name).join(", ")} recorded runs in share ${k} ${ago(others[0].last)}. Two machines on one share run the same cells twice; check before you start.`
-        : `Only the problems of share ${k} run here. The grid still shows the whole queue; the other shares are dimmed.`;
-    const wasOpen = !!panel.querySelector("details[open]");
+      : busy
+        ? `${busy.run_by || "Someone"} (${busy.machine || "another machine"}) is running share ${k} right now, last seen ${ago(busy.updated_at)}. Two machines on one share run the same cells twice; pick another share or ask them.`
+        : others.length
+          ? `${others.map((x) => x.name).join(", ")} recorded runs in share ${k} ${ago(others[0].last)}. Two machines on one share run the same cells twice; check before you start.`
+          : `Only the problems of share ${k} run here. The grid still shows the whole queue; the other shares are dimmed.`;
+    const wasOpen = panel.querySelector("details") ? !!panel.querySelector("details[open]") : true;
     panel.innerHTML = "";
     const vers = (preview && preview.machine_versions) || [];
     if (vers.length > 1) {
@@ -189,19 +211,26 @@
     }
     if (!shares.length) return;
     const t = h("table", {}, h("thead", {}, h("tr", {},
-      h("th", { text: "Share" }), h("th", { text: Q.split === "repeat" ? "Problem #repeat" : "Problems" }), h("th", { text: "Done" }), h("th", { text: "Left" }), h("th", { text: "Run by" }))));
+      h("th", { text: "Share" }), h("th", { text: "Taken by" }), h("th", { text: "Status" }), h("th", { text: "Done" }), h("th", { text: "Pass / fail" }),
+      h("th", { text: "Left" }), h("th", { text: Q.split === "repeat" ? "Problem #repeat" : "Problems" }))));
     const tb = h("tbody");
     shares.forEach((sh) => {
-      const people = sh.people.length ? sh.people.map((x) => `${x.name} (${ago(x.last)})`).join(", ") : "nobody yet";
+      const c = sh.claim;
+      const who_ = c ? `${c.run_by || "?"}${c.machine ? " · " + c.machine : ""}` : (sh.people.length ? sh.people.map((x) => x.name).join(", ") : "nobody yet");
       tb.append(h("tr", { class: sh.share === k ? "me" : "" },
         h("td", { text: `${sh.share}${sh.share === k ? " · this machine" : ""}` }),
-        h("td", { class: "probs", text: sh.problems.join(", ") }),
+        h("td", { text: who_, title: c && c.started_at ? `since ${fmtWhen(c.started_at)}` : "" }),
+        h("td", {}, h("span", { class: "st st-" + sh.state.replace(" ", "-"), text: stateText(sh) })),
         h("td", { text: `${sh.done} of ${sh.total}` }),
+        h("td", { text: `${sh.passed} / ${sh.failed}` }),
         h("td", { text: String(sh.left) }),
-        h("td", { text: people })));
+        h("td", { class: "probs", text: sh.problems.join(", ") })));
     });
     t.append(tb);
-    const det = h("details", {}, h("summary", { text: `Machine shares: who runs what (${n} machines, ${shares.reduce((x, sh) => x + sh.left, 0)} runs left in all)` }), t);
+    const count = (st) => shares.filter((sh) => sh.state === st).length;
+    const bits = [[count("running"), "running"], [count("finished"), "finished"], [count("paused") + count("stopped") + count("ended"), "stopped or paused"],
+                  [count("silent"), "silent"], [count("not taken"), "not taken"]].filter(([x]) => x).map(([x, w]) => `${x} ${w}`);
+    const det = h("details", {}, h("summary", { text: `Queue board: ${bits.join(" · ") || "no shares"} · ${shares.reduce((x, sh) => x + sh.left, 0)} runs left in all` }), t);
     det.open = wasOpen;
     panel.append(det);
   }
@@ -720,6 +749,8 @@
     body.append(h("p", { class: "hint", text: `"${Q.name}" will run ${plural(on.length, "step")} in this order, recorded under the experiment "${(preview && preview.experiment_label) || expName()}". Cells that already have a result under that name are skipped.` }));
     if (myShare()) {
       const sh = preview && preview.shares && preview.shares[myShare() - 1];
+      const busy = busyElsewhere(sh);
+      if (busy) body.append(h("p", { class: "hint warn-text", text: `${busy.run_by || "Someone"} (${busy.machine || "another machine"}) is running share ${myShare()} right now, last seen ${ago(busy.updated_at)}. Starting here runs the same cells twice. Press Cancel and pick another share unless you agreed this.` }));
       body.append(h("p", { class: "hint", text: `This machine runs share ${myShare()} of ${Q.machines} only${sh ? ": " + sh.problems.join(", ") : ""}. The other machines run the rest under the same experiment name.` }));
     } else if ((Q.machines || 1) > 1) {
       body.append(h("p", { class: "step-issue", text: `This queue is split across ${Q.machines} machines but no share is picked, so this machine would run every problem. Pick your share under "This machine runs" unless you mean that.` }));
@@ -1026,6 +1057,8 @@
   TAB_LOADERS.run = () => { loadKeyHealth(); loadCluster(); };
 
   TAB_LOADERS.queue = () => { loadManifests(); refreshPreview(true); };
+  // The board shows what other machines are doing, so it refreshes by itself while the Queue tab is open (one cheap read).
+  setInterval(() => { if (!document.hidden && !dirty && !$("tab-queue").hidden && Q && Q.steps && Q.steps.length) refreshPreview(true); }, 60000);
 
   // ---- boot ------------------------------------------------------------------------------------
   async function init() {
