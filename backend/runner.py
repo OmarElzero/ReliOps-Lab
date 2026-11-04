@@ -742,6 +742,12 @@ def _env_value(lines: list[str]) -> str:
     return "\n".join(lines).strip().strip('"').strip("'")
 
 
+# A service account pasted into .env WITHOUT a variable name (`{ ... }` or `type: service_account` lines) is kept under this
+# name, so it never gets glued onto the line above it (that used to garble a model key) and Firebase can still find it.
+BARE_JSON_KEY = "_BARE_JSON_BLOCK"
+_BARE_SA_START = re.compile(r"""^\s*["']?type["']?\s*:\s*["']?service_account""")
+
+
 def read_env_file(env_path: Path) -> dict[str, str]:
     """Parses a .env file into a dict. Values can be a single line or span many lines (a pasted
     JSON blob, e.g. a Firebase service-account key) — anything from a `KEY=` line up to the next
@@ -780,9 +786,17 @@ def read_env_file(env_path: Path) -> dict[str, str]:
             buf = [rest]
             pending = []
         elif current_key is not None:
-            buf.extend(pending)
-            pending = []
-            buf.append(line)
+            starts_bare_block = current_key != BARE_JSON_KEY and not "".join(buf).lstrip().startswith("{") and (
+                stripped == "{" or bool(_BARE_SA_START.match(line)))
+            if starts_bare_block:
+                _flush()
+                current_key, buf, pending = BARE_JSON_KEY, [line], []
+            else:
+                buf.extend(pending)
+                pending = []
+                buf.append(line)
+        elif stripped == "{" or _BARE_SA_START.match(line):
+            current_key, buf, pending = BARE_JSON_KEY, [line], []
     _flush()
     return out
 
@@ -799,7 +813,7 @@ def saved_providers() -> dict[str, bool]:
 # among unrelated plumbing.
 _NON_MODEL_KEY_VARS = {
     "GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_SERVICE_ACCOUNT_JSON", "SERVICE_ACCOUNT_KEY",
-    "AGENT_MODEL_ID", "REACT_V1_ACTION_SPACE", "SREGYM_AGENT_IMAGE",
+    "AGENT_MODEL_ID", "REACT_V1_ACTION_SPACE", "SREGYM_AGENT_IMAGE", "_BARE_JSON_BLOCK",
 }
 
 

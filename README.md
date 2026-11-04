@@ -225,6 +225,10 @@ JSON file with the team through a safe private channel (never git; it's already 
    entirely and paste the JSON itself into `.env` as `SERVICE_ACCOUNT_KEY={...}`. Either way,
    saving it as `firebase-service-account.json` right next to this `.env` needs no `.env` line at
    all — that's the one path this tool checks automatically if nothing else is set.
+   If you paste the JSON, paste the whole file (first `{` to last `}`). The Lab also copes with a paste that has
+   no variable name, one that a chat app turned into `key: value` lines, and one with real line breaks in the
+   private key; when it still cannot use what it finds, the status pill names the missing field (never the key).
+   Only this project's `.env` is read, never the one inside the cloned ReliOps folder.
 2. Open the GUI and type your name at the top. The status pill picks up `.env` on its own within
    a few seconds — nothing else to click.
 

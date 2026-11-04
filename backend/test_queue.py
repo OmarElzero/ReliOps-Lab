@@ -652,6 +652,101 @@ class LabEnvOnlyTests(unittest.TestCase):
         self.assertEqual(runner.read_env_file(self.clone / ".env").get("AGENT_API_BASE"), "http://stale")  # not touched
 
 
+class ServiceAccountPasteTests(unittest.TestCase):
+    """A teammate pastes the Firebase key into the Lab's .env and Firebase must configure, whatever shape the paste has."""
+
+    PEM = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0B\nabcdEFGHijklMNOP\n-----END PRIVATE KEY-----\n"
+
+    def setUp(self):
+        import firebase_sync
+        self.fb = firebase_sync
+        self.tmp = Path(tempfile.mkdtemp())
+        self.env = self.tmp / ".env"
+        for target, ret in (("lab_env_path", self.env), ("reliops_dir", self.tmp / "clone"),
+                            ("default_firebase_key_path", self.tmp / "none.json")):
+            p = mock.patch.object(runner, target, return_value=ret)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {}, clear=False)
+        p.start()
+        self.addCleanup(p.stop)
+        os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+
+    def _json(self, **drop):
+        import json
+        sa = {"type": "service_account", "project_id": "reliops-x", "private_key_id": "abc123", "private_key": self.PEM,
+              "client_email": "fb@reliops-x.iam.gserviceaccount.com", "client_id": "111", "token_uri": "https://oauth2.googleapis.com/token"}
+        for k in drop:
+            sa.pop(k)
+        return sa, json.dumps(sa, indent=2)
+
+    def _resolve(self, text):
+        self.env.write_text(text, encoding="utf-8")
+        found = self.fb._credential_from_env()
+        self.assertIsNotNone(found, text[:60])
+        return found
+
+    def _same_account(self, cred, sa):
+        self.assertIsInstance(cred, dict)
+        for k in ("project_id", "client_email", "private_key"):
+            self.assertEqual(cred[k], sa[k], k)
+
+    def test_named_single_line_and_multi_line_json(self):
+        import json
+        sa, pretty = self._json()
+        self._same_account(self._resolve("SERVICE_ACCOUNT_KEY=" + json.dumps(sa) + "\n")[0], sa)
+        self._same_account(self._resolve("FIREBASE_SERVICE_ACCOUNT_JSON=" + pretty + "\n")[0], sa)
+
+    def test_json_pasted_with_no_variable_name_does_not_garble_the_key_above_it(self):
+        sa, pretty = self._json()
+        cred, label = self._resolve("GEMINI_API_KEY_3=AIzaKEYabc123\n" + pretty + "\n")
+        self._same_account(cred, sa)
+        self.assertIn("without a variable name", label)
+        env = runner.read_env_file(self.env)
+        self.assertEqual(env["GEMINI_API_KEY_3"], "AIzaKEYabc123")
+        self.assertNotIn("_BARE_JSON_BLOCK", runner.custom_saved_keys())
+
+    def test_paste_with_the_quotes_and_commas_stripped(self):
+        sa, _ = self._json()
+        yamlish = ("type: service_account\nproject_id: reliops-x\nprivate_key_id: abc123\nprivate_key: " + self.PEM
+                   + "client_email: fb@reliops-x.iam.gserviceaccount.com\nclient_id: 111\ntoken_uri: https://oauth2.googleapis.com/token\n")
+        self._same_account(self._resolve("SERVICE_ACCOUNT_KEY={\n" + yamlish + "}\n")[0], sa)           # with a name and braces
+        self._same_account(self._resolve("OTHER=1\n" + yamlish)[0], sa)                                 # no name, no braces
+        self.assertEqual(runner.read_env_file(self.env)["OTHER"], "1")
+
+    def test_private_key_with_real_line_breaks_or_escaped_ones_ends_up_the_same(self):
+        import json
+        sa, _ = self._json()
+        escaped = json.dumps(sa).replace("\\n", "\\\\n")   # a JSON that was escaped twice: the plain parse yields literal \\n
+        cred = self._resolve("SERVICE_ACCOUNT_KEY=" + escaped + "\n")[0]
+        self.assertEqual(cred["private_key"], sa["private_key"])
+        self.assertNotIn("\\n", cred["private_key"])
+
+    def test_a_missing_field_is_named_but_no_key_text_is_ever_in_the_message(self):
+        sa, _ = self._json(client_email=None)
+        broken = "type: service_account\nproject_id: reliops-x\nprivate_key: " + self.PEM
+        self.env.write_text("SERVICE_ACCOUNT_KEY={\n" + broken + "}\n", encoding="utf-8")
+        cred, label = self.fb._credential_from_env()
+        self.assertIsNone(cred)
+        self.assertTrue(label.startswith("bad-json:"))
+        self.assertIn("client_email", label)
+        self.assertNotIn("MIIEvQ", label)
+        self.assertNotIn("abcdEFGH", self.fb.try_auto_connect())
+
+    def test_a_credentials_path_that_does_not_exist_is_named_in_the_status(self):
+        self.env.write_text("GOOGLE_APPLICATION_CREDENTIALS=/nowhere/key.json\n", encoding="utf-8")
+        status = self.fb.try_auto_connect()
+        self.assertIn("not configured", status)
+        self.assertIn("/nowhere/key.json", status)
+
+    def test_the_clone_env_is_not_a_source(self):
+        sa, pretty = self._json()
+        (self.tmp / "clone").mkdir()
+        (self.tmp / "clone" / ".env").write_text("SERVICE_ACCOUNT_KEY=" + pretty + "\n", encoding="utf-8")
+        self.env.write_text("OTHER=1\n", encoding="utf-8")
+        self.assertIsNone(self.fb._credential_from_env())
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -37,13 +38,18 @@ _resolved_label: str | None = None  # what we're connected with, so a repeat pol
 APP_NAME = "reliops-lab"
 
 
+_PROBLEM_HINT = ""   # why nothing resolved, for the status line (never contains key material)
+
+
 def _credential_from_env() -> tuple[Any, str] | None:
-    """Looks in this tool's own .env (reliops_lab/.env — see runner.lab_dir()) for either a
-    credentials path or inline JSON, falling back to the cloned ReliOps repo's .env for anything
-    the lab .env doesn't set. Returns (credential_arg_for_firebase_admin, human-readable source)
-    or None if nothing usable is there."""
+    """Looks in this tool's own .env (reliops_lab/.env — see runner.lab_dir()) and nowhere else for a
+    credentials path, inline JSON, or a service account pasted WITHOUT a variable name (a common way it
+    arrives: copied from a chat message that stripped the quotes). Returns (credential_arg_for_firebase_admin,
+    human-readable source) or None if nothing usable is there; then _PROBLEM_HINT says what looked wrong."""
+    global _PROBLEM_HINT
     import runner  # local import to avoid a circular import at module load time
 
+    _PROBLEM_HINT = ""
     env_vars = runner.merged_env_vars()
 
     path = env_vars.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
@@ -51,14 +57,27 @@ def _credential_from_env() -> tuple[Any, str] | None:
         path = _normalize_windows_style_path(path)
         if Path(path).is_file():
             return path, f"path from .env ({path})"
+        _PROBLEM_HINT = f"GOOGLE_APPLICATION_CREDENTIALS points to {path}, which is not a file on this machine"
 
-    for var in ("FIREBASE_SERVICE_ACCOUNT_JSON", "SERVICE_ACCOUNT_KEY"):
+    for var in ("FIREBASE_SERVICE_ACCOUNT_JSON", "SERVICE_ACCOUNT_KEY", runner.BARE_JSON_KEY):
         raw = env_vars.get(var)
         if raw:
             parsed, error = parse_service_account_json(raw)
             if parsed is not None:
-                return parsed, f"inline JSON from .env ({var})"
+                what = "pasted without a variable name" if var == runner.BARE_JSON_KEY else var
+                return parsed, f"inline JSON from .env ({what})"
             return None, f"bad-json:{var}:{error}"
+
+    # Last resort: the service account is somewhere in the file in a shape the line reader did not place under a name.
+    try:
+        text = runner.lab_env_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    if "PRIVATE KEY" in text and "client_email" in text:
+        parsed, error = parse_service_account_json(text)
+        if parsed is not None:
+            return parsed, "inline JSON from .env (found in the file)"
+        return None, f"bad-json:.env:{error}"
 
     default_path = runner.default_firebase_key_path()
     if default_path.is_file():
@@ -67,9 +86,37 @@ def _credential_from_env() -> tuple[Any, str] | None:
     return None
 
 
+_SA_FIELDS = ("type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "auth_uri",
+              "token_uri", "auth_provider_x509_cert_url", "client_x509_cert_url", "universe_domain")
+_SA_REQUIRED = ("project_id", "private_key", "client_email")
+
+
+def _parse_loose_service_account(text: str) -> tuple[dict | None, str]:
+    """For a paste that is not valid JSON any more (quotes or commas stripped, `key: value` lines, real newlines
+    inside the private key, indentation). Picks the known fields out by name. The reason names missing fields only."""
+    found: dict[str, str] = {}
+    pk = re.search(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", text, re.S)
+    if pk:
+        body = pk.group(0).replace("\\n", "\n")
+        found["private_key"] = "\n".join(ln.strip() for ln in body.splitlines() if ln.strip()) + "\n"
+    for field in _SA_FIELDS:
+        if field == "private_key":
+            continue
+        m = re.search(rf"""["']?\b{field}["']?\s*[:=]\s*["']?([^\s"',}}]+)""", text)
+        if m:
+            found[field] = m.group(1)
+    missing = [f for f in _SA_REQUIRED if f not in found]
+    if missing:
+        return None, "not valid JSON, and these fields could not be found in it: " + ", ".join(missing)
+    found.setdefault("type", "service_account")
+    found.setdefault("token_uri", "https://oauth2.googleapis.com/token")
+    return found, ""
+
+
 def parse_service_account_json(raw: str) -> tuple[dict | None, str]:
     """Reads the service-account JSON however it was pasted into .env: bare, in single or double
-    quotes, with the inner quotes escaped (`\\"`), or followed by a comment. Returns (dict, "") or
+    quotes, with the inner quotes escaped (`\\"`), followed by a comment, or mangled by a chat app
+    (no quotes, `key: value` lines, real line breaks in the private key). Returns (dict, "") or
     (None, reason). The key itself is never included in the reason."""
     text = raw.strip()
     candidates = [text]
@@ -84,8 +131,14 @@ def parse_service_account_json(raw: str) -> tuple[dict | None, str]:
             first_error = first_error or str(e)
             continue
         if isinstance(value, dict):
+            pk = value.get("private_key")
+            if isinstance(pk, str) and "\\n" in pk and "\n" not in pk.strip():   # escaped twice by whatever it was pasted through
+                value["private_key"] = pk.replace("\\n", "\n")
             return value, ""
-    return None, first_error or "not a JSON object"
+    loose, reason = _parse_loose_service_account(text)
+    if loose is not None:
+        return loose, ""
+    return None, reason or first_error or "not a JSON object"
 
 
 def _connect(cred_source: Any, label: str) -> None:
@@ -150,12 +203,14 @@ def try_auto_connect() -> str:
         _client = None
         _resolved_label = None
         _status = "not configured — no credentials found in .env or the default file"
+        if _PROBLEM_HINT:
+            _status += f" ({_PROBLEM_HINT})"
         return _status
     cred_source, label = found
     if label.startswith("bad-json:"):
         _client = None
         _resolved_label = None
-        _status = f"connection failed: {label.split(':', 2)[2]} (check the JSON you pasted into .env)"
+        _status = f"connection failed: {label.split(':', 2)[2]} (check what you pasted into .env: it must be the whole key file, from the first {{ to the last }})"
         return _status
     if _client is not None and label == _resolved_label:
         return _status  # same credentials as last time — nothing to do
