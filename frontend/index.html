@@ -458,14 +458,35 @@
     <section class="card">
       <h2>Queue results</h2>
       <p class="hint">One line per experiment (the name typed when a queue starts). Open the arrow to see every configuration, then every
-        problem: solved or not, each repeat, how long it took and the tokens it used. Problems that need a look come first.</p>
+        problem: solved or not, each repeat, how long it took and the tokens it used. Problems that need a look come first.
+        Old experiments stay here; they are grouped by when they last ran and you can order and filter them (your choices are remembered).</p>
       <div class="row">
         <button id="exp-refresh" class="secondary" type="button">Refresh</button>
         <button id="exp-open-all" class="secondary" type="button">Open all</button>
         <button id="exp-close-all" class="secondary" type="button">Close all</button>
         <input id="exp-filter" placeholder="Filter by experiment name" autocomplete="off">
       </div>
+      <div class="row exp-controls">
+        <label class="inline-label" for="exp-sort">Order</label>
+        <select id="exp-sort" aria-label="Order of experiments">
+          <option value="new">Newest activity first</option>
+          <option value="old">Oldest activity first</option>
+          <option value="name">Name, A to Z</option>
+          <option value="runs">Most runs first</option>
+        </select>
+        <select id="exp-group" aria-label="Grouping">
+          <option value="date">Group by date</option>
+          <option value="none">No grouping</option>
+        </select>
+        <select id="exp-person" aria-label="Show only this person's experiments"><option value="">Everyone</option></select>
+        <select id="exp-show" aria-label="Which experiments to show">
+          <option value="">All experiments</option>
+          <option value="attention">Need attention (failures or cells without a result)</option>
+          <option value="clean">Everything has a result</option>
+        </select>
+      </div>
       <p class="hint" id="exp-info"></p>
+      <p class="hint" id="exp-count"></p>
       <div id="exp-list" class="exp-list"></div>
     </section>
 

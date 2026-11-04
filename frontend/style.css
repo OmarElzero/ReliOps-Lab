@@ -511,6 +511,13 @@ td.r-problem { overflow-wrap: anywhere; min-width: 170px; }
 
 /* Queue results (Campaigns tab): one arrow per experiment, then per configuration */
 .exp-list { display: grid; gap: 8px; margin-top: 12px; }
+.exp-controls { margin-top: 8px; }
+.exp-controls select { width: auto; max-width: 100%; min-height: 34px; }
+.exp-group { display: grid; gap: 8px; }
+.exp-group + .exp-group { margin-top: 10px; }
+.exp-group-title { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.exp-group-title::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.exp-group-title .n { font-weight: 600; letter-spacing: 0; text-transform: none; }
 .exp, .exp-cfg { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .exp > summary, .exp-cfg > summary { cursor: pointer; padding: 10px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .exp-cfg > summary { font-size: 13px; }

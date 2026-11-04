@@ -219,49 +219,106 @@ function problemTable(rows) {
   return wrap;
 }
 
+// The Queue results list: ordered, grouped by date, filterable. Old experiments stay listed; they are only put in order.
+const EXP_OPEN = new Set();   // names of the experiments the reader has opened, kept across redraws (filter, refresh, tab switch)
+const expPref = {
+  get(k, d) { try { const v = localStorage.getItem("lab_exp_" + k); return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("lab_exp_" + k, v); } catch (e) { /* storage blocked: fine */ } },
+};
+const EXP_DAY_GROUPS = ["Today", "Yesterday", "Last 7 days", "Last 30 days", "Older", "No date"];
+function expDayGroup(iso, now = new Date()) {
+  const t = Date.parse(iso || "");
+  if (!t) return "No date";
+  const startOf = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOf(now) - startOf(new Date(t))) / 86400000);
+  return days <= 0 ? "Today" : days === 1 ? "Yesterday" : days < 7 ? "Last 7 days" : days < 30 ? "Last 30 days" : "Older";
+}
+const expCells = (e) => e.passed + e.failed + e.incomplete;
+const expNeedsAttention = (e) => e.failed > 0 || e.incomplete > 0;
+function expSorted(list, how) {
+  const by = {
+    new: (a, b) => (b.last || "").localeCompare(a.last || ""),
+    old: (a, b) => (a.last || "").localeCompare(b.last || ""),
+    name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
+    runs: (a, b) => expCells(b) - expCells(a) || (b.last || "").localeCompare(a.last || ""),
+  };
+  return [...list].sort(by[how] || by.new);
+}
+function expCard(e) {
+  const d = el("details", undefined, "exp");
+  d.open = EXP_OPEN.has(e.name);
+  d.addEventListener("toggle", () => { if (d.open) EXP_OPEN.add(e.name); else EXP_OPEN.delete(e.name); });
+  const s = el("summary");
+  s.appendChild(el("span", e.name, "exp-name"));
+  const known = e.passed + e.failed;
+  s.appendChild(expChips([
+    [`${e.passed} of ${known} passed`, e.failed ? "" : "ok"],
+    e.failed ? [`${e.failed} failed`, "bad"] : null,
+    e.incomplete ? [`${e.incomplete} no result`, "warn", "Ran, but no known outcome. The queue runs these cells again."] : null,
+    [fmtDur(e.seconds) + (e.time_kinds.some((k) => k !== "run") ? " agent time" : ""), "", "Total machine time of the counted runs" + (TIME_NOTE[e.time_kinds.length > 1 ? "mixed" : (e.time_kinds[0] || "run")] || "")],
+    [fmtTok(e.tokens) + " tokens"],
+    [e.configs.length + (e.configs.length === 1 ? " configuration" : " configurations")],
+    [e.people.join(", ")],
+    [fmtWhen(e.last)],
+  ]));
+  d.appendChild(s);
+  const inner = el("div", undefined, "exp-body");
+  e.configs.forEach((c) => {
+    const cd = el("details", undefined, "exp-cfg");
+    if (e.configs.length === 1) cd.open = true;
+    const cs = el("summary");
+    cs.appendChild(el("span", configTitle(c) || "(no label)", "exp-name"));
+    cs.appendChild(expChips([
+      [`${c.problems_solved} of ${c.problems} problems solved`, c.problems_solved === c.problems ? "ok" : ""],
+      c.pass_rate === null ? null : [`${Math.round(c.pass_rate * 100)}% of runs passed`],
+      c.incomplete ? [`${c.incomplete} no result`, "warn"] : null,
+      c.diagnosis_known ? [`diagnosis right ${c.diagnosis_passed}/${c.diagnosis_known}`] : null,
+      [fmtDur(c.seconds) + (c.cells ? ` · avg ${fmtDur(c.seconds / Math.max(1, c.seconds_known_for))}` : "") + (c.time_kind && c.time_kind !== "run" ? " agent time" : ""), "", "Total and average time per run" + (TIME_NOTE[c.time_kind] || "")],
+      [fmtTok(c.tokens) + " tokens"],
+      c.attempts_extra ? [`${c.attempts_extra} re-run`, "", "Cells that were run more than once. Only the latest run of each counts."] : null,
+    ]));
+    cd.appendChild(cs);
+    cd.appendChild(problemTable(c.problem_rows));
+    inner.appendChild(cd);
+  });
+  d.appendChild(inner);
+  return d;
+}
 function renderExperiments(list) {
   const box = document.getElementById("exp-list");
-  const q = (document.getElementById("exp-filter").value || "").trim().toLowerCase();
+  const get = (id) => document.getElementById(id);
+  const q = (get("exp-filter").value || "").trim().toLowerCase();
+  // the person list is rebuilt from the data, keeping the choice if that person is still there
+  const personSel = get("exp-person"), people = [...new Set(list.flatMap((e) => e.people || []))].sort((a, b) => a.localeCompare(b));
+  const wantPerson = personSel.dataset.chosen !== undefined ? personSel.dataset.chosen : expPref.get("person", "");
+  if (personSel.options.length - 1 !== people.length || people.some((p, i) => personSel.options[i + 1].value !== p)) {
+    personSel.innerHTML = "";
+    personSel.append(new Option("Everyone", ""));
+    people.forEach((p) => personSel.append(new Option(p, p)));
+  }
+  personSel.value = people.includes(wantPerson) ? wantPerson : "";
+  const sortBy = get("exp-sort").value, groupBy = get("exp-group").value, show = get("exp-show").value, person = personSel.value;
+  const shown = expSorted(list.filter((e) =>
+    (!q || e.name.toLowerCase().includes(q)) && (!person || (e.people || []).includes(person)) &&
+    (show === "attention" ? expNeedsAttention(e) : show === "clean" ? !expNeedsAttention(e) : true)), sortBy);
   box.innerHTML = "";
-  list.filter((e) => !q || e.name.toLowerCase().includes(q)).forEach((e) => {
-    const d = el("details", undefined, "exp");
-    const s = el("summary");
-    s.appendChild(el("span", e.name, "exp-name"));
-    const known = e.passed + e.failed;
-    s.appendChild(expChips([
-      [`${e.passed} of ${known} passed`, e.failed ? "" : "ok"],
-      e.failed ? [`${e.failed} failed`, "bad"] : null,
-      e.incomplete ? [`${e.incomplete} no result`, "warn", "Ran, but no known outcome. The queue runs these cells again."] : null,
-      [fmtDur(e.seconds) + (e.time_kinds.some((k) => k !== "run") ? " agent time" : ""), "", "Total machine time of the counted runs" + (TIME_NOTE[e.time_kinds.length > 1 ? "mixed" : (e.time_kinds[0] || "run")] || "")],
-      [fmtTok(e.tokens) + " tokens"],
-      [e.configs.length + (e.configs.length === 1 ? " configuration" : " configurations")],
-      [e.people.join(", ")],
-      [fmtWhen(e.last)],
-    ]));
-    d.appendChild(s);
-    const inner = el("div", undefined, "exp-body");
-    e.configs.forEach((c) => {
-      const cd = el("details", undefined, "exp-cfg");
-      if (e.configs.length === 1) cd.open = true;
-      const cs = el("summary");
-      cs.appendChild(el("span", configTitle(c) || "(no label)", "exp-name"));
-      cs.appendChild(expChips([
-        [`${c.problems_solved} of ${c.problems} problems solved`, c.problems_solved === c.problems ? "ok" : ""],
-        c.pass_rate === null ? null : [`${Math.round(c.pass_rate * 100)}% of runs passed`],
-        c.incomplete ? [`${c.incomplete} no result`, "warn"] : null,
-        c.diagnosis_known ? [`diagnosis right ${c.diagnosis_passed}/${c.diagnosis_known}`] : null,
-        [fmtDur(c.seconds) + (c.cells ? ` · avg ${fmtDur(c.seconds / Math.max(1, c.seconds_known_for))}` : "") + (c.time_kind && c.time_kind !== "run" ? " agent time" : ""), "", "Total and average time per run" + (TIME_NOTE[c.time_kind] || "")],
-        [fmtTok(c.tokens) + " tokens"],
-        c.attempts_extra ? [`${c.attempts_extra} re-run`, "", "Cells that were run more than once. Only the latest run of each counts."] : null,
-      ]));
-      cd.appendChild(cs);
-      cd.appendChild(problemTable(c.problem_rows));
-      inner.appendChild(cd);
+  if (groupBy === "date") {
+    EXP_DAY_GROUPS.forEach((g) => {
+      const items = shown.filter((e) => expDayGroup(e.last) === g);
+      if (!items.length) return;
+      const sec = el("section", undefined, "exp-group");
+      const h3 = el("h3", g, "exp-group-title");
+      h3.appendChild(el("span", `${items.length} ${items.length === 1 ? "experiment" : "experiments"}`, "n"));
+      sec.appendChild(h3);
+      items.forEach((e) => sec.appendChild(expCard(e)));
+      box.appendChild(sec);
     });
-    d.appendChild(inner);
-    box.appendChild(d);
-  });
-  if (!box.children.length) box.appendChild(el("p", list.length ? "No experiment matches the filter." : "No experiment has runs yet. Start a queue and give it a name.", "hint"));
+  } else {
+    shown.forEach((e) => box.appendChild(expCard(e)));
+  }
+  const info = get("exp-count");
+  if (info) info.textContent = list.length ? `Showing ${shown.length} of ${list.length} experiments.` : "";
+  if (!box.children.length) box.appendChild(el("p", list.length ? "No experiment matches the filters." : "No experiment has runs yet. Start a queue and give it a name.", "hint"));
 }
 
 let EXPERIMENTS = [];
@@ -276,6 +333,12 @@ async function loadExperiments() {
 }
 document.getElementById("exp-refresh").addEventListener("click", loadExperiments);
 document.getElementById("exp-filter").addEventListener("input", () => renderExperiments(EXPERIMENTS));
+[["exp-sort", "sort", "new"], ["exp-group", "group", "date"], ["exp-show", "show", ""], ["exp-person", "person", ""]].forEach(([id, key, dflt]) => {
+  const node = document.getElementById(id);
+  if (id !== "exp-person") node.value = expPref.get(key, dflt);
+  else node.dataset.chosen = expPref.get(key, dflt);
+  node.addEventListener("change", () => { expPref.set(key, node.value); if (id === "exp-person") node.dataset.chosen = node.value; renderExperiments(EXPERIMENTS); });
+});
 document.getElementById("exp-open-all").addEventListener("click", () => document.querySelectorAll("#exp-list details").forEach((x) => { x.open = true; }));
 document.getElementById("exp-close-all").addEventListener("click", () => document.querySelectorAll("#exp-list details").forEach((x) => { x.open = false; }));
 TAB_LOADERS.campaigns = () => { loadExperiments(); return loadManifests(); };

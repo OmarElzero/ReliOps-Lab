@@ -861,6 +861,14 @@ class QueueBoardStabilityTests(unittest.TestCase):
         self.assertIn("table-layout: fixed", css)
         self.assertIn("-webkit-line-clamp: 2", css)
 
+    def test_queue_results_are_ordered_grouped_and_keep_old_experiments(self):
+        js, html = self.read("v2.js"), self.read("index.html")
+        for ident in ("exp-sort", "exp-group", "exp-person", "exp-show", "exp-count"):
+            self.assertIn(f'id="{ident}"', html)
+        self.assertIn("const EXP_OPEN = new Set()", js)             # opened experiments stay open across redraws
+        self.assertIn('"Today", "Yesterday", "Last 7 days", "Last 30 days", "Older"', js)
+        self.assertNotIn("slice(0,", js[js.index("function renderExperiments"):js.index("let EXPERIMENTS")])   # nothing is cut off
+
     def test_no_name_shows_a_prompt_not_other_experiments_work(self):
         js = self.read("queue.js")
         self.assertIn("preview.needs_name", js)
