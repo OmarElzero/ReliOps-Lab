@@ -52,6 +52,7 @@ async function loadConfig() {
     agentSel.appendChild(opt);
   });
   renderAgentDesc();
+  renderVariantPicker();
 
   const presets = document.getElementById("model-presets");
   presets.innerHTML = "";
@@ -101,6 +102,66 @@ function renderAgentDesc() {
   const agent = selectedAgent();
   document.getElementById("agent-desc").textContent = agent && agent.desc ? agent.desc : "";
 }
+
+// ---- Variant picker (Run tab): a ready-made agent + switches, the same list the queue uses ----------
+// Choosing one sets the agent dropdown and the config label and remembers the switches, which are sent
+// as agent_switches on /api/run. Touching the agent dropdown afterwards goes back to "custom" (no switches).
+let VARIANT_SWITCHES = [];
+
+function variantAgentIndex(v) {
+  return CONFIG.agents.findIndex((a) => a.id === v.agent_id && (a.action_space || "") === (v.action_space || ""));
+}
+
+function renderVariantPicker() {
+  const sel = document.getElementById("variant");
+  if (!sel) return;
+  sel.innerHTML = "";
+  const custom = document.createElement("option");
+  custom.value = "";
+  custom.textContent = "Custom — use the agent below, no switches";
+  sel.appendChild(custom);
+  let group = null, og = null;
+  (CONFIG.variant_presets || []).forEach((v) => {
+    if (v.group !== group) {
+      group = v.group;
+      og = document.createElement("optgroup");
+      og.label = group;
+      sel.appendChild(og);
+    }
+    const opt = document.createElement("option");
+    opt.value = v.id;
+    opt.textContent = v.id;
+    if (v.needs_notes || variantAgentIndex(v) < 0) {
+      opt.disabled = true;
+      opt.textContent = v.id + (v.needs_notes ? " (needs the reviewed Kubernetes notes)" : " (agent not available)");
+    }
+    og.appendChild(opt);
+  });
+  sel.value = "";
+  VARIANT_SWITCHES = [];
+  renderVariantDesc();
+}
+
+function renderVariantDesc() {
+  const el = document.getElementById("variant-desc");
+  if (!el) return;
+  const v = (CONFIG.variant_presets || []).find((x) => x.id === document.getElementById("variant").value);
+  el.textContent = v
+    ? `${v.help}. Switches on: ${v.switches.length ? v.switches.join(", ") : "none"}. The agent and the config label are set for you.`
+    : "Pick a ready-made variant to set the agent, its switches and the config label in one go.";
+}
+
+document.getElementById("variant").addEventListener("change", () => {
+  const v = (CONFIG.variant_presets || []).find((x) => x.id === document.getElementById("variant").value);
+  if (!v) { VARIANT_SWITCHES = []; renderVariantDesc(); return; }
+  const i = variantAgentIndex(v);
+  if (i < 0) return;
+  document.getElementById("agent").value = String(i);
+  document.getElementById("config-label").value = v.id;
+  VARIANT_SWITCHES = v.switches.slice();
+  renderAgentDesc();
+  renderVariantDesc();
+});
 
 function selectedProvider() {
   const sel = document.getElementById("key-provider").value;
@@ -235,7 +296,15 @@ function chunk(arr, size) {
 }
 
 document.getElementById("problem-set").addEventListener("change", renderProblemSet);
-document.getElementById("agent").addEventListener("change", renderAgentDesc);
+document.getElementById("agent").addEventListener("change", () => {
+  // picking the agent by hand leaves the ready-made variant: its switches no longer apply
+  if (VARIANT_SWITCHES.length || document.getElementById("variant").value) {
+    document.getElementById("variant").value = "";
+    VARIANT_SWITCHES = [];
+    renderVariantDesc();
+  }
+  renderAgentDesc();
+});
 document.getElementById("key-provider").addEventListener("change", renderKeyStatus);
 document.getElementById("key-provider-custom").addEventListener("input", renderKeyStatus);
 
@@ -455,6 +524,7 @@ document.getElementById("run-test").addEventListener("click", async () => {
       force_build: forceBuild && i === 0 ? "true" : "false", // only the very first call needs to build the image
     });
     if (agent.action_space) params.set("action_space", agent.action_space);
+    if (VARIANT_SWITCHES.length) params.set("agent_switches", VARIANT_SWITCHES.join(","));
     if (runBy) params.set("run_by", runBy);
     const configLabel = configLabelEl.value.trim();
     if (configLabel) params.set("config_label", configLabel);

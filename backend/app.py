@@ -592,8 +592,13 @@ def run(
     cells: Optional[str] = None,  # explicit "problem:repeat,problem:repeat" list
     purpose: Optional[str] = None,  # experiment | dev | final; empty = decided automatically from the pinned sets
     experiment: Optional[str] = None,  # the person's name for what this run belongs to (optional for a quick run)
+    agent_switches: Optional[str] = None,  # comma-separated switch names (reliops_v2 only), e.g. from a ready-made variant
 ):
     problem_list = [p.strip() for p in problems.split(",") if p.strip()]
+    try:
+        switch_list = runner.clean_switches((agent_switches or "").split(","))
+    except ValueError as e:
+        return _refusal([f"{e}\n"])
     cell_list = None
     if cells:
         try:
@@ -604,7 +609,7 @@ def run(
                   force_build=force_build, repeat_n=repeat_n, run_by=run_by, config_label=config_label,
                   run_class=run_class, record_walkthrough=record_walkthrough, manifest_id=manifest_id,
                   slice_k=slice_k, slice_n=slice_n, cells=cell_list, purpose=purpose or None,
-                  experiment=(experiment or "").strip() or None)
+                  experiment=(experiment or "").strip() or None, agent_switches=switch_list or None)
     return _job_sse(lambda: _run_lines(**kwargs), "run", f"{agent} · {len(problem_list)} problem(s)")
 
 

@@ -356,6 +356,26 @@ class ApiTests(TmpRepoCase):
         with mock.patch.object(campaign, "agent_dirty", return_value=True):
             self.assertEqual(c.post("/api/manifest", json=body).status_code, 400)
 
+    def test_quick_run_accepts_agent_switches(self):
+        """The Run tab's variant picker sends the variant's switches; a bad name or a non-v2 agent is refused, a good list reaches the run."""
+        import app as app_module
+        c = self.client
+        base = {"agent": "reliops_v2", "model": "m", "judge_model": "j", "problems": "p1", "action_space": "typed+shell"}
+        r = c.get("/api/run", params={**base, "agent_switches": "NOT_A_SWITCH"})
+        self.assertIn("unknown agent switch", r.text)
+        seen = {}
+
+        def fake(**kw):
+            seen.update(kw)
+            yield "ok\n"
+
+        with mock.patch.object(app_module, "_run_lines", fake):
+            c.get("/api/run", params={**base, "agent_switches": "TOKEN_LOG,empty_submit_guard,OPTIONAL_ARGS", "config_label": "R2 B2"})
+            self.assertEqual(seen["agent_switches"], ["TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS"])
+            seen.clear()
+            c.get("/api/run", params=base)
+            self.assertIsNone(seen["agent_switches"])
+
     def test_cards_exports_and_audit_endpoints(self):
         c = self.client
         self.assertEqual(c.get("/api/card/p1").status_code, 404)

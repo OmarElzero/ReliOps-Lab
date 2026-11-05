@@ -58,6 +58,8 @@ Frozen campaigns already had a "k of n" slice in the Campaigns tab; it is now co
 
 The one-off page for setting up a machine and for a single quick run.
 
+In **2 · Agent & model**, the **Variant** list holds the same ready-made variants as the queue (V0, B, R2 NULL, R2 B2, R2 ALL, the one-on and one-off R2 rows and so on). Picking one sets the agent, the config label and the agent's switches for the run, and the line under the list shows which switches are on. Variants that wait for the reviewed Kubernetes notes are greyed out. Changing the Agent list by hand goes back to *Custom*, which runs the agent with no switches. Example: to try one problem on the round 2 base, choose **R2 B2**, give the run an experiment name, choose the problem (Custom problem box) and press Run.
+
 1. Machine check: Docker, kubectl, kind, uv and so on, with what to fix.
 2. Environment: clones ReliOps and SREGym and builds the cluster tooling (Run setup). Run it once per machine.
 3. Agent and model: which agent, which action space, the agent model and the judge model.

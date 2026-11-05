@@ -843,6 +843,13 @@ class QueueBoardStabilityTests(unittest.TestCase):
         with open(os.path.join(self.front, name), encoding="utf-8") as f:
             return f.read()
 
+    def test_run_tab_has_a_variant_picker(self):
+        html, js = self.read("index.html"), self.read("app.js")
+        self.assertIn('<select id="variant"></select>', html)
+        self.assertIn("CONFIG.variant_presets", js)                       # filled from the same list the queue uses
+        self.assertIn('params.set("agent_switches", VARIANT_SWITCHES.join(","))', js)   # and its switches reach /api/run
+        self.assertIn('document.getElementById("config-label").value = v.id;', js)
+
     def test_board_is_outside_the_sticky_bar(self):
         html = self.read("index.html")
         self.assertIn('</div>\n    <div class="q-shares" id="q-shares" hidden></div>', html)   # the bar's div is closed before the board
