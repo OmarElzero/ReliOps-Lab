@@ -14,6 +14,7 @@ import json
 import os
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -786,7 +787,7 @@ def queue_preview(queue_id: str, experiment: Optional[str] = None, share: Option
         return JSONResponse({"error": "unknown queue"}, status_code=404)
     _, runs = _collect_runs(5000)
     try:
-        return {**queueplan.preview(q, runs, store.read("manifests"), experiment, share, claims.for_label), "this_commit": _this_commit()}
+        return {**queueplan.preview(q, runs, store.read("manifests"), experiment, share, claims.for_label, resets=_resets()), "this_commit": _this_commit()}
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -800,9 +801,23 @@ def queue_preview_draft(body: QueueIn):
     try:
         q = queueplan.clean_queue(draft)
         _, runs = _collect_runs(5000)
-        return {**queueplan.preview(q, runs, store.read("manifests"), body.experiment, body.share, claims.for_label), "this_commit": _this_commit()}
+        return {**queueplan.preview(q, runs, store.read("manifests"), body.experiment, body.share, claims.for_label, resets=_resets()), "this_commit": _this_commit()}
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+
+def _resets() -> list:
+    """"Restart my share" markers (queueplan.apply_resets). Best effort: a failed read means no resets."""
+    try:
+        return store.read("share_resets")
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _queue_runs(queue: dict, label: str) -> list:
+    """Recorded runs as the queue counts them: runs of a share that was restarted under this label do not count."""
+    _, runs = _collect_runs(5000)
+    return queueplan.apply_resets(queue, runs, _resets(), label)
 
 
 def _runs_left(queue: dict, label: str, runs: Optional[list] = None, share: Optional[int] = None) -> int:
@@ -811,7 +826,7 @@ def _runs_left(queue: dict, label: str, runs: Optional[list] = None, share: Opti
     only = queueplan.share_set(queue, share)
     manifests = store.read("manifests")
     if runs is None:
-        _, runs = _collect_runs(5000)
+        runs = _queue_runs(queue, label)
     n = 0
     for step in queue["steps"]:
         if not step.get("enabled", True):
@@ -880,7 +895,7 @@ def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: b
         if step.get("manifest_id") and manifest is None:
             yield f"##### [QUEUE] step {i}/{len(steps)} cannot run: frozen campaign {step['manifest_id']} not found #####\n"
             continue
-        _, runs = _collect_runs(5000)
+        runs = _queue_runs(queue, label)
         cell_list = queueplan.todo(step, runs, manifest, label, only)
         yield f"\n##### [QUEUE] step {i}/{len(steps)} start: {step['name']} | runs {len(cell_list)} to do #####\n"
         if not cell_list:
@@ -922,7 +937,7 @@ def _queue_by_cell(queue: dict, steps: list, only, manifests: list, label: str, 
     The configurations of one pair then run close together on the same machine, so a slow hour of the model service
     or a tired cluster falls on all of them alike instead of on whichever step happened to run then. Each pair starts
     one step later than the one before, so no configuration is always the first (or last) of its block."""
-    _, runs = _collect_runs(5000)
+    runs = _queue_runs(queue, label)
     plan = []
     for i, step in enumerate(steps, start=1):
         if not step.get("enabled", True):
@@ -1029,6 +1044,48 @@ def queue_run(queue_id: str, run_by: Optional[str] = None, experiment: str = "",
         return _refusal([f"{e}\n"])
     return _job_sse(lambda: _queue_lines(q, run_by, experiment, restart, share), "queue", q["name"],
                     {"queue_id": queue_id, "experiment": experiment, "share": share})
+
+
+class RestartShareIn(BaseModel):
+    experiment: str
+    share: int
+    run_by: Optional[str] = None
+
+
+@app.post("/api/queue/{queue_id}/restart-share")
+def queue_restart_share(queue_id: str, body: RestartShareIn):
+    """Restart ONE machine share of a shared queue under its experiment name. Nothing is deleted: a reset marker is stored
+    (shared with the other machines) and the queue and the board ignore that share's earlier runs under this label, so its
+    cells run again. Other shares and other experiments are not touched."""
+    q = _find_queue(queue_id)
+    if q is None:
+        return JSONResponse({"error": "unknown queue"}, status_code=404)
+    n = int(q.get("machines") or 1)
+    if n <= 1:
+        return JSONResponse({"error": "This queue is not split across machines; use Restart."}, status_code=400)
+    try:
+        queueplan.share_set(q, body.share)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    base = (body.experiment or "").strip()
+    if not base:
+        return JSONResponse({"error": "Give the experiment a name first."}, status_code=400)
+    if jobs.busy():
+        return JSONResponse({"error": "A job is running on this machine. Pause it first, then restart the share."}, status_code=409)
+    _, runs = _collect_runs(5000)
+    label = queueplan.experiment_label(base, runs)
+    lists = queueplan.share_lists(q)
+    before = [r for r in queueplan.apply_resets(q, runs, _resets(), label)
+              if (r.get("experiment") or "") == label
+              and queueplan.share_of(q, r.get("problem_id") or "?", int(r.get("repeat_index") or 1), lists) == body.share]
+    if not before:
+        return JSONResponse({"error": f"Nothing is recorded in share {body.share} under \"{label}\"; use Run queue."}, status_code=400)
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    rec = store.append("share_resets", {"experiment": label, "share": body.share, "at": at, "queue_id": queue_id,
+                                        "queue_name": q.get("name"), "run_by": body.run_by or "", "machine": claims.machine_name(),
+                                        "runs_set_aside": len(before)})
+    return {"ok": True, "experiment": label, "share": body.share, "at": at, "runs_set_aside": len(before),
+            "shared": rec.get("_firebase")}
 
 
 # ---- Problem cards ------------------------------------------------------------------

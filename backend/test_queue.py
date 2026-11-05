@@ -199,6 +199,52 @@ class QueueApiTests(TmpRepoCase):
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()["queue"]
 
+    def test_restart_share_endpoint_sets_aside_one_share_only(self):
+        c = self.client
+        probs = [f"p{i}" for i in range(1, 7)]
+        q = c.post("/api/queue", json={"name": "Shared", "machines": 3,
+                                       "steps": [step(problems=probs, repeat_n=1)]}).json()["queue"]
+        qid = q["queue_id"]
+        runs = [dict(run(1, "p1", 1, True), experiment="X", run_by="Omar"),    # share 1
+                dict(run(2, "p4", 1, True), experiment="X", run_by="Omar"),    # share 1
+                dict(run(3, "p2", 1, True), experiment="X", run_by="Mona")]    # share 2
+        with mock.patch.object(self.app_module, "_collect_runs", return_value=("local", runs)):
+            pv = c.get("/api/queue/preview", params={"queue_id": qid, "experiment": "X", "share": 1}).json()
+            self.assertEqual([x["done"] for x in pv["shares"]], [2, 1, 0])
+            self.assertEqual(c.post(f"/api/queue/{qid}/restart-share", json={"experiment": "X", "share": 4}).status_code, 400)
+            self.assertEqual(c.post(f"/api/queue/{qid}/restart-share", json={"experiment": "", "share": 1}).status_code, 400)
+            self.assertEqual(c.post(f"/api/queue/{qid}/restart-share", json={"experiment": "Nope", "share": 1}).status_code, 400)
+            r = c.post(f"/api/queue/{qid}/restart-share", json={"experiment": "X", "share": 1, "run_by": "Omar"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual((r.json()["experiment"], r.json()["runs_set_aside"]), ("X", 2))
+            pv = c.get("/api/queue/preview", params={"queue_id": qid, "experiment": "X", "share": 1}).json()
+            self.assertEqual([x["done"] for x in pv["shares"]], [0, 1, 0])    # share 2 keeps its run
+            self.assertEqual(pv["runs_left"], 2)
+            self.assertEqual(self.app_module._runs_left(q, "X", share=1), 2)      # the run loop counts it the same way
+            self.assertEqual(self.app_module._runs_left(q, "X", share=2), 1)
+            # nothing left to set aside in share 1 now
+            self.assertEqual(c.post(f"/api/queue/{qid}/restart-share", json={"experiment": "X", "share": 1}).status_code, 400)
+            self.assertEqual(len(runs), 3)                                      # nothing was deleted
+        one = c.post("/api/queue", json={"name": "Single", "steps": [step()]}).json()["queue"]
+        self.assertEqual(c.post(f"/api/queue/{one['queue_id']}/restart-share", json={"experiment": "X", "share": 1}).status_code, 400)
+
+    def test_queue_tab_has_a_restart_my_share_button(self):
+        here = os.path.dirname(__file__)
+        with open(os.path.join(here, "..", "frontend", "index.html")) as f:
+            self.assertIn('id="q-restart-share"', f.read())
+        with open(os.path.join(here, "..", "frontend", "queue.js")) as f:
+            js = f.read()
+        self.assertIn("/restart-share", js)
+        self.assertIn('$("q-restart-share")', js)
+
+    def test_restart_share_is_refused_while_a_job_runs(self):
+        c = self.client
+        q = c.post("/api/queue", json={"name": "Shared", "machines": 2, "steps": [step(problems=["p1", "p2"], repeat_n=1)]}).json()["queue"]
+        runs = [dict(run(1, "p1", 1, True), experiment="X")]
+        with mock.patch.object(self.app_module, "_collect_runs", return_value=("local", runs)), \
+                mock.patch.object(self.app_module.jobs, "busy", return_value=True):
+            self.assertEqual(c.post(f"/api/queue/{q['queue_id']}/restart-share", json={"experiment": "X", "share": 1}).status_code, 409)
+
     def test_save_list_validate_delete(self):
         c = self.client
         self.assertEqual(c.post("/api/queue", json={"name": "q", "steps": [step(model_id="")]}).status_code, 400)
@@ -434,6 +480,30 @@ class MachineShareTests(unittest.TestCase):
         whole = queueplan.preview(q, runs, [], "X")
         self.assertIsNone(whole["share"])
         self.assertEqual(whole["runs_left"], 12)
+
+    def test_restart_my_share_ignores_only_that_shares_older_runs_under_that_label(self):
+        q = self._queue(machines=3)
+        runs = [dict(run(1, "p1", 1, True, label="A"), experiment="X", run_by="Omar"),     # share 1
+                dict(run(2, "p2", 1, True, label="A"), experiment="X", run_by="Mona"),     # share 2
+                dict(run(3, "p1", 1, True, label="A"), experiment="Other", run_by="Omar")]
+        at = "2026-10-29T10:00:30Z"
+        reset = [{"experiment": "X", "share": 1, "at": at}]
+        kept = queueplan.apply_resets(q, runs, reset, "X")
+        self.assertEqual([r["run_id"] for r in kept], ["r2", "r3"])        # share 2 and the other experiment are kept
+        pv = queueplan.preview(q, runs, [], "X", share=1, resets=reset)
+        self.assertEqual(pv["runs_left"], 6)                                # p1 under A runs again
+        self.assertEqual([x["done"] for x in pv["shares"]], [0, 1, 0])
+        # a run recorded after the reset counts again
+        later = runs + [dict(run(4, "p1", 1, False, label="A"), experiment="X", run_by="Omar", timestamp_utc="2026-10-29T10:01:00Z")]
+        pv = queueplan.preview(q, later, [], "X", share=1, resets=reset)
+        self.assertEqual([x["done"] for x in pv["shares"]], [1, 1, 0])
+        self.assertEqual(pv["shares"][0]["failed"], 1)
+        # a reset for another experiment, or on a one-machine queue, changes nothing
+        self.assertEqual(queueplan.apply_resets(q, runs, [{"experiment": "Y", "share": 1, "at": at}], "X"), runs)
+        one = self._queue(machines=1)
+        self.assertEqual(queueplan.apply_resets(one, runs, reset, "X"), runs)
+        self.assertEqual(queueplan.share_of(q, "p4", 1), 1)
+        self.assertEqual(queueplan.share_of(q, "p5", 1), 2)
 
     def test_split_by_repeat_balances_and_keeps_configs_of_a_pair_together(self):
         probs = [f"p{i}" for i in range(1, 13)]

@@ -187,6 +187,34 @@ def share_set(queue: dict, share: int | None) -> set[str] | None:
     return set(share_lists(queue)[int(share) - 1])
 
 
+def share_of(queue: dict, problem: str, repeat: int, lists: list[list[str]] | None = None) -> int:
+    """Which machine share (1-based) a cell belongs to."""
+    lists = lists or share_lists(queue)
+    owner = {u: k for k, x in enumerate(lists, 1) for u in x}
+    return owner.get(problem, owner.get(unit(problem, repeat), 1))
+
+
+def apply_resets(queue: dict, runs: list[dict], resets: list[dict], label: str | None) -> list[dict]:
+    """"Restart my share" does not delete anything. It records a reset (experiment label, share, time). For that label, runs
+    of that share recorded before the reset time are left out here, so those cells count as not done and run again, while the
+    other shares keep their progress. Runs of other labels are never touched."""
+    if not label or not resets or int(queue.get("machines") or 1) <= 1:
+        return runs
+    mine = {int(r.get("share") or 0): (r.get("at") or "") for r in resets if r.get("experiment") == label and r.get("at")}
+    if not mine:
+        return runs
+    lists = share_lists(queue)
+    owner = {u: k for k, x in enumerate(lists, 1) for u in x}
+    out = []
+    for r in runs:
+        if (r.get("experiment") or "") == label:
+            at = mine.get(owner.get(r.get("problem_id") or "?", owner.get(unit(r.get("problem_id") or "?", int(r.get("repeat_index") or 1)), 1)))
+            if at and (r.get("timestamp_utc") or "") < at:
+                continue
+        out.append(r)
+    return out
+
+
 _ROUND_RE = re.compile(r"^(?P<base>.*?)(?: \(restart (?P<n>\d+)\))?$")
 
 
@@ -290,13 +318,14 @@ def todo(step: dict, runs: list[dict], manifest: dict | None = None, experiment:
 
 
 def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: str | None = None,
-            share: int | None = None, claims_for=None, now: float | None = None) -> dict:
+            share: int | None = None, claims_for=None, now: float | None = None, resets: list[dict] | None = None) -> dict:
     """`experiment` is the name typed in the run bar (or None). Progress is counted for its newest round.
     `share` is the machine share picked on this machine (None = all problems): total_runs and runs_left, and each
     step's total and todo, count only that share, while every cell is still returned (with `mine` set) so the screen
     shows the whole queue. `shares` gives the progress of every share and who has been running it."""
     base = (experiment or "").strip()
     label = experiment_label(base, runs) if base else None
+    runs = apply_resets(queue, runs, resets or [], label)
     # No name typed yet: nothing is recorded under it, so every cell is to do. It must NOT fall back to "any experiment":
     # a machine that had not typed the name showed other experiments' runs as this one's progress (a board full of "finished").
     scope = label if label else _NO_EXPERIMENT

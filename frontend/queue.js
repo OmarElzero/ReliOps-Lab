@@ -415,6 +415,12 @@
     $("q-run").title = busy ? "Another job is running" : (!named ? "Give the experiment a name first" : (preview && left === 0 ? "Every cell already has a result under this name" : ""));
     $("q-stop").disabled = !busy;
     const hasRuns = !!preview && ((preview.experiments || []).some((e) => e.name === expName()));
+    const rs = $("q-restart-share"), k2 = myShare();
+    rs.hidden = !((Q.machines || 1) > 1 && k2);
+    const shRuns = preview && preview.shares && preview.shares[k2 - 1];
+    const shHas = !!shRuns && (shRuns.done > 0 || (shRuns.people || []).length > 0);
+    rs.disabled = busy || !on.length || !named || !hasRuns || !shHas;
+    rs.title = busy ? "Another job is running" : (!named ? "Give the experiment a name first" : (!shHas ? `Nothing is recorded in share ${k2} under this name yet; use Run queue` : `Start only share ${k2} again. The other shares keep their results.`));
     $("q-restart").disabled = busy || !on.length || !named || !hasRuns;
     $("q-restart").title = busy ? "Another job is running" : (!named ? "Give the experiment a name first" : (!hasRuns ? "Nothing is recorded under this name yet; use Run queue" : "Start the whole queue again from step 1 as a new round of this experiment"));
   }
@@ -853,6 +859,28 @@
       + `Results already recorded are kept; nothing is deleted.\n${shared}\nOnly press OK if you really mean to run it all again.`;
     if (!confirm(msg)) return;
     startQueue(true);
+  });
+  $("q-restart-share").addEventListener("click", async () => {
+    const k = myShare();
+    if (!k || !(await saveQueue(true))) return;
+    const sh = (preview && preview.shares && preview.shares[k - 1]) || { problems: [], done: 0 };
+    const label = (preview && preview.experiment_label) || expName();
+    const busy = sh.claim && sh.claim.status === "running" && sh.state === "running" && sh.claim.machine !== (preview && preview.this_machine);
+    const msg = `Restart share ${k} of ${Q.machines} only?\n\n`
+      + `Experiment "${label}": the ${plural(sh.done, "finished run")} in share ${k} (${sh.problems.join(", ")}) stop counting, so those cells run again.\n`
+      + `The other shares and other experiments are not touched. Nothing is deleted: the old runs stay in Results, they are only ignored by this queue.\n`
+      + (busy ? `\n${sh.claim.run_by || "Someone"} (${sh.claim.machine || "another machine"}) is running share ${k} right now. Ask them to pause first.\n` : "")
+      + `\nAfter OK, press Run queue to run the share again.`;
+    if (!confirm(msg)) return;
+    try {
+      const res = await fetch(`/api/queue/${encodeURIComponent(Q.queue_id)}/restart-share`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ experiment: expName(), share: k, run_by: who() || null }) });
+      const data = await res.json();
+      if (!res.ok) { alert(data.error || "Could not restart the share."); return; }
+      $("q-log").textContent = `Share ${k} restarted under "${data.experiment}": ${plural(data.runs_set_aside, "run")} set aside (kept in Results). Press Run queue to run the share again.\n`;
+      refreshPreview(true);
+    } catch (e) { alert("Could not restart the share: " + e); }
   });
   $("q-exp").addEventListener("input", () => {
     pref.set(expKey(), expName());
