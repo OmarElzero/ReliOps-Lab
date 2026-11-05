@@ -15,6 +15,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import platform
 import re
 import socket
 import ssl
@@ -1276,6 +1277,27 @@ def helm_version_note(version_text: str | None) -> str | None:
             f"frozen 30) will end as 'app failed to deploy' and be recorded as incomplete. To install Helm {HELM_MIN_MAJOR} (needs sudo):\n" + HELM_INSTALL)
 
 
+DOCKER_ENGINE_INSTALL = "curl -fsSL https://get.docker.com | sudo sh   then   sudo usermod -aG docker $USER   (open a new terminal; Run setup again to make the cluster)"
+
+
+def docker_desktop_note(os_text: str | None, is_linux: bool, bridge_gateway: str | None = None, addr_text: str | None = None) -> str | None:
+    """A note when Docker is Docker Desktop seen from Linux/WSL, or when the Docker bridge gateway is not an address of this
+    machine. SREGym starts its Kubernetes API proxy on the `docker network inspect bridge` gateway (Linux only); under Docker
+    Desktop that address lives in Desktop's own VM, so the proxy dies with `OSError: [Errno 99] Cannot assign requested address`
+    and every run ends without a result (seen 4 and 5 Nov 2026 on a teammate's machine)."""
+    if not is_linux:
+        return None
+    if os_text and "docker desktop" in os_text.lower():
+        return ("Docker here is Docker Desktop. From WSL, SREGym's Kubernetes API proxy cannot bind the Docker bridge address, so every run will end "
+                "without a result (`OSError: [Errno 99] Cannot assign requested address`). Turn off Docker Desktop's WSL integration for this Ubuntu "
+                "and install Docker Engine inside Ubuntu: " + DOCKER_ENGINE_INSTALL)
+    if bridge_gateway and addr_text is not None and bridge_gateway not in addr_text:
+        return (f"The Docker bridge gateway {bridge_gateway} is not an address of this machine (`ip -4 -o addr` does not list it). SREGym's Kubernetes API proxy "
+                f"binds that address and will fail with `Errno 99` if it is missing. Usual cause: Docker Desktop's WSL integration; use Docker Engine inside Ubuntu: "
+                + DOCKER_ENGINE_INSTALL)
+    return None
+
+
 def doctor() -> dict:
     """A rough "can this machine run SREGym?" check — CPU/RAM/disk, Docker, and the CLI tools
     Setup needs. Thresholds come from CLAUDE.md's own machine notes: the cloud sandbox (4 CPU,
@@ -1346,6 +1368,14 @@ def doctor() -> dict:
         notes.append(helm_note)
         if verdict.startswith("looks fine"):
             verdict = f"will fail on social-network problems: Helm {HELM_MIN_MAJOR} needed"
+    if docker_running:
+        gateway = _probe(["docker", "network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}"]).strip()
+        docker_note = docker_desktop_note(_probe(["docker", "info", "--format", "{{.OperatingSystem}}"]), platform.system() == "Linux",
+                                          gateway or None, _probe(["ip", "-4", "-o", "addr"]) if gateway else None)
+        if docker_note:
+            notes.append(docker_note)
+            if verdict.startswith("looks fine") or verdict.startswith("will fail on social"):
+                verdict = "will fail at the Kubernetes proxy: Docker Desktop in WSL, use Docker Engine"
     return {
         "cpu_cores": cpu,
         "ram_gb": ram_gb,

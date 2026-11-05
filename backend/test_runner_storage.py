@@ -144,6 +144,16 @@ class KindVersionTests(unittest.TestCase):
             self.assertIn("get.helm.sh", note)
         self.assertIn("could not be read", runner.helm_version_note("garbage"))
 
+    def test_docker_desktop_note(self):
+        n = runner.docker_desktop_note("Docker Desktop", True)
+        self.assertIn("Errno 99", n); self.assertIn("get.docker.com", n)
+        self.assertIsNone(runner.docker_desktop_note("Docker Desktop", False))            # macOS / Windows: SREGym binds 0.0.0.0 there
+        self.assertIsNone(runner.docker_desktop_note("Ubuntu 22.04.5 LTS", True, "172.17.0.1",
+                                                     "2: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\n"))
+        self.assertIsNone(runner.docker_desktop_note(None, True))                          # nothing could be read: no guess
+        self.assertIn("172.17.0.1", runner.docker_desktop_note("Ubuntu", True, "172.17.0.1", "1: lo inet 127.0.0.1/8\n2: eth0 inet 172.20.1.5/20\n"))
+        self.assertIsNone(runner.docker_desktop_note("Ubuntu", True, "172.17.0.1", None))  # no address list: cannot compare
+
     def test_note_only_when_kind_differs_from_the_tested_version(self):
         self.assertIsNone(runner.kind_version_note(None))                      # not installed: reported elsewhere
         self.assertIsNone(runner.kind_version_note(f"kind version {runner.KIND_TESTED}"))
