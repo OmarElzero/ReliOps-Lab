@@ -133,6 +133,17 @@ class StoryTests(unittest.TestCase):
 
 
 class KindVersionTests(unittest.TestCase):
+    def test_helm_version_note(self):
+        self.assertIsNone(runner.helm_version_note(None))                       # not installed: reported elsewhere
+        self.assertIsNone(runner.helm_version_note("v4.0.2+gabcdef"))
+        self.assertIsNone(runner.helm_version_note("v5.1.0"))
+        for old in ("v3.22.1+gd6c1a0e", "v3.16.4", "3.9.0"):
+            note = runner.helm_version_note(old)
+            self.assertIn("--server-side", note)
+            self.assertIn("social-network", note)
+            self.assertIn("get.helm.sh", note)
+        self.assertIn("could not be read", runner.helm_version_note("garbage"))
+
     def test_note_only_when_kind_differs_from_the_tested_version(self):
         self.assertIsNone(runner.kind_version_note(None))                      # not installed: reported elsewhere
         self.assertIsNone(runner.kind_version_note(f"kind version {runner.KIND_TESTED}"))

@@ -1252,6 +1252,30 @@ def kind_version_note(version_line: str | None) -> str | None:
             f"build, install {KIND_TESTED}: {KIND_INSTALL}")
 
 
+HELM_MIN_MAJOR = 4
+HELM_INSTALL = ('HELM_VERSION=4.0.2   # or the newest 4.x from https://github.com/helm/helm/releases\n'
+                'ARCH=$(dpkg --print-architecture)   # amd64 or arm64\n'
+                'curl -fsSLO "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${ARCH}.tar.gz" && tar xzf "helm-v${HELM_VERSION}-linux-${ARCH}.tar.gz"\n'
+                'sudo install -m755 "linux-${ARCH}/helm" /usr/local/bin/helm && rm -rf "linux-${ARCH}" "helm-v${HELM_VERSION}-linux-${ARCH}.tar.gz"\n'
+                'hash -r && helm version --short')
+
+
+def helm_version_note(version_text: str | None) -> str | None:
+    """A note when the installed Helm is older than 4; None when it is 4 or newer or not installed (a missing tool is reported
+    elsewhere). SREGym runs `helm upgrade --server-side=true --force-conflicts` to inject faults into the social-network
+    app, and Helm 3 has no --server-side, so those problems end as 'app failed to deploy' (seen 4 Nov 2026 on Helm v3.22.1)."""
+    if not version_text:
+        return None
+    m = re.search(r"v?(\d+)\.(\d+)", version_text)
+    if not m:
+        return f"helm is installed but its version could not be read ({version_text.strip()!r}); SREGym needs Helm {HELM_MIN_MAJOR} or newer"
+    if int(m.group(1)) >= HELM_MIN_MAJOR:
+        return None
+    return (f"Helm {m.group(1)}.{m.group(2)} is installed, but SREGym needs Helm {HELM_MIN_MAJOR} or newer: it runs `helm upgrade --server-side=true` "
+            f"to inject faults into the social-network app, and Helm {m.group(1)} has no such flag. Every social-network problem (8 of the "
+            f"frozen 30) will end as 'app failed to deploy' and be recorded as incomplete. To install Helm {HELM_MIN_MAJOR} (needs sudo):\n" + HELM_INSTALL)
+
+
 def doctor() -> dict:
     """A rough "can this machine run SREGym?" check — CPU/RAM/disk, Docker, and the CLI tools
     Setup needs. Thresholds come from CLAUDE.md's own machine notes: the cloud sandbox (4 CPU,
@@ -1317,6 +1341,11 @@ def doctor() -> dict:
     kind_note = kind_version_note(tools.get("kind"))
     if kind_note:
         notes.append(kind_note)
+    helm_note = helm_version_note(_probe(["helm", "version", "--short"]) if tools.get("helm") is not None else None)
+    if helm_note:
+        notes.append(helm_note)
+        if verdict.startswith("looks fine"):
+            verdict = f"will fail on social-network problems: Helm {HELM_MIN_MAJOR} needed"
     return {
         "cpu_cores": cpu,
         "ram_gb": ram_gb,
