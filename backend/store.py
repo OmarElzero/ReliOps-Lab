@@ -24,6 +24,7 @@ KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "marks": ("gui_marks.jsonl", ("run_id",)),
     "key_status": ("gui_key_status.jsonl", ("owner_machine", "var")),
     "claims": ("gui_claims.jsonl", ("experiment", "share")),     # who took which share of a queue (claims.py)
+    "assignments": ("gui_share_assignments.jsonl", ("queue_id", "share")),   # who a share is planned for (names chosen by the owner)
     "share_resets": ("gui_share_resets.jsonl", ("experiment", "share")),   # "Restart my share": runs of the share before `at` are ignored
 }
 

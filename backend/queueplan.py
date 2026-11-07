@@ -285,6 +285,8 @@ def cells(step: dict, runs: list[dict], manifest: dict | None = None, experiment
     for r in runs:
         if not _matches(step, r):
             continue
+        if r.get("origin") == "quick":
+            continue  # a quick run from Setup & quick run is never a cell of a queue, whatever its settings and name
         if experiment is not None and (r.get("experiment") or "") != experiment:
             continue  # a step's progress is counted per experiment label (frozen campaigns are counted by manifest)
         cell = (r.get("problem_id") or "?", int(r.get("repeat_index") or 1))
@@ -318,13 +320,15 @@ def todo(step: dict, runs: list[dict], manifest: dict | None = None, experiment:
 
 
 def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: str | None = None,
-            share: int | None = None, claims_for=None, now: float | None = None, resets: list[dict] | None = None) -> dict:
+            share: int | None = None, claims_for=None, now: float | None = None, resets: list[dict] | None = None,
+            assigned: dict | None = None) -> dict:
     """`experiment` is the name typed in the run bar (or None). Progress is counted for its newest round.
     `share` is the machine share picked on this machine (None = all problems): total_runs and runs_left, and each
     step's total and todo, count only that share, while every cell is still returned (with `mine` set) so the screen
     shows the whole queue. `shares` gives the progress of every share and who has been running it."""
     base = (experiment or "").strip()
     label = experiment_label(base, runs) if base else None
+    all_runs = runs
     runs = apply_resets(queue, runs, resets or [], label)
     # No name typed yet: nothing is recorded under it, so every cell is to do. It must NOT fall back to "any experiment":
     # a machine that had not typed the name showed other experiments' runs as this one's progress (a board full of "finished").
@@ -366,7 +370,7 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
                     "issue": issue})
     info = {"runs": 0, "people": [], "first": "", "last": "", "commits": []}
     if label:
-        mine_runs = [r for r in runs if (r.get("experiment") or "") == label]
+        mine_runs = [r for r in runs if (r.get("experiment") or "") == label and r.get("origin") != "quick"]
         stamps = sorted(r.get("timestamp_utc") or "" for r in mine_runs if r.get("timestamp_utc"))
         info = {"runs": len(mine_runs), "people": sorted({r.get("run_by") or "unknown" for r in mine_runs}),
                 "first": stamps[0] if stamps else "", "last": stamps[-1] if stamps else "",
@@ -391,11 +395,123 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
         sh["claim"] = ({k: c.get(k) for k in ("run_by", "machine", "status", "reason", "started_at", "updated_at", "now_problem", "step_name")}
                        if c else None)
         sh["state"] = claims.share_state(sh, c, now)
+        sh["assigned"] = list((assigned or {}).get(sh["share"]) or [])
     everything = claims.claim_for(taken, 0)
+    activity = _activity(all_runs, label, now)
     return {"steps": out, "total_runs": total, "runs_left": left, "experiment_label": label, "needs_name": not label,
             "experiments": experiment_names(runs), "machines": int(queue.get("machines") or 1),
             "share": share if only is not None else None, "shares": per_share,
             "all_total_runs": all_total, "all_runs_left": all_left,
             "machine_versions": machine_versions, "this_machine": claims.machine_name(), "label_info": info,
+            "activity": activity,
             "whole_queue_claim": ({k: everything.get(k) for k in ("run_by", "machine", "status", "started_at", "updated_at", "now_problem")}
                                   if everything else None)}
+
+
+def _activity(runs: list[dict], label: str | None, now: float | None = None, hours: int = 24) -> dict:
+    """What the experiment recorded in the last `hours` hours: attempts per hour and per person, for the live chart and the
+    rate behind the time estimate. Quick runs are left out, like everywhere else."""
+    import calendar
+    import time as _t
+    now = _t.time() if now is None else now
+    out = {"hours": hours, "buckets": [0] * hours, "by_person": {}, "attempts": 0, "per_hour": 0.0, "span_h": 0.0}
+    if not label:
+        return out
+    stamps = []
+    for r in runs:
+        if (r.get("experiment") or "") != label or r.get("origin") == "quick":
+            continue
+        try:
+            t = calendar.timegm(_t.strptime((r.get("timestamp_utc") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            continue
+        age_h = (now - t) / 3600.0
+        if 0 <= age_h < hours:
+            i = hours - 1 - int(age_h)
+            out["buckets"][i] += 1
+            who = r.get("run_by") or "unknown"
+            pp = out["by_person"].setdefault(who, [0] * hours)
+            pp[i] += 1
+            stamps.append(t)
+    out["attempts"] = len(stamps)
+    if len(stamps) >= 2:
+        span = max(1.0, (now - min(stamps)) / 3600.0)
+        out["span_h"] = round(span, 1)
+        out["per_hour"] = round(len(stamps) / min(span, float(hours)), 2)
+    return out
+
+
+# ---- Moving work between shares ---------------------------------------------------------------------------------
+
+def unit_of(queue: dict, problem: str, repeat: int) -> str:
+    """The share unit a cell belongs to: the problem, or "problem #r" when the queue is split by problem and repeat."""
+    return unit(problem, repeat) if (queue.get("split") or "problem") == "repeat" else problem
+
+
+def undone_units(queue: dict, runs: list[dict], manifests: list[dict], experiment: str | None,
+                 resets: list[dict] | None = None) -> set[str]:
+    """Share units that still have a cell to run (in an enabled step) under this experiment name."""
+    base = (experiment or "").strip()
+    label = experiment_label(base, runs) if base else None
+    runs = apply_resets(queue, runs, resets or [], label)
+    scope = label if label else _NO_EXPERIMENT
+    by_id = {m.get("manifest_id"): m for m in manifests}
+    out: set[str] = set()
+    for s in queue["steps"]:
+        if not s["enabled"]:
+            continue
+        for c in cells(s, runs, by_id.get(s["manifest_id"]) if s["manifest_id"] else None, scope):
+            if _is_todo(s, c):
+                out.add(unit_of(queue, c["problem"], c["repeat"]))
+    return out
+
+
+def _check_share(queue: dict, k: int) -> int:
+    n = int(queue.get("machines") or 1)
+    if n <= 1:
+        raise ValueError("this queue is not split across machines")
+    if not isinstance(k, int) or not 1 <= k <= n:
+        raise ValueError(f"share must be between 1 and {n}")
+    return k
+
+
+def move_units(queue: dict, units: list[str], to_share: int) -> list[list[str]]:
+    """The shares after moving `units` (problems, or "problem #r" pairs) to share `to_share`. Nothing else changes."""
+    _check_share(queue, to_share)
+    units = [str(u).strip() for u in units if str(u).strip()]
+    if not units:
+        raise ValueError("choose at least one problem to move")
+    known = set(queue_units(queue))
+    bad = [u for u in units if u not in known]
+    if bad:
+        raise ValueError(f"not part of this queue: {', '.join(bad[:3])}")
+    gone = set(units)
+    lists = [[u for u in x if u not in gone] for x in share_lists(queue)]
+    lists[to_share - 1].extend(u for u in dict.fromkeys(units))
+    return lists
+
+
+def redistribute(queue: dict, from_share: int, to_shares: list[int] | None, movable: set[str]) -> tuple[list[list[str]], list[tuple[str, int]]]:
+    """Moves the work of `from_share` that is not done yet (`movable`) to the other shares, one unit at a time to whichever
+    target has the least left. Units already done stay where they were, so the record of who did what does not change.
+    Returns (new shares, [(unit, target share)])."""
+    _check_share(queue, from_share)
+    n = int(queue.get("machines") or 1)
+    targets = [t for t in (to_shares or [k for k in range(1, n + 1) if k != from_share]) if t != from_share]
+    if not targets:
+        raise ValueError("choose at least one other share to move the work to")
+    for t in targets:
+        _check_share(queue, t)
+    lists = [list(x) for x in share_lists(queue)]
+    moving = [u for u in lists[from_share - 1] if u in movable]
+    if not moving:
+        raise ValueError(f"share {from_share} has nothing left to move")
+    lists[from_share - 1] = [u for u in lists[from_share - 1] if u not in set(moving)]
+    load = {t: sum(1 for u in lists[t - 1] if u in movable) for t in targets}
+    moved = []
+    for u in moving:
+        t = min(targets, key=lambda k: (load[k], k))
+        lists[t - 1].append(u)
+        load[t] += 1
+        moved.append((u, t))
+    return lists, moved

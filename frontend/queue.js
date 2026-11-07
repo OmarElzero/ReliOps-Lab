@@ -144,7 +144,7 @@
   let previewSeq = 0, previewFails = 0, previewSig = "";
   function refreshPreview(now) {
     clearTimeout(previewTimer);
-    if (!Q.steps.length) { previewSeq++; preview = null; previewSig = ""; renderSteps(); renderTotals(); return; }
+    if (!Q.steps.length) { previewSeq++; preview = null; previewSig = ""; renderSteps(); renderTotals(); renderOverview(); return; }
     previewTimer = setTimeout(async () => {
       const seq = ++previewSeq;
       const { ok, data } = await jsonPost("/api/queue/preview", { queue_id: Q.queue_id, name: Q.name, steps: Q.steps, experiment: expName(),
@@ -160,7 +160,7 @@
         previewSig = sig;
         preview = data;
       }
-      renderSteps(); renderTotals(); renderExperiments(); renderShares();
+      renderSteps(); renderTotals(); renderExperiments(); renderShares(); renderOverview();
     }, now ? 0 : 350);
   }
   const stepPreview = (s) => (preview && preview.steps.find((p) => p.step_id === s.step_id)) || null;
@@ -200,7 +200,7 @@
   }
   function renderShares() {
     const n = Q.machines || 1, box = $("q-share-box"), panel = $("q-shares");
-    box.hidden = n <= 1; panel.hidden = n <= 1; $("q-split").hidden = n <= 1;
+    box.hidden = n <= 1; panel.hidden = n <= 1; $("q-split").hidden = n <= 1; $("q-shares-none").hidden = n > 1;
     if (n <= 1) return;
     const shares = (preview && preview.shares) || [];
     const sel = $("q-share"), k = myShare();
@@ -223,8 +223,14 @@
     const mine = k && shares[k - 1];
     const busy = busyElsewhere(mine);
     const others = mine ? mine.people.filter((x) => x.name !== who() && Date.now() - Date.parse(x.last || 0) < 3 * 3600 * 1000) : [];
-    note.className = "hint" + (busy || others.length ? " warn-text" : "");
-    note.textContent = !k
+    const asg = (mine && mine.assigned) || [];
+    const notMine = k && asg.length && !asg.some((x) => x.toLowerCase() === who().toLowerCase());
+    const myAsg = shares.filter((sh) => (sh.assigned || []).some((x) => who() && x.toLowerCase() === who().toLowerCase()));
+    note.className = "hint" + (busy || others.length || notMine ? " warn-text" : "");
+    note.textContent = k && notMine
+      ? `Share ${k} is assigned to ${asg.join(", ")}, not to ${who() || "you"}. Pick your own share or ask the owner to change the assignment.`
+      : !k && myAsg.length === 1 ? `You are assigned to share ${myAsg[0].share}. Pick it here.`
+      : !k
       ? "Pick your share so the machines never run the same cells. Agree who takes which share first."
       : busy
         ? `${busy.run_by || "Someone"} (${busy.machine || "another machine"}) is running share ${k} right now, last seen ${ago(busy.updated_at)}. Two machines on one share run the same cells twice; pick another share or ask them.`
@@ -256,34 +262,7 @@
         ". Runs from different versions are still recorded, but check that a difference between machines is not a difference between versions."));
     }
     if (!shares.length) return;
-    const col = (c) => h("col", { class: c });
-    const t = h("table", {}, h("colgroup", {}, col("c-share"), col("c-by"), col("c-status"), col("c-done"), col("c-pf"), col("c-left"), col("c-probs")),
-      h("thead", {}, h("tr", {},
-        h("th", { text: "Share" }), h("th", { text: "Taken by" }), h("th", { text: "Status" }), h("th", { text: "Done" }), h("th", { text: "Pass / fail" }),
-        h("th", { text: "Left" }), h("th", { text: Q.split === "repeat" ? "Problem #repeat" : "Problems" }))));
-    const tb = h("tbody");
-    shares.forEach((sh) => {
-      const c = sh.claim;
-      const who_ = c ? `${c.run_by || "?"}${c.machine ? " · " + c.machine : ""}` : (sh.people.length ? sh.people.map((x) => x.name).join(", ") : "nobody yet");
-      const status = stateText(sh), me = sh.share === k ? " · this machine" : "", plist = sh.problems.join(", ");
-      tb.append(h("tr", { class: sh.share === k ? "me" : "" },
-        h("td", { text: `${sh.share}${me}`, title: `${sh.share}${me}` }),
-        h("td", { text: who_, title: who_ + (c && c.started_at ? `\nsince ${fmtWhen(c.started_at)}` : "") }),
-        h("td", {}, h("span", { class: "st st-" + sh.state.replace(" ", "-"), text: status, title: status })),
-        h("td", { text: `${sh.done} of ${sh.total}` }),
-        h("td", { text: `${sh.passed} / ${sh.failed}` }),
-        h("td", { text: String(sh.left) }),
-        h("td", { class: "probs" }, h("div", { class: "clamp", text: plist, title: plist }))));
-    });
-    t.append(tb);
-    const count = (st) => shares.filter((sh) => sh.state === st).length;
-    const bits = [[count("running"), "running"], [count("finished"), "finished"], [count("paused") + count("stopped") + count("ended"), "stopped or paused"],
-                  [count("silent"), "silent"], [count("not taken"), "not taken"]].filter(([x]) => x).map(([x, w]) => `${x} ${w}`);
-    const scroll = h("div", { class: "board-scroll" }, t);
-    const det = h("details", {}, h("summary", { text: `Queue board: ${bits.join(" · ") || "no shares"} · ${shares.reduce((x, sh) => x + sh.left, 0)} runs left in all` }), scroll);
-    det.open = wasOpen;
-    panel.append(det);
-    scroll.scrollTop = keepTop; scroll.scrollLeft = keepLeft;
+    buildBoard(panel, shares, k, keepTop, keepLeft);
   }
   $("q-share").addEventListener("change", (e) => { pref.set(shareKey(), e.target.value); renderShares(); refreshPreview(true); });
   $("q-order").addEventListener("change", (e) => { Q.order = e.target.value === "cell" ? "cell" : "step"; markDirty(); });
@@ -302,7 +281,7 @@
   });
 
   // ---- rendering ------------------------------------------------------------------------------
-  function renderAll() { renderHead(); renderSteps(); renderTotals(); renderShares(); }
+  function renderAll() { renderHead(); renderSteps(); renderTotals(); renderShares(); renderOverview(); }
 
   function renderHead() {
     if (dirty) setStatus("Unsaved changes", "dirty");
@@ -312,6 +291,7 @@
     $("q-empty").hidden = Q.steps.length > 0;
     $("q-add").hidden = Q.steps.length === 0;
     $("q-name").disabled = false;
+    layoutViews();
     renderOpen();
   }
 
@@ -351,7 +331,7 @@
     return grid;
   }
 
-  function renderSteps() {
+  function renderStepCards() {
     const ol = $("q-steps");
     const openCells = new Set(Array.from(ol.querySelectorAll("details.step-cells[open]")).map((d) => d.dataset.step));
     ol.innerHTML = "";
@@ -397,6 +377,366 @@
       }
       ol.append(li);
     });
+  }
+
+  // ---- views: Overview | Steps | Shares & people | Log -------------------------------------------------------------------
+  const VIEWS = ["overview", "steps", "shares", "log"];
+  let view = pref.get("lab_q_view", "overview");
+  let stepsMode = pref.get("lab_q_steps_mode", "compact");
+  const expandedSteps = new Set();
+  function layoutViews() {
+    const empty = !Q.steps.length;
+    $("q-views").hidden = empty;
+    VIEWS.forEach((x) => { $("qv-" + x).hidden = empty ? x !== "steps" : x !== view; });
+    document.querySelectorAll(".q-view-btn").forEach((b) => { b.classList.toggle("active", b.dataset.view === view); b.setAttribute("aria-selected", b.dataset.view === view ? "true" : "false"); });
+    $("q-steps-count").textContent = Q.steps.length ? String(Q.steps.length) : "";
+  }
+  function setView(v) {
+    view = VIEWS.includes(v) ? v : "overview";
+    pref.set("lab_q_view", view);
+    layoutViews();
+    if (view === "overview" || view === "shares") refreshPreview(true);
+  }
+  document.querySelectorAll(".q-view-btn").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+  function setStepsMode(m) {
+    stepsMode = m === "cards" ? "cards" : "compact";
+    pref.set("lab_q_steps_mode", stepsMode);
+    $("q-mode-compact").classList.toggle("active", stepsMode === "compact");
+    $("q-mode-cards").classList.toggle("active", stepsMode === "cards");
+    renderSteps();
+  }
+  $("q-mode-compact").addEventListener("click", () => setStepsMode("compact"));
+  $("q-mode-cards").addEventListener("click", () => setStepsMode("cards"));
+
+  function renderSteps() {
+    $("q-mode-compact").classList.toggle("active", stepsMode === "compact");
+    $("q-mode-cards").classList.toggle("active", stepsMode === "cards");
+    if (stepsMode === "cards") renderStepCards(); else renderStepRows();
+  }
+
+  // One row per step: the 18-step ladder fits on one screen instead of six.
+  function renderStepRows() {
+    const ol = $("q-steps");
+    ol.innerHTML = "";
+    if (!Q.steps.length) return;
+    const th = (t, cls) => h("th", { text: t, class: cls || "" });
+    const tb = h("tbody");
+    Q.steps.forEach((s, i) => {
+      const sp = stepPreview(s);
+      const running = queueRunning() && job.progress && job.progress.step === i + 1 && s.enabled !== false;
+      const c = sp ? sp.counts : null, n = Math.max(1, sp ? sp.total : 1);
+      const swTitle = (s.agent_switches || []).join("+") || "no switches";
+      const open = expandedSteps.has(s.step_id);
+      tb.append(h("tr", { class: (s.enabled === false ? "off " : "") + (running ? "running" : ""), "data-step": s.step_id },
+        h("td", { class: "n", text: String(i + 1) }),
+        h("td", {}, h("div", { class: "nm", text: s.name, title: swTitle }),
+          h("div", { class: "sub", text: `${s.agent_label || s.agent_id} · ${String(s.model_id || "").replace(/^gemini\//, "")}${s.run_class === "frozen" ? " · frozen campaign" : ""}`, title: swTitle })),
+        h("td", { class: "num", text: `${s.problems.length} × ${s.repeat_n}`, title: `${plural(s.problems.length, "problem")} × ${plural(s.repeat_n, "repeat")} = ${plural(s.problems.length * s.repeat_n, "run")}` }),
+        h("td", { class: "bar-cell" }, sp ? h("div", { class: "bar", role: "img", "aria-label": `${c.pass} passed, ${c.fail} failed, ${c.incomplete} incomplete of ${sp.total}` },
+          h("span", { class: "b-pass", style: `width:${(100 * c.pass) / n}%` }), h("span", { class: "b-fail", style: `width:${(100 * c.fail) / n}%` }),
+          h("span", { class: "b-inc", style: `width:${(100 * c.incomplete) / n}%` })) : "—"),
+        h("td", { class: "num", text: sp ? `${c.pass + c.fail}/${sp.total}` : "—", title: "done / total" }),
+        h("td", { class: "num pp-ok", text: sp ? String(c.pass) : "" }),
+        h("td", { class: "num pp-bad", text: sp ? String(c.fail) : "" }),
+        h("td", { class: "num", text: sp ? (s.enabled === false ? "0" : String(sp.todo)) : "", title: "cells still to run" }),
+        h("td", {}, h("label", { class: "switch", title: "Switched-off steps are skipped when the queue runs" },
+          h("input", { type: "checkbox", checked: s.enabled !== false, onchange: (e) => { s.enabled = e.target.checked; markDirty(); renderSteps(); } }), "On")),
+        h("td", { class: "acts" },
+          h("button", { class: "ghost small exp-btn", type: "button", text: open ? "▾" : "▸", title: "Show every problem and repeat", "aria-expanded": open ? "true" : "false",
+            onclick: () => { if (open) expandedSteps.delete(s.step_id); else expandedSteps.add(s.step_id); renderSteps(); } }),
+          h("button", { class: "ghost small", type: "button", text: "Edit", onclick: () => openStepDialog(i) }),
+          h("button", { class: "ghost small", type: "button", text: "Copy", title: "Duplicate this step", onclick: () => duplicateStep(i) }),
+          h("button", { class: "ghost small icon", type: "button", text: "↑", "aria-label": "Move up", disabled: i === 0, onclick: () => moveStep(i, -1) }),
+          h("button", { class: "ghost small icon", type: "button", text: "↓", "aria-label": "Move down", disabled: i === Q.steps.length - 1, onclick: () => moveStep(i, 1) }),
+          h("button", { class: "ghost small danger", type: "button", text: "✕", title: "Remove this step", "aria-label": "Remove", onclick: () => removeStep(i) }))));
+      if (sp && sp.issue) tb.append(h("tr", {}, h("td", { colspan: 10, class: "step-issue", text: sp.issue })));
+      if (open && sp) tb.append(h("tr", { class: "cells-row" }, h("td", { colspan: 10 }, cellsGrid(s, sp))));
+    });
+    const t = h("table", { class: "qt" }, h("thead", {}, h("tr", {}, th("#"), th("Step"), th("Problems × repeats"), th("Progress"), th("Done"), th("Pass"), th("Fail"), th("To run"), th("On"), th(""))), tb);
+    ol.append(h("li", { class: "q-table-li" }, h("div", { class: "q-table-wrap" }, t)));
+  }
+
+  // ---- overview: live numbers for the whole queue under the experiment name --------------------------------------------
+  const PALETTE = ["#2b62e8", "#107a52", "#c77700", "#a23ad1", "#d6336c", "#0e8fa8", "#6b7280", "#8a5a2b"];
+  const unitOf = (c) => (Q.split === "repeat" ? `${c.problem} #${c.repeat}` : c.problem);
+  function overviewData() {
+    const out = { total: 0, pass: 0, fail: 0, inc: 0, missing: 0, problems: new Map(), people: new Map(), enabled: [] };
+    Q.steps.forEach((s) => {
+      if (s.enabled === false) return;
+      const sp = stepPreview(s);
+      if (!sp) return;
+      const si = out.enabled.length;
+      out.enabled.push(s);
+      sp.cells.forEach((c) => {
+        out.total++;
+        out[c.status === "pass" ? "pass" : c.status === "fail" ? "fail" : c.status === "incomplete" ? "inc" : "missing"]++;
+        let p = out.problems.get(c.problem);
+        if (!p) { p = { problem: c.problem, pass: 0, fail: 0, inc: 0, missing: 0, steps: [], by: new Map() }; out.problems.set(c.problem, p); }
+        p[c.status === "pass" ? "pass" : c.status === "fail" ? "fail" : c.status === "incomplete" ? "inc" : "missing"]++;
+        (p.steps[si] = p.steps[si] || { name: s.name, pass: 0, fail: 0, inc: 0, missing: 0 })[c.status === "pass" ? "pass" : c.status === "fail" ? "fail" : c.status === "incomplete" ? "inc" : "missing"]++;
+        if (c.by) {
+          p.by.set(c.by, (p.by.get(c.by) || 0) + 1);
+          let q = out.people.get(c.by);
+          if (!q) { q = { name: c.by, cells: 0, pass: 0, fail: 0, inc: 0, last: "" }; out.people.set(c.by, q); }
+          q.cells++; if (c.status === "pass") q.pass++; else if (c.status === "fail") q.fail++; else if (c.status === "incomplete") q.inc++;
+          if ((c.at || "") > q.last) q.last = c.at;
+        }
+      });
+    });
+    return out;
+  }
+  const tile = (k, v, s, cls, bar) => h("div", { class: "ov-tile " + (cls || "") }, h("div", { class: "k", text: k }), h("div", { class: "v" + (String(v).length > 9 ? " long" : ""), text: v }), s ? h("div", { class: "s", text: s }) : null, bar || null);
+  function renderOverview() {
+    const tiles = $("ov-tiles"), note = $("ov-note");
+    if (!Q.steps.length) { tiles.innerHTML = ""; return; }
+    if (!preview) { tiles.innerHTML = ""; note.hidden = false; note.textContent = "Loading the numbers…"; return; }
+    if (preview.needs_name) {
+      tiles.innerHTML = ""; $("ov-problems").innerHTML = ""; $("ov-people").innerHTML = ""; $("ov-activity").innerHTML = "";
+      note.hidden = false; note.className = "hint warn-text";
+      note.textContent = "Type the experiment name in the bar above. Progress is counted per experiment name, so with no name there is nothing to show.";
+      return;
+    }
+    note.hidden = true;
+    const d = overviewData(), done = d.pass + d.fail, left = d.total - done;
+    const act = preview.activity || { per_hour: 0, attempts: 0, buckets: [], by_person: {}, hours: 24 };
+    const sharesRunning = (preview.shares || []).filter((sh) => sh.state === "running").length;
+    const li = preview.label_info || { runs: 0 };
+    const yieldPerAttempt = li.runs ? Math.min(1, done / li.runs) : 1;       // cells with a result per recorded attempt
+    const cellsPerHour = act.per_hour * yieldPerAttempt;
+    const eta = !left ? "done" : cellsPerHour > 0 ? fmtDur((left / cellsPerHour) * 3600) : "no recent runs";
+    const bar = h("div", { class: "bar" }, h("span", { class: "b-pass", style: `width:${100 * d.pass / Math.max(1, d.total)}%` }), h("span", { class: "b-fail", style: `width:${100 * d.fail / Math.max(1, d.total)}%` }), h("span", { class: "b-inc", style: `width:${100 * d.inc / Math.max(1, d.total)}%` }));
+    tiles.replaceChildren(
+      tile("Cells with a result", `${done} / ${d.total}`, `${d.total ? Math.round(100 * done / d.total) : 0}% of the queue`, "", bar),
+      tile("Passed", String(d.pass), done ? `${Math.round(100 * d.pass / done)}% of cells with a result` : "", "ok"),
+      tile("Failed", String(d.fail), "", "bad"),
+      tile("Incomplete", String(d.inc), "ran, no outcome; run again", d.inc ? "warn" : ""),
+      tile("Left to run", String(left), `${d.missing} not started`),
+      tile("Pace", act.per_hour ? `${act.per_hour} / h` : "—", `${act.attempts} attempts in the last ${act.hours} h, all machines`),
+      tile("Time left (estimate)", eta, "from the pace above; stops and failures make it longer"),
+      tile("Machines running", `${sharesRunning}${preview.machines > 1 ? " / " + preview.machines : ""}`, preview.machines > 1 ? "shares with a live claim" : "one machine"));
+    renderOvProblems(d);
+    renderOvPeople(d);
+    renderOvActivity(act);
+  }
+  function heatClass(st) {
+    const n = st.pass + st.fail + st.inc + st.missing, done = st.pass + st.fail;
+    if (st.missing === n) return "";
+    let base = st.pass && st.fail ? "mix" : st.pass ? "pass" : st.fail ? "fail" : "inc";
+    if (!done && st.inc) base = "inc";
+    return base + (st.missing ? " part" : "");
+  }
+  function renderOvProblems(d) {
+    const rows = [...d.problems.values()].map((p) => {
+      const done = p.pass + p.fail, n = done + p.inc + p.missing;
+      const heat = h("div", { class: "heat" });
+      d.enabled.forEach((s, si) => {
+        const st = p.steps[si] || { name: s.name, pass: 0, fail: 0, inc: 0, missing: 0 };
+        heat.append(h("i", { class: heatClass(st), title: `${st.name}: ${st.pass} passed, ${st.fail} failed, ${st.inc} incomplete, ${st.missing} not started` }));
+      });
+      const chips = [...p.by.entries()].sort((a, b) => b[1] - a[1]).map(([name, k]) => h("span", { class: "who-chip", text: `${name} ${k}`, title: `${name} ran ${plural(k, "cell")} of this problem` }));
+      return h("tr", {},
+        h("td", { class: "pn", text: p.problem }),
+        h("td", { class: "num", text: `${done}/${n}` }),
+        h("td", { class: "num " + (done && !p.pass ? "pp-bad" : ""), text: done ? `${Math.round(100 * p.pass / done)}%` : "—" }),
+        h("td", {}, heat),
+        h("td", {}, chips.length ? chips : h("span", { class: "hint", text: "nobody yet" })));
+    });
+    $("ov-prob-hint").textContent = `${rows.length} problems × ${d.enabled.length} steps; each square is one step (all repeats of the problem)`;
+    $("ov-problems").replaceChildren(h("table", { class: "ov" }, h("thead", {}, h("tr", {}, ...["Problem", "Done", "Pass", "Steps", "Who ran it"].map((t) => h("th", { text: t })))), h("tbody", {}, rows)),
+      h("div", { class: "legend" }, h("span", { text: "Faded square = some repeats not run yet." }), ...[["pass", "passed"], ["mix", "mixed"], ["fail", "failed"], ["inc", "incomplete"]].map(([c, t]) => h("span", {}, h("i", { class: "heat-key", style: `background:${{ pass: "var(--ok)", fail: "var(--bad)", mix: "linear-gradient(135deg,var(--ok) 50%,var(--bad) 50%)", inc: "#e3b04b" }[c]}` }), t))));
+  }
+  function renderOvPeople(d) {
+    const shares = preview.shares || [];
+    const rows = new Map(d.people);
+    shares.forEach((sh) => {
+      (sh.assigned || []).forEach((n) => { if (!rows.has(n)) rows.set(n, { name: n, cells: 0, pass: 0, fail: 0, inc: 0, last: "" }); });
+      if (sh.claim && sh.claim.run_by && !rows.has(sh.claim.run_by)) rows.set(sh.claim.run_by, { name: sh.claim.run_by, cells: 0, pass: 0, fail: 0, inc: 0, last: "" });
+    });
+    if (!rows.size) { $("ov-people").replaceChildren(h("p", { class: "hint", text: "Nobody has recorded a run under this name yet." })); return; }
+    const body = [...rows.values()].sort((a, b) => b.cells - a.cells).map((p) => {
+      const low = p.name.toLowerCase();
+      const mine = shares.filter((sh) => (sh.assigned || []).some((x) => x.toLowerCase() === low)).map((sh) => sh.share);
+      const live = shares.find((sh) => sh.claim && (sh.claim.run_by || "").toLowerCase() === low && (sh.state === "running" || sh.state === "silent"));
+      const now = live ? (live.state === "running" ? (live.claim.now_problem || "running") : "silent " + ago(live.claim.updated_at)) : (p.last ? "last " + ago(p.last) : "—");
+      return h("tr", {}, h("td", { text: p.name }), h("td", { class: "num", text: mine.length ? mine.join(", ") : "—", title: "shares assigned to this person" }),
+        h("td", { class: "num", text: String(p.cells) }), h("td", { class: "num pp-ok", text: String(p.pass) }), h("td", { class: "num pp-bad", text: String(p.fail) }),
+        h("td", { text: now, title: now }));
+    });
+    $("ov-people").replaceChildren(h("table", { class: "ov" }, h("thead", {}, h("tr", {}, ...["Person", "Share", "Cells", "Pass", "Fail", "Now"].map((t) => h("th", { text: t })))), h("tbody", {}, body)));
+  }
+  function renderOvActivity(act) {
+    const box = $("ov-activity");
+    const names = Object.keys(act.by_person || {});
+    const W = 560, H = 150, padL = 26, padB = 20, nB = act.hours || 24, bw = (W - padL) / nB;
+    const maxV = Math.max(1, ...act.buckets);
+    const ns = "http://www.w3.org/2000/svg";
+    const el = (t, a) => { const e = document.createElementNS(ns, t); Object.entries(a || {}).forEach(([k, v]) => e.setAttribute(k, v)); return e; };
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, class: "act-svg", role: "img", "aria-label": `Attempts per hour over the last ${nB} hours: ${act.attempts} in all` });
+    [0, 0.5, 1].forEach((f) => { const y = (H - padB) - f * (H - padB - 8); svg.append(el("line", { x1: padL, x2: W, y1: y, y2: y, stroke: "currentColor", "stroke-opacity": ".12" })); const t = el("text", { x: 2, y: y + 3 }); t.textContent = String(Math.round(maxV * f)); svg.append(t); });
+    const base = new Array(nB).fill(0);
+    names.forEach((nm, ni) => {
+      (act.by_person[nm] || []).forEach((v, i) => {
+        if (!v) return;
+        const hgt = (v / maxV) * (H - padB - 8), y = (H - padB) - base[i] * ((H - padB - 8) / maxV) - hgt;
+        const r = el("rect", { x: padL + i * bw + 1, y, width: Math.max(1, bw - 2), height: hgt, fill: PALETTE[ni % PALETTE.length], rx: 1.5 });
+        const tt = el("title"); tt.textContent = `${nm}: ${v} attempt${v === 1 ? "" : "s"}, ${nB - 1 - i} h ago`; r.append(tt); svg.append(r);
+        base[i] += v;
+      });
+    });
+    [[0, `-${nB} h`], [Math.floor(nB / 2), `-${Math.floor(nB / 2)} h`], [nB - 1, "now"]].forEach(([i, t]) => { const x = el("text", { x: padL + i * bw, y: H - 5 }); x.textContent = t; svg.append(x); });
+    const parts = [act.attempts ? svg : h("p", { class: "hint", text: "No attempts recorded in the last 24 hours." })];
+    if (names.length) parts.push(h("div", { class: "legend" }, ...names.map((nm, ni) => h("span", {}, h("i", { style: `background:${PALETTE[ni % PALETTE.length]}` }), nm))));
+    box.replaceChildren(...parts);
+  }
+
+  // ---- shares & people: board with assign / split / move ----------------------------------------------------------------
+  function knownPeople() {
+    const set = new Set();
+    ((preview && preview.shares) || []).forEach((sh) => { (sh.people || []).forEach((p) => set.add(p.name)); if (sh.claim && sh.claim.run_by) set.add(sh.claim.run_by); (sh.assigned || []).forEach((n) => set.add(n)); });
+    ((preview && preview.label_info && preview.label_info.people) || []).forEach((n) => set.add(n));
+    if (who()) set.add(who());
+    set.delete("unknown");
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }
+  function undoneOf(sh) {
+    const mineUnits = new Set(sh.problems), out = new Set();
+    Q.steps.forEach((s) => {
+      if (s.enabled === false) return;
+      const sp = stepPreview(s);
+      if (!sp) return;
+      sp.cells.forEach((c) => { if (mineUnits.has(unitOf(c)) && (c.status === "missing" || c.status === "incomplete")) out.add(unitOf(c)); });
+    });
+    return sh.problems.filter((u) => out.has(u));
+  }
+  const put = (parent, ...kids) => { kids.flat().forEach((c) => { if (c != null && c !== false) parent.append(c); }); return parent; };
+  function modal(build) {
+    const d = h("dialog", { class: "q-modal" });
+    document.body.append(d);
+    d.addEventListener("close", () => d.remove());
+    d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+    build(d, () => d.close());
+    d.showModal();
+    return d;
+  }
+  async function needSaved() {
+    if (!Q.queue_id) { alert("Save the queue first (Save button above), then change the shares."); return false; }
+    if (dirty && !(await saveQueue(true))) return false;
+    return true;
+  }
+  async function applyShareChange(url, payload, d, close) {
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* not JSON */ }
+    if (!res.ok) return { ok: false, error: data.error || `The Lab answered ${res.status}.` };
+    if (data.queue) { Q.shares = data.queue.shares || null; Q.machines = data.queue.machines || Q.machines; dirty = false; await loadSaved(); renderAll(); }
+    refreshPreview(true);
+    return { ok: true, data };
+  }
+  function openAssign(sh) {
+    modal((d, close) => {
+      const sel = new Set((sh.assigned || []).map((x) => x.toLowerCase()));
+      const boxes = knownPeople().map((nm) => h("label", {}, h("input", { type: "checkbox", value: nm, checked: sel.has(nm.toLowerCase()) }), nm));
+      const extra = h("input", { type: "text", placeholder: "Another name, or several separated by commas", "aria-label": "Another name" });
+      const err = h("p", { class: "step-issue", hidden: true });
+      put(d, h("h3", { text: `Share ${sh.share}: who runs it` }),
+        h("p", { text: "A plan, not a lock. The board and the Run dialog warn when someone else starts this share." }),
+        h("div", { class: "pick-list" }, boxes.length ? boxes : h("span", { class: "hint", text: "No names known yet; type one below." })), extra, err,
+        h("div", { class: "row-end" },
+          h("button", { class: "ghost", type: "button", text: "Clear", onclick: () => save([]) }),
+          h("button", { class: "secondary", type: "button", text: "Cancel", onclick: close }),
+          h("button", { class: "primary", type: "button", text: "Save", onclick: () => save(null) })));
+      async function save(forced) {
+        if (!(await needSaved())) return;
+        let names = forced;
+        if (names === null) {
+          names = Array.from(d.querySelectorAll('input[type="checkbox"]:checked')).map((x) => x.value);
+          extra.value.split(",").map((x) => x.trim()).filter(Boolean).forEach((x) => { if (!names.some((y) => y.toLowerCase() === x.toLowerCase())) names.push(x); });
+        }
+        const r = await applyShareChange(`/api/queue/${encodeURIComponent(Q.queue_id)}/assign`, { share: sh.share, names, run_by: who() || null });
+        if (!r.ok) { err.hidden = false; err.textContent = r.error; return; }
+        close();
+      }
+    });
+  }
+  function resultBox(d, close, data) {
+    d.replaceChildren(h("h3", { text: "Done" }),
+      h("p", { text: `${plural((data.moved || []).length, "problem")} moved: ` + (data.moved || []).map((m) => `${m.unit} → share ${m.to}`).join(", ") }),
+      ...(data.warnings || []).map((w) => h("div", { class: "warn-box", text: w })),
+      h("p", { text: data.note || "" }),
+      h("div", { class: "row-end" }, h("button", { class: "primary", type: "button", text: "Close", onclick: close })));
+  }
+  function openSplit(sh) {
+    const shares = (preview && preview.shares) || [];
+    const left = undoneOf(sh);
+    modal((d, close) => {
+      const targets = shares.filter((x) => x.share !== sh.share).map((x) => h("label", {}, h("input", { type: "checkbox", value: String(x.share), checked: true }),
+        `Share ${x.share}` + ((x.assigned || []).length ? ` · ${x.assigned.join(", ")}` : "") + ` · ${undoneOf(x).length} left`));
+      const err = h("p", { class: "step-issue", hidden: true });
+      const run = sh.claim && sh.state === "running" ? h("div", { class: "warn-box", text: `${sh.claim.run_by || "Someone"} is running this share now. They keep their old share until they press Continue; ask them to pause first.` }) : null;
+      put(d, h("h3", { text: `Split share ${sh.share} across the others` }),
+        h("p", { text: left.length ? `${plural(left.length, "problem")} not finished yet will be dealt out, each to the share with the least left: ${left.join(", ")}. Finished ones stay in share ${sh.share}, so the record of who ran what does not change.` : `Share ${sh.share} has nothing left to move.` }),
+        run, h("p", { text: "Move it to:" }), h("div", { class: "pick-list" }, targets), err,
+        h("div", { class: "row-end" }, h("button", { class: "secondary", type: "button", text: "Cancel", onclick: close }),
+          h("button", { class: "primary", type: "button", text: "Split", disabled: !left.length, onclick: go })));
+      async function go() {
+        if (!expName()) { err.hidden = false; err.textContent = "Type the experiment name in the bar above first: what is left is counted under it."; return; }
+        if (!(await needSaved())) return;
+        const to = Array.from(d.querySelectorAll('input[type="checkbox"]:checked')).map((x) => Number(x.value));
+        if (!to.length) { err.hidden = false; err.textContent = "Choose at least one share."; return; }
+        const r = await applyShareChange(`/api/queue/${encodeURIComponent(Q.queue_id)}/redistribute`, { experiment: expName(), from_share: sh.share, to_shares: to, run_by: who() || null });
+        if (!r.ok) { err.hidden = false; err.textContent = r.error; return; }
+        resultBox(d, close, r.data);
+      }
+    });
+  }
+  function openMove(sh) {
+    const shares = (preview && preview.shares) || [];
+    const left = new Set(undoneOf(sh));
+    modal((d, close) => {
+      const list = sh.problems.map((u) => h("label", { class: left.has(u) ? "" : "dis" }, h("input", { type: "checkbox", value: u, disabled: !left.has(u) }), u + (left.has(u) ? "" : " (done)")));
+      const to = h("select", { "aria-label": "Move to share" }, ...shares.filter((x) => x.share !== sh.share).map((x) => h("option", { value: String(x.share), text: `Share ${x.share}${(x.assigned || []).length ? " · " + x.assigned.join(", ") : ""} · ${undoneOf(x).length} left` })));
+      const err = h("p", { class: "step-issue", hidden: true });
+      put(d, h("h3", { text: `Move problems out of share ${sh.share}` }), h("p", { text: "Tick the problems to move. Finished ones cannot move: they already have a result." }),
+        h("div", { class: "pick-list" }, list), h("label", { class: "hint", text: "Move to " }, to), err,
+        h("div", { class: "row-end" }, h("button", { class: "secondary", type: "button", text: "Cancel", onclick: close }), h("button", { class: "primary", type: "button", text: "Move", onclick: go })));
+      async function go() {
+        const units = Array.from(d.querySelectorAll('.pick-list input:checked')).map((x) => x.value);
+        if (!units.length) { err.hidden = false; err.textContent = "Tick at least one problem."; return; }
+        if (!(await needSaved())) return;
+        const r = await applyShareChange(`/api/queue/${encodeURIComponent(Q.queue_id)}/move`, { experiment: expName(), units, to_share: Number(to.value), run_by: who() || null });
+        if (!r.ok) { err.hidden = false; err.textContent = r.error; return; }
+        resultBox(d, close, r.data);
+      }
+    });
+  }
+  function buildBoard(panel, shares, k, keepTop, keepLeft) {
+    const count = (st) => shares.filter((sh) => sh.state === st).length;
+    const bits = [[count("running"), "running"], [count("finished"), "finished"], [count("paused") + count("stopped") + count("ended"), "stopped or paused"],
+                  [count("silent"), "silent"], [count("not taken"), "not taken"]].filter(([x]) => x).map(([x, w]) => `${x} ${w}`);
+    const th = (t) => h("th", { text: t });
+    const tb = h("tbody");
+    shares.forEach((sh) => {
+      const c = sh.claim;
+      const taken = c ? `${c.run_by || "?"}${c.machine ? " · " + c.machine : ""}` : (sh.people.length ? sh.people.map((x) => x.name).join(", ") : "nobody yet");
+      const status = stateText(sh), plist = sh.problems.join(", "), asg = sh.assigned || [];
+      tb.append(h("tr", { class: sh.share === k ? "me" : "" },
+        h("td", { text: `${sh.share}${sh.share === k ? " · you" : ""}` }),
+        h("td", { class: "assigned" + (asg.length ? "" : " none"), text: asg.length ? asg.join(", ") : "not assigned" }),
+        h("td", { text: taken, title: taken + (c && c.started_at ? `\nsince ${fmtWhen(c.started_at)}` : "") }),
+        h("td", {}, h("span", { class: "st st-" + sh.state.replace(" ", "-"), text: status, title: status })),
+        h("td", { text: `${sh.done} of ${sh.total}` }),
+        h("td", { text: `${sh.passed} / ${sh.failed}` }),
+        h("td", { text: String(sh.left) }),
+        h("td", { class: "probs" }, h("div", { class: "clamp", text: plist, title: plist })),
+        h("td", { class: "acts" },
+          h("button", { class: "secondary small", type: "button", text: "Assign", title: "Plan who runs this share", onclick: () => openAssign(sh) }),
+          h("button", { class: "secondary small", type: "button", text: "Split…", title: "Deal the unfinished work of this share out to the others", disabled: !sh.left, onclick: () => openSplit(sh) }),
+          h("button", { class: "secondary small", type: "button", text: "Move…", title: "Move chosen problems to another share", disabled: !sh.left, onclick: () => openMove(sh) }))));
+    });
+    const t = h("table", {}, h("thead", {}, h("tr", {}, th("Share"), th("Assigned to"), th("Taken by"), th("Status"), th("Done"), th("Pass / fail"), th("Left"), th(Q.split === "repeat" ? "Problem #repeat" : "Problems"), th(""))), tb);
+    const scroll = h("div", { class: "board-scroll" }, t);
+    panel.append(h("p", { class: "board-head", text: `${bits.join(" · ") || "no shares"} · ${shares.reduce((x, sh) => x + sh.left, 0)} runs left in all` }), scroll);
+    scroll.scrollTop = keepTop; scroll.scrollLeft = keepLeft;
   }
 
   function renderTotals() {
@@ -808,6 +1148,8 @@
       const sh = preview && preview.shares && preview.shares[myShare() - 1];
       const busy = busyElsewhere(sh);
       if (busy) body.append(h("p", { class: "hint warn-text", text: `${busy.run_by || "Someone"} (${busy.machine || "another machine"}) is running share ${myShare()} right now, last seen ${ago(busy.updated_at)}. Starting here runs the same cells twice. Press Cancel and pick another share unless you agreed this.` }));
+      const asg = (sh && sh.assigned) || [];
+      if (asg.length && !asg.some((x) => x.toLowerCase() === who().toLowerCase())) body.append(h("p", { class: "hint warn-text", text: `Share ${myShare()} is assigned to ${asg.join(", ")}, not to ${who() || "you"}. Start it only if they agreed.` }));
       body.append(h("p", { class: "hint", text: `This machine runs share ${myShare()} of ${Q.machines} only${sh ? ": " + sh.problems.join(", ") : ""}. The other machines run the rest under the same experiment name.` }));
     } else if ((Q.machines || 1) > 1) {
       body.append(h("p", { class: "step-issue", text: `This queue is split across ${Q.machines} machines but no share is picked, so this machine would run every problem. Pick your share under "This machine runs" unless you mean that.` }));

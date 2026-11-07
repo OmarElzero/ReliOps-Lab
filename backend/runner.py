@@ -1762,6 +1762,7 @@ def stream_campaign(
     experiment: str | None = None,
     agent_switches: list[str] | None = None,
     on_result=None,
+    origin: str | None = None,
 ) -> Iterator[str]:
     """Runs one problem at a time (SREGym itself is single-run per process) and yields log lines
     for all of them in order, with a banner between problems. Each problem runs `repeat_n` times
@@ -1955,6 +1956,9 @@ def stream_campaign(
             "agent_switches": switches_text,
             # What this run belongs to, in the person's own words (one experiment can hold many runs and queue starts).
             "experiment": (experiment or "").strip(),
+            # Where the run was started: "queue" (the Queue tab) or "quick" (Setup & quick run). A quick run never counts
+            # as a cell of a queue, even with the same settings and experiment name. Older records have no origin.
+            "origin": origin if origin in ("queue", "quick") else "",
             "transcript_rel": transcript_rel,
             "manifest_id": manifest_id,
             "git_commit": commit,

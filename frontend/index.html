@@ -55,24 +55,7 @@
       </div>
     </section>
 
-    <div id="q-empty" class="empty" hidden>
-      <h2>Line up your runs</h2>
-      <p>A queue is an ordered list of steps. Each step is one configuration (agent, model, judge) on a set of
-        problems, repeated a few times. The Lab runs the steps one after another, on its own, and picks up
-        where it stopped if you run the queue again.</p>
-      <ol>
-        <li>First time on this machine: open <em>Setup &amp; quick run</em>, save your model key and run setup.</li>
-        <li>Add a step: for example <em>ReliOps v1 typed</em> on the 30 problems, 3 repeats.</li>
-        <li>Add the next one: <em>typed + guarded shell</em>, same problems. Then a step on your dev set.</li>
-        <li>Press <strong>Run queue</strong>. You can close this tab; the run keeps going.</li>
-      </ol>
-      <button id="q-add-empty" class="primary" type="button">Add the first step</button>
-    </div>
-
-    <ol id="q-steps" class="q-steps"></ol>
-    <button id="q-add" class="q-add" type="button">+ Add step</button>
-
-    <div class="q-runbar" id="q-runbar">
+    <div class="q-runbar q-command" id="q-runbar">
       <div class="q-paused" id="q-paused" role="status" hidden></div>
       <div class="q-total">
         <strong id="q-total-line">No steps yet</strong>
@@ -97,8 +80,6 @@
         <button id="q-restart-share" class="secondary danger" type="button" hidden disabled title="Start only your share again">↻ Restart my share</button>
       </div>
     </div>
-    <div class="q-shares" id="q-shares" hidden></div>
-
     <section class="card now" id="q-now" hidden>
       <div class="now-top">
         <h2 id="q-now-title">Running</h2>
@@ -108,6 +89,56 @@
       <div class="meter" aria-hidden="true"><span id="q-now-meter" style="width:0%"></span></div>
     </section>
 
+    <nav class="q-views" id="q-views" role="tablist" aria-label="Queue sections">
+      <button type="button" class="q-view-btn active" data-view="overview" role="tab">Overview</button>
+      <button type="button" class="q-view-btn" data-view="steps" role="tab">Steps <span class="chip-n" id="q-steps-count"></span></button>
+      <button type="button" class="q-view-btn" data-view="shares" role="tab">Shares &amp; people</button>
+      <button type="button" class="q-view-btn" data-view="log" role="tab">Log</button>
+    </nav>
+
+    <section class="q-view" id="qv-overview" data-view="overview">
+      <p class="hint" id="ov-note" hidden></p>
+      <div class="ov-tiles" id="ov-tiles"></div>
+      <div class="ov-grid">
+        <section class="card ov-card ov-wide"><h2>Problems <span class="hint" id="ov-prob-hint"></span></h2><div class="ov-scroll" id="ov-problems"></div></section>
+        <section class="card ov-card"><h2>People</h2><div class="ov-scroll" id="ov-people"></div></section>
+        <section class="card ov-card"><h2>Activity, last 24 h <span class="hint">attempts per hour</span></h2><div id="ov-activity"></div></section>
+      </div>
+    </section>
+
+    <section class="q-view" id="qv-steps" data-view="steps" hidden>
+      <div class="q-steps-bar">
+        <div class="seg" role="group" aria-label="How steps are shown">
+          <button type="button" class="seg-btn active" id="q-mode-compact">Compact</button>
+          <button type="button" class="seg-btn" id="q-mode-cards">Detailed</button>
+        </div>
+        <span class="hint">One row per configuration. Detailed shows every problem and repeat of a step.</span>
+      </div>
+    <div id="q-empty" class="empty" hidden>
+      <h2>Line up your runs</h2>
+      <p>A queue is an ordered list of steps. Each step is one configuration (agent, model, judge) on a set of
+        problems, repeated a few times. The Lab runs the steps one after another, on its own, and picks up
+        where it stopped if you run the queue again.</p>
+      <ol>
+        <li>First time on this machine: open <em>Setup &amp; quick run</em>, save your model key and run setup.</li>
+        <li>Add a step: for example <em>ReliOps v1 typed</em> on the 30 problems, 3 repeats.</li>
+        <li>Add the next one: <em>typed + guarded shell</em>, same problems. Then a step on your dev set.</li>
+        <li>Press <strong>Run queue</strong>. You can close this tab; the run keeps going.</li>
+      </ol>
+      <button id="q-add-empty" class="primary" type="button">Add the first step</button>
+    </div>
+
+    <ol id="q-steps" class="q-steps"></ol>
+    <button id="q-add" class="q-add" type="button">+ Add step</button>
+
+    </section>
+
+    <section class="q-view" id="qv-shares" data-view="shares" hidden>
+      <div class="q-shares" id="q-shares" hidden></div>
+      <p class="hint" id="q-shares-none">This queue is on one machine. Set <strong>Machines</strong> above to 2 or more to split it.</p>
+    </section>
+
+    <section class="q-view" id="qv-log" data-view="log" hidden>
     <section class="card log-card">
       <details class="log-fold" id="q-log-fold" open>
         <summary>Live log</summary>
@@ -116,6 +147,8 @@
         <pre id="q-log" class="log" aria-live="off"></pre>
       </details>
     </section>
+    </section>
+
   </div>
 
   <div id="tab-run" class="tab-panel" hidden>
@@ -156,7 +189,7 @@
       fine to experiment with, but the number won't compare to anyone else's runs.</p>
     <label>Experiment name <span class="tag">(optional; what these runs belong to)</span></label>
     <input id="experiment-name" placeholder="e.g. Dev analysis, first try" autocomplete="off" list="q-exp-list">
-    <p class="hint">Recorded on every run and available as a filter in Results. The Queue tab asks for it too.</p>
+    <p class="hint">Recorded on every run and available as a filter in Results. A quick run here is never counted as a cell of a queue, even with the same settings and the same name; only runs started from the Queue tab are.</p>
     <label>Config label <span class="tag">(names the agent variant you are testing)</span></label>
     <input id="config-label" placeholder="e.g. base, F7-on, prompt-v2" autocomplete="off" list="config-label-presets">
     <datalist id="config-label-presets"></datalist>

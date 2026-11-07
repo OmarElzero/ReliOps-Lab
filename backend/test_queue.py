@@ -228,6 +228,122 @@ class QueueApiTests(TmpRepoCase):
         one = c.post("/api/queue", json={"name": "Single", "steps": [step()]}).json()["queue"]
         self.assertEqual(c.post(f"/api/queue/{one['queue_id']}/restart-share", json={"experiment": "X", "share": 1}).status_code, 400)
 
+    def test_quick_runs_never_count_as_queue_cells(self):
+        c = self.client
+        q = c.post("/api/queue", json={"name": "Q", "steps": [step(problems=["p1", "p2"], repeat_n=1)]}).json()["queue"]
+        runs = [dict(run(1, "p1", 1, True), experiment="X", run_by="Omar", origin="quick"),
+                dict(run(2, "p2", 1, True), experiment="X", run_by="Omar", origin="queue"),
+                dict(run(3, "p1", 1, False), experiment="X", run_by="Old")]            # older record: no origin, still counts
+        with mock.patch.object(self.app_module, "_collect_runs", return_value=("local", runs)):
+            pv = c.get("/api/queue/preview", params={"queue_id": q["queue_id"], "experiment": "X"}).json()
+            cells = {x["problem"]: x["status"] for x in pv["steps"][0]["cells"]}
+            self.assertEqual(cells, {"p1": "fail", "p2": "pass"})                       # the quick pass of p1 was ignored
+            self.assertEqual(pv["label_info"]["runs"], 2)
+        only_quick = [dict(run(1, "p1", 1, True), experiment="X", origin="quick")]
+        with mock.patch.object(self.app_module, "_collect_runs", return_value=("local", only_quick)):
+            pv = c.get("/api/queue/preview", params={"queue_id": q["queue_id"], "experiment": "X"}).json()
+            self.assertEqual(pv["runs_left"], 2)
+
+    def test_assign_names_to_shares(self):
+        c = self.client
+        q = c.post("/api/queue", json={"name": "Shared", "machines": 3, "steps": [step(problems=["p1", "p2", "p3"], repeat_n=1)]}).json()["queue"]
+        qid = q["queue_id"]
+        self.assertEqual(c.post(f"/api/queue/{qid}/assign", json={"share": 9, "names": ["Noura"]}).status_code, 400)
+        self.assertEqual(c.post(f"/api/queue/{qid}/assign", json={"share": 1, "names": ["Noura", "noura"]}).status_code, 400)
+        self.assertEqual(c.post(f"/api/queue/{qid}/assign", json={"share": 1, "names": ["Noura", "Omar"], "run_by": "Omar"}).status_code, 200)
+        with mock.patch.object(self.app_module, "_collect_runs", return_value=("local", [])):
+            pv = c.get("/api/queue/preview", params={"queue_id": qid, "experiment": "X"}).json()
+        self.assertEqual([x["assigned"] for x in pv["shares"]], [["Noura", "Omar"], [], []])
+        c.post(f"/api/queue/{qid}/assign", json={"share": 1, "names": []})                # clearing
+        with mock.patch.object(self.app_module, "_collect_runs", return_value=("local", [])):
+            pv = c.get("/api/queue/preview", params={"queue_id": qid, "experiment": "X"}).json()
+        self.assertEqual(pv["shares"][0]["assigned"], [])
+
+    def test_redistribute_moves_only_what_is_not_done(self):
+        c = self.client
+        probs = [f"p{i}" for i in range(1, 7)]
+        q = c.post("/api/queue", json={"name": "Shared", "machines": 3, "steps": [step(problems=probs, repeat_n=1)]}).json()["queue"]
+        qid = q["queue_id"]                                    # shares: [p1,p4] [p2,p5] [p3,p6]
+        runs = [dict(run(1, "p1", 1, True), experiment="X", run_by="Omar")]                 # p1 of share 1 is done
+        with mock.patch.object(self.app_module, "_collect_runs", return_value=("local", runs)):
+            self.assertEqual(c.post(f"/api/queue/{qid}/redistribute", json={"experiment": "", "from_share": 1}).status_code, 400)
+            self.assertEqual(c.post(f"/api/queue/{qid}/redistribute", json={"experiment": "X", "from_share": 1, "to_shares": [1]}).status_code, 400)
+            r = c.post(f"/api/queue/{qid}/redistribute", json={"experiment": "X", "from_share": 1, "to_shares": [2, 3], "run_by": "Omar"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual([m["unit"] for m in r.json()["moved"]], ["p4"])                # p1 is done, only p4 moves
+            saved = r.json()["queue"]["shares"]
+            self.assertEqual(saved[0], ["p1"])                                             # the finished problem stays in share 1
+            self.assertIn("p4", saved[1] + saved[2])
+            self.assertEqual(sorted(sum(saved, [])), sorted(probs))                        # nothing lost, nothing twice
+            pv = c.get("/api/queue/preview", params={"queue_id": qid, "experiment": "X"}).json()
+            self.assertEqual(pv["shares"][0]["done"], 1)                                   # the record of who did what is unchanged
+            self.assertEqual(pv["runs_left"], 5)
+            # nothing left to move from a finished share
+            self.assertEqual(c.post(f"/api/queue/{qid}/redistribute", json={"experiment": "X", "from_share": 1}).status_code, 400)
+
+    def test_move_chosen_problems_and_warn_when_a_share_is_running(self):
+        c = self.client
+        probs = [f"p{i}" for i in range(1, 5)]
+        q = c.post("/api/queue", json={"name": "Shared", "machines": 2, "steps": [step(problems=probs, repeat_n=1)]}).json()["queue"]
+        qid = q["queue_id"]                                    # [p1,p3] [p2,p4]
+        self.assertEqual(c.post(f"/api/queue/{qid}/move", json={"units": [], "to_share": 2}).status_code, 400)
+        self.assertEqual(c.post(f"/api/queue/{qid}/move", json={"units": ["nope"], "to_share": 2}).status_code, 400)
+        self.assertEqual(c.post(f"/api/queue/{qid}/move", json={"units": ["p1"], "to_share": 5}).status_code, 400)
+        import claims
+        import store
+        store.append("claims", {"experiment": "X", "share": 2, "machines": 2, "run_by": "Noura", "machine": "other", "status": "running"})
+        with mock.patch.object(self.app_module, "_collect_runs", return_value=("local", [])):
+            r = c.post(f"/api/queue/{qid}/move", json={"units": ["p1", "p3"], "to_share": 2, "experiment": "X"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["queue"]["shares"], [[], ["p2", "p4", "p1", "p3"]])
+        self.assertTrue(any("Noura" in w and "share 2" in w for w in r.json()["warnings"]))
+
+    def test_move_and_redistribute_with_repeat_pairs(self):
+        c = self.client
+        q = c.post("/api/queue", json={"name": "R", "machines": 2, "split": "repeat",
+                                       "steps": [step(problems=["p1", "p2"], repeat_n=2)]}).json()["queue"]
+        qid = q["queue_id"]
+        before = queueplan.share_lists(q)
+        self.assertEqual(sorted(sum(before, [])), ["p1 #1", "p1 #2", "p2 #1", "p2 #2"])
+        r = c.post(f"/api/queue/{qid}/move", json={"units": ["p1 #1"], "to_share": 2})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("p1 #1", r.json()["queue"]["shares"][1])
+
+    def test_activity_rate(self):
+        now = 1_800_000_000.0
+        import time as _t
+        def stamp(h_ago):
+            return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(now - h_ago * 3600))
+        runs = [dict(run(i, "p1", 1, True), experiment="X", run_by="A", timestamp_utc=stamp(h)) for i, h in enumerate([0.5, 1.5, 2.5, 3.5])]
+        runs.append(dict(run(9, "p2", 1, True), experiment="X", run_by="B", timestamp_utc=stamp(30)))       # older than a day
+        runs.append(dict(run(10, "p2", 1, True), experiment="X", run_by="B", timestamp_utc=stamp(1), origin="quick"))   # quick: ignored
+        a = queueplan._activity(runs, "X", now)
+        self.assertEqual(a["attempts"], 4)
+        self.assertEqual(sum(a["buckets"]), 4)
+        self.assertEqual(list(a["by_person"]), ["A"])
+        self.assertGreater(a["per_hour"], 0)
+        self.assertEqual(queueplan._activity(runs, None, now)["attempts"], 0)
+
+    def test_queue_tab_has_command_bar_views_and_share_controls(self):
+        here = os.path.dirname(__file__)
+        with open(os.path.join(here, "..", "frontend", "index.html"), encoding="utf-8") as f:
+            html = f.read()
+        with open(os.path.join(here, "..", "frontend", "queue.js"), encoding="utf-8") as f:
+            js = f.read()
+        # the run bar sits above the views, not at the bottom of a six-screen page
+        self.assertLess(html.index('id="q-runbar"'), html.index('id="q-views"'))
+        self.assertLess(html.index('id="q-views"'), html.index('id="qv-overview"'))
+        for view in ("overview", "steps", "shares", "log"):
+            self.assertIn(f'id="qv-{view}"', html)
+            self.assertIn(f'data-view="{view}"', html)
+        for el in ("q-mode-compact", "q-mode-cards", "ov-tiles", "ov-problems", "ov-people", "ov-activity", "q-shares-none"):
+            self.assertIn(f'id="{el}"', html)
+        for api in ("/assign", "/move", "/redistribute"):
+            self.assertIn(api, js)
+        for fn in ("renderOverview", "renderStepRows", "buildBoard", "openAssign", "openSplit", "openMove"):
+            self.assertIn(f"function {fn}", js)
+        self.assertIn("A quick run here is never counted", html)
+
     def test_queue_tab_has_a_restart_my_share_button(self):
         here = os.path.dirname(__file__)
         with open(os.path.join(here, "..", "frontend", "index.html")) as f:
@@ -677,7 +793,7 @@ class QueueBoardTests(TmpRepoCase):
 
     def test_the_page_shows_the_board_and_warns_before_a_double_start(self):
         js = open(os.path.join(os.path.dirname(__file__), "..", "frontend", "queue.js")).read()
-        for needle in ("Queue board", "busyElsewhere", "Taken by", "no sign of life", "setInterval"):
+        for needle in ("runs left in all", "busyElsewhere", "Taken by", "no sign of life", "setInterval"):
             self.assertIn(needle, js)
 
 
@@ -922,7 +1038,10 @@ class QueueBoardStabilityTests(unittest.TestCase):
 
     def test_board_is_outside_the_sticky_bar(self):
         html = self.read("index.html")
-        self.assertIn('</div>\n    <div class="q-shares" id="q-shares" hidden></div>', html)   # the bar's div is closed before the board
+        # the board has its own view (Shares & people), after the command bar and the view switcher, never inside the bar
+        self.assertLess(html.index('id="q-runbar"'), html.index('id="qv-shares"'))
+        self.assertLess(html.index('id="qv-shares"'), html.index('id="q-shares"'))
+        self.assertLess(html.index('id="q-shares"'), html.index('id="qv-log"'))
 
     def test_only_the_newest_answer_draws_and_failures_keep_the_last_numbers(self):
         js = self.read("queue.js")

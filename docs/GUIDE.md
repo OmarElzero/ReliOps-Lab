@@ -38,6 +38,26 @@ Decide what to run, in order, then start it and walk away.
 - **Experiment name** (the box next to Run queue): what these runs belong to, in your own words ("Dev analysis, first try"). The queue is a reusable recipe; the experiment is one use of it, so you do not rename the queue each time. Every run is recorded under the name, and Results can filter by it. The same name continues where you left off; a new name starts fresh (the old runs stay but do not count for it). Run queue stays disabled until a name is typed.
 - **Restart** (asks "are you sure?" first): runs the whole queue again from step 1 as a new round of the same experiment, recorded as "name (restart 2)", "name (restart 3)" and so on. Nothing is deleted; older rounds stay in Results under their own label. It is only enabled when the name already has runs.
 - **Restart my share** (only on a queue split across machines, and only after you pick your share): starts just your share again under the same experiment name. The runs your share has recorded under this name stop counting (the queue, the board and Run queue ignore them), so its cells run again; the other shares and other experiments are not touched. Nothing is deleted: the old runs stay in Results, and a later export still lists them, so tell the analysis which round counts (the newest run per cell wins). It is refused while a job runs on this machine. Press Run queue afterwards. The mark is shared with the other machines through the store, so their board shows the share as restarted too.
+
+### The Queue tab's four screens
+
+The experiment name, your share and the Run / Pause / Restart buttons sit in one bar at the top and stay in the same place. Under it are four screens:
+
+- **Overview**: live numbers for the whole queue under the experiment name: cells with a result, passed, failed, incomplete, left, the pace of the last 24 hours (attempts per hour, all machines), a time-left estimate, and how many shares are running. Below: a table of problems (done, pass rate, one square per step, and **who ran it**), a table of people (cells, pass, fail, what they are running now) and a chart of attempts per hour by person. The time-left estimate uses the pace actually recorded in the last 24 hours, stops included, so it is longer than a "non-stop" estimate; it is an estimate, not a promise. The page refreshes itself every minute and when you open the screen.
+- **Steps**: one row per step (Compact) or the full cards with every problem and repeat (Detailed). The arrow at the end of a row opens that step's problem-by-repeat grid.
+- **Shares & people**: the board of a queue split across machines, with **Assign**, **Split…** and **Move…** (below).
+- **Log**: the live output.
+
+### Who runs which share, and moving work between shares
+
+- **Assign**: write down who runs a share (pick known people, or type a name). It is a plan, not a lock: the board shows it, "This machine runs" warns when you pick a share assigned to someone else, and the Run dialog asks you to start it only if they agreed. If your name is assigned to one share, the picker tells you which.
+- **Split…**: take the work of one share that is not done yet (for example a machine that cannot run it) and deal it out to the other shares you tick, each problem to the share with the least left. Finished problems stay where they were, so who ran what does not change.
+- **Move…**: tick chosen problems of a share and send them to one other share. Finished problems cannot move.
+- Both change the saved queue's shares, and the change is shared with the team through the store. A machine that is already running keeps the shares it started with until it presses **Continue** or **Run queue** again; the dialog warns when the share you touch is running. Type the experiment name first (what is left is counted under it) and save the queue first.
+
+### Quick runs and the queue
+
+A run started from **Setup & quick run** is recorded under its experiment name like any run, but it carries `origin: "quick"` and is never counted as a cell of a queue, even with the same settings and the same name. Runs started from the Queue tab carry `origin: "queue"`. Runs recorded before this change have no origin and still count.
 - **Resume**: only cells with no result yet (under the current experiment name) are run, so a stopped, crashed or interrupted queue continues where it left off. A run with no known outcome is "incomplete", is run again, and is never counted as a failure.
 - **Start queue** runs on the server, not in the browser tab. Close the tab, lock the laptop screen, reopen later and the page re-attaches to the live output. One job runs at a time because SREGym drives a single cluster. **Stop** finishes the current run and then stops.
 - **Save queue** keeps the ordered list under a name so a teammate can load it.

@@ -300,6 +300,7 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "config_label": r.get("config_label") or "",
             "agent_switches": r.get("agent_switches") or "",
             "experiment": r.get("experiment") or "",
+            "origin": r.get("origin") or "",
             "incomplete_reason": _incomplete_reason(r),
             "run_class": r.get("run_class") or "exploration",
             "repeat_index": r.get("repeat_index"),
@@ -521,7 +522,7 @@ def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str],
                agent_switches: Optional[list] = None,
                manifest_id: Optional[str] = None, slice_k: int = 1, slice_n: int = 1,
                cells: Optional[list[tuple[str, int]]] = None, purpose: Optional[str] = None,
-               experiment: Optional[str] = None):
+               experiment: Optional[str] = None, origin: Optional[str] = None):
     """The lines of one run: refusals first (frozen runs must match their manifest), then
     runner.stream_campaign. Shared by /api/run and the queue."""
     problem_list = list(problems)
@@ -570,7 +571,7 @@ def _run_lines(*, agent: str, model: str, judge_model: str, problems: list[str],
         agent=agent, action_space=action_space, model=model, judge_model=judge_model, problems=problem_list,
         repeat_n=repeat_n, force_build=force_build, run_by=run_by, config_label=config_label, run_class=run_class,
         record_walkthrough=record_walkthrough, cells=cell_list, manifest_id=manifest_id, experiment=experiment,
-        agent_switches=agent_switches, on_result=on_result,
+        agent_switches=agent_switches, on_result=on_result, origin=origin,
     )
 
 
@@ -610,7 +611,7 @@ def run(
                   force_build=force_build, repeat_n=repeat_n, run_by=run_by, config_label=config_label,
                   run_class=run_class, record_walkthrough=record_walkthrough, manifest_id=manifest_id,
                   slice_k=slice_k, slice_n=slice_n, cells=cell_list, purpose=purpose or None,
-                  experiment=(experiment or "").strip() or None, agent_switches=switch_list or None)
+                  experiment=(experiment or "").strip() or None, agent_switches=switch_list or None, origin="quick")
     return _job_sse(lambda: _run_lines(**kwargs), "run", f"{agent} · {len(problem_list)} problem(s)")
 
 
@@ -787,7 +788,7 @@ def queue_preview(queue_id: str, experiment: Optional[str] = None, share: Option
         return JSONResponse({"error": "unknown queue"}, status_code=404)
     _, runs = _collect_runs(5000)
     try:
-        return {**queueplan.preview(q, runs, store.read("manifests"), experiment, share, claims.for_label, resets=_resets()), "this_commit": _this_commit()}
+        return {**queueplan.preview(q, runs, store.read("manifests"), experiment, share, claims.for_label, resets=_resets(), assigned=_assigned(queue_id)), "this_commit": _this_commit()}
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -801,9 +802,20 @@ def queue_preview_draft(body: QueueIn):
     try:
         q = queueplan.clean_queue(draft)
         _, runs = _collect_runs(5000)
-        return {**queueplan.preview(q, runs, store.read("manifests"), body.experiment, body.share, claims.for_label, resets=_resets()), "this_commit": _this_commit()}
+        return {**queueplan.preview(q, runs, store.read("manifests"), body.experiment, body.share, claims.for_label, resets=_resets(), assigned=_assigned(q.get("queue_id"))), "this_commit": _this_commit()}
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+
+def _assigned(queue_id) -> dict:
+    """{share: [names]}: who each share of this queue is planned for. Best effort: a failed read means nobody assigned."""
+    if not queue_id:
+        return {}
+    try:
+        return {int(a.get("share") or 0): [str(n) for n in (a.get("names") or [])]
+                for a in store.read("assignments") if a.get("queue_id") == queue_id and not a.get("deleted")}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _resets() -> list:
@@ -914,7 +926,7 @@ def _queue_steps(queue: dict, run_by: Optional[str], experiment: str, restart: b
             agent_switches=step.get("agent_switches") or None,
             manifest_id=step.get("manifest_id"),
             cells=cell_list if (only is not None or not step.get("manifest_id")) else None,
-            purpose=step.get("purpose") or None, experiment=label)
+            purpose=step.get("purpose") or None, experiment=label, origin="queue")
         yield f"##### [QUEUE] step {i}/{len(steps)} end #####\n"
         halted = runner.halt_reason()
         if halted:
@@ -973,7 +985,7 @@ def _queue_by_cell(queue: dict, steps: list, only, manifests: list, label: str, 
                 repeat_n=step["repeat_n"], run_by=run_by, config_label=step.get("config_label") or None,
                 run_class=step["run_class"], record_walkthrough=bool(step.get("record_walkthrough", True)),
                 agent_switches=step.get("agent_switches") or None, manifest_id=step.get("manifest_id"),
-                cells=[(problem, rep)], purpose=step.get("purpose") or None, experiment=label)
+                cells=[(problem, rep)], purpose=step.get("purpose") or None, experiment=label, origin="queue")
             yield f"##### [QUEUE] step {i}/{len(steps)} end #####\n"
             halted = runner.halt_reason()
             if halted:
@@ -1086,6 +1098,98 @@ def queue_restart_share(queue_id: str, body: RestartShareIn):
                                         "runs_set_aside": len(before)})
     return {"ok": True, "experiment": label, "share": body.share, "at": at, "runs_set_aside": len(before),
             "shared": rec.get("_firebase")}
+
+
+class AssignIn(BaseModel):
+    share: int
+    names: list[str] = []
+    run_by: Optional[str] = None
+
+
+class MoveIn(BaseModel):
+    experiment: str = ""
+    units: list[str] = []         # problems, or "problem #r" pairs, to move
+    to_share: int
+    run_by: Optional[str] = None
+
+
+class RedistributeIn(BaseModel):
+    experiment: str = ""
+    from_share: int
+    to_shares: list[int] = []     # empty = every other share
+    run_by: Optional[str] = None
+
+
+@app.post("/api/queue/{queue_id}/assign")
+def queue_assign(queue_id: str, body: AssignIn):
+    """Plan who runs a share. Names are free text (people typed in the header, or a name you type). It is a plan, not a
+    lock: the screen warns when someone else starts the share."""
+    q = _find_queue(queue_id)
+    if q is None:
+        return JSONResponse({"error": "unknown queue"}, status_code=404)
+    try:
+        queueplan._check_share(q, body.share)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    names = [n.strip() for n in body.names if n and n.strip()]
+    if len(set(x.lower() for x in names)) != len(names):
+        return JSONResponse({"error": "a name appears twice"}, status_code=400)
+    rec = store.append("assignments", {"queue_id": queue_id, "share": body.share, "names": names,
+                                       "assigned_by": body.run_by or "", "deleted": not names})
+    return {"ok": True, "share": body.share, "names": names, "shared": rec.get("_firebase")}
+
+
+def _share_move_response(q: dict, lists: list, moved: list, experiment: str, also: tuple = ()):
+    try:
+        new_q = queueplan.clean_queue({**q, "shares": lists})
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    saved = store.append("queues", new_q)
+    warnings = []
+    label = queueplan.experiment_label((experiment or "").strip(), _collect_runs(5000)[1]) if (experiment or "").strip() else ""
+    taken = claims.for_label(label) if label else []
+    touched = sorted({k for _, k in moved} | set(also))
+    import time as _t
+    for k in touched:
+        c = claims.claim_for(taken, k)
+        if c and c.get("status") == "running":
+            seen = claims._epoch(c.get("updated_at"))
+            if seen is not None and _t.time() - seen < claims.STALE_S:
+                warnings.append(f"{c.get('run_by') or 'someone'} is running share {k} right now. A running machine keeps the shares it "
+                                f"started with until it presses Continue or Run queue again, so tell them.")
+    return {"ok": True, "queue": saved, "moved": [{"unit": u, "to": t} for u, t in moved], "warnings": warnings,
+            "note": "The change is saved in the shared queue. Each machine sees it when it opens the queue again; a machine that is "
+                    "already running keeps its old share until it presses Continue."}
+
+
+@app.post("/api/queue/{queue_id}/move")
+def queue_move(queue_id: str, body: MoveIn):
+    """Move chosen problems (or problem #repeat pairs) to another share. Runs already recorded stay recorded."""
+    q = _find_queue(queue_id)
+    if q is None:
+        return JSONResponse({"error": "unknown queue"}, status_code=404)
+    try:
+        lists = queueplan.move_units(q, body.units, body.to_share)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return _share_move_response(q, lists, [(u, body.to_share) for u in body.units], body.experiment)
+
+
+@app.post("/api/queue/{queue_id}/redistribute")
+def queue_redistribute(queue_id: str, body: RedistributeIn):
+    """Take the work of one share that is not done yet and deal it out to other shares (all of them, or the ones chosen)."""
+    q = _find_queue(queue_id)
+    if q is None:
+        return JSONResponse({"error": "unknown queue"}, status_code=404)
+    if not (body.experiment or "").strip():
+        return JSONResponse({"error": "Type the experiment name first: what is left is counted under it."}, status_code=400)
+    _, runs = _collect_runs(5000)
+    movable = queueplan.undone_units(q, runs, store.read("manifests"), body.experiment, resets=_resets())
+    try:
+        lists, moved = queueplan.redistribute(q, body.from_share, body.to_shares or None, movable)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return _share_move_response(q, lists, moved, body.experiment, (body.from_share,))
 
 
 # ---- Problem cards ------------------------------------------------------------------
