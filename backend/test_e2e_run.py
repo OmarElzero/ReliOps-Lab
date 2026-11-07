@@ -17,7 +17,8 @@ import runner  # noqa: E402
 from test_v2 import TmpRepoCase  # noqa: E402
 
 VERSIONS = "kind 0.30.0; docker 27.1.1; kubectl 1.35.0"
-LOG_TEXT = "agent started\nOPENAI_API_KEY=sk-testtesttesttesttesttest\nnode kind-worker Ready\n"
+FAKE_KEY = "sk-" + "test" * 6    # built here so no key-shaped string sits in the repository
+LOG_TEXT = f"agent started\nOPENAI_API_KEY={FAKE_KEY}\nnode kind-worker Ready\n"
 
 
 class EndToEndRunTests(TmpRepoCase):
@@ -104,7 +105,7 @@ class EndToEndRunTests(TmpRepoCase):
 
         # the shared copy of a log has the secret masked and the rest intact
         shared = next(iter(self.shared_logs.values()))
-        self.assertNotIn("sk-testtesttesttest", shared)
+        self.assertNotIn(FAKE_KEY, shared)
         self.assertIn("node kind-worker Ready", shared)
 
         # the dashboard row carries the fields (machine_versions was dropped by the row builder once)

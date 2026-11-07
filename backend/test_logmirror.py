@@ -50,11 +50,17 @@ class FakeClient:
 
 class RedactTests(unittest.TestCase):
     def test_keys_tokens_and_secret_lines_are_masked(self):
+        # The fake keys are put together here, not written out, so no key-shaped string sits in the repository
+        # (GitHub secret scanning flags the shape even when the value is made up).
+        google = "AI" + "za" + "SyA1234567890abcdefghijklmnopqrstuv"
+        router = "sk-" + "or-v1-" + "abcdefghijklmnopqrstuvwxyz0123456789"
+        groq = "gs" + "k_" + "abcdefghijklmnopqrstuvwxyz123456"
+        github = "gh" + "p_" + "abcdefghijklmnopqrstuvwxyz0123456789"
         text = "\n".join([
-            "calling with AIzaSyA1234567890abcdefghijklmnopqrstuv now",
-            "key sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789",
-            "gsk_abcdefghijklmnopqrstuvwxyz123456",
-            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            f"calling with {google} now",
+            f"key {router}",
+            groq,
+            github,
             "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789",
             "GEMINI_API_KEY=abc123secretvalue",
             "export OPENROUTER_API_KEY='quoted secret'",
