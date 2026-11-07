@@ -94,6 +94,7 @@
       <button type="button" class="q-view-btn active" data-view="overview" role="tab">Overview</button>
       <button type="button" class="q-view-btn" data-view="steps" role="tab">Steps <span class="chip-n" id="q-steps-count"></span></button>
       <button type="button" class="q-view-btn" data-view="shares" role="tab">Shares &amp; people</button>
+      <button type="button" class="q-view-btn" data-view="screening" role="tab">Screening</button>
       <button type="button" class="q-view-btn" data-view="log" role="tab">Log</button>
     </nav>
 
@@ -139,11 +140,28 @@
       <p class="hint" id="q-shares-none">This queue is on one machine. Set <strong>Machines</strong> above to 2 or more to split it.</p>
     </section>
 
+    <section class="q-view" id="qv-screening" data-view="screening" hidden>
+      <section class="card scr-card">
+        <h2>Screening <span class="hint">the switch ladder, by the rule in docs/plan/16</span></h2>
+        <p class="hint">Made from the runs recorded under the experiment name above, newest round only, quick runs never counted. A cell without a clean result is missing, never a failure.</p>
+        <div class="scr-controls">
+          <label>Base <input id="scr-base" type="text" value="R2 B2" aria-label="Base configuration label"></label>
+          <label>All switches <input id="scr-all" type="text" value="R2 ALL" aria-label="All-switches configuration label"></label>
+          <label>Set aside commits <input id="scr-commits" type="text" placeholder="e.g. 02762304, 715f7fb4" aria-label="Commits to set aside"></label>
+          <label class="inline"><input id="scr-null" type="checkbox"> keep problems the null agent passes</label>
+          <button id="scr-refresh" class="secondary small" type="button">Refresh</button>
+          <span class="scr-dl" id="scr-dl"></span>
+        </div>
+        <div id="scr-out" class="scr-out"><p class="hint">Open this screen with an experiment name typed above.</p></div>
+      </section>
+    </section>
+
     <section class="q-view" id="qv-log" data-view="log" hidden>
     <section class="card log-card">
       <details class="log-fold" id="q-log-fold" open>
         <summary>Live log</summary>
         <div class="row log-head"><span class="hint" id="q-log-hint">Output of the queue appears here. The full log is also saved on disk.</span>
+          <button id="q-share-logs" class="secondary small" type="button" title="Share the raw logs of runs already made on this machine with the other machines (keys are masked). New runs share theirs automatically.">Share my earlier logs</button>
           <button id="q-log-clear" class="secondary small" type="button">Clear</button></div>
         <pre id="q-log" class="log" aria-live="off"></pre>
       </details>

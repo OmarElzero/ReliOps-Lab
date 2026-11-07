@@ -1,4 +1,6 @@
-import io, json, zipfile
+"""Run: python3 -I backend/test_export_zip.py  (plain functions, so no pytest is needed)"""
+import io, json, os, sys, zipfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export
 
 
@@ -32,3 +34,11 @@ def test_failed_attempts_are_not_duplicates():
     a, b = {**base, "duration_s": 1142.8}, {**base, "duration_s": 871.3}
     assert export._dup_signature(a) != export._dup_signature(b)
     assert export._dup_signature(a) == export._dup_signature(dict(a))
+
+
+if __name__ == "__main__":
+    tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
+    for n, f in tests:
+        f()
+        print("ok", n)
+    print(f"{len(tests)} tests passed")

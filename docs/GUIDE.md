@@ -39,13 +39,14 @@ Decide what to run, in order, then start it and walk away.
 - **Restart** (asks "are you sure?" first): runs the whole queue again from step 1 as a new round of the same experiment, recorded as "name (restart 2)", "name (restart 3)" and so on. Nothing is deleted; older rounds stay in Results under their own label. It is only enabled when the name already has runs.
 - **Restart my share** (only on a queue split across machines, and only after you pick your share): starts just your share again under the same experiment name. The runs your share has recorded under this name stop counting (the queue, the board and Run queue ignore them), so its cells run again; the other shares and other experiments are not touched. Nothing is deleted: the old runs stay in Results, and a later export still lists them, so tell the analysis which round counts (the newest run per cell wins). It is refused while a job runs on this machine. Press Run queue afterwards. The mark is shared with the other machines through the store, so their board shows the share as restarted too.
 
-### The Queue tab's four screens
+### The Queue tab's five screens
 
-The experiment name, your share and the Run / Pause / Restart buttons sit in one bar at the top and stay in the same place. Under it are four screens:
+The experiment name, your share and the Run / Pause / Restart buttons sit in one bar at the top and stay in the same place. Under it are five screens:
 
 - **Overview**: live numbers for the whole queue under the experiment name: cells with a result, passed, failed, incomplete, left, the pace of the last 24 hours (attempts per hour, all machines), a time-left estimate, and how many shares are running. Below: a table of problems (done, pass rate, one square per step, and **who ran it**), a table of people (cells, pass, fail, what they are running now) and a chart of attempts per hour by person. The time-left estimate uses the pace actually recorded in the last 24 hours, stops included, so it is longer than a "non-stop" estimate; it is an estimate, not a promise. The page refreshes itself every minute and when you open the screen.
 - **Steps**: one row per step (Compact) or the full cards with every problem and repeat (Detailed). The arrow at the end of a row opens that step's problem-by-repeat grid.
 - **Shares & people**: the board of a queue split across machines, with **Assign** and **Redistribute…** (below).
+- **Screening**: the report for a switch ladder (below).
 - **Log**: the live output.
 
 ### Who runs which share, and moving work between shares
@@ -248,6 +249,36 @@ versions. Before the first run the Lab also checks that the agent code on this m
 If it does not (for example the ReliOps clone is older than the switch), the queue stops and says what to run: Run setup, then
 `bash scripts/sync_agent.sh`, then tick "Force-build the agent image". An agent silently ignores a switch it does not know,
 so without this check a run would record the switch and not apply it.
+
+### Screening (the switch ladder)
+
+The **Screening** screen of the Queue tab turns the runs of a switch ladder into the numbers the screening rule needs (docs/plan/15 sections 7 and 8, rule in docs/plan/16 section 3), so nobody counts by hand. Type the experiment name at the top of the Queue tab first: the report is made from the runs recorded under that name (newest round only, "Restart my share" applied, quick runs never counted).
+
+- **Configurations**: for each of the 18 ladder configurations, the cells with a clean result, passes, pass@1 with a 95% Wilson interval, how many problems pass in all their repeats, and the cells still missing with the worst case they could hide.
+- **Contrasts**: 16 paired comparisons on the same (problem, repeat) pairs: 8 *one-on* (base + one switch against the base) and 8 *one-off* (all switches against all switches minus one). Each is an exact two-sided sign test on the pairs where the outcome flipped, with a Holm correction over all 16. With these 16 tests, 6 flips in one direction and none the other way give p = 0.031 before correction; after Holm you need 10 flips.
+- **Verdict per switch**: *no data* (no pair in common yet), *no evidence* (no contrast passes the exact test; this is not "no effect"), *candidate* helps or hurts (a contrast passes the test without correction and the one-on and one-off effects point the same way), *finding* helps or hurts (the same, and it also passes with Holm), or *mixed* (a contrast passes but the two do not point the same way, so the rule does not count it). The candidate configuration for the next stage is the one doc 15 section 7 builds from the signs of the effects.
+- **Missing is not failed**: a run without a clean result (no outcome, or a person tagged it as an external fault) is set aside and the cell is reported as missing. A warning appears when fewer than 80% of the cells have a result.
+- **Controls**: *Base* and *All switches* are the config labels (defaults `R2 B2` and `R2 ALL`). *Set aside commits* lists commits whose runs should not count (for example runs made with older agent code under the same experiment name). *Keep problems the null agent passes* turns off the default of leaving out problems the null agent already solves. Downloads give the two tables as CSV and the report as Markdown.
+- It is a screening on development data, not a claim: gains are reported only from the frozen 30.
+
+### Sharing run logs between machines
+
+Every run writes a raw log on the machine that ran it. Since logs are what you read to find out *why* a run failed, each new run now also shares its log with the other machines (Firestore collection `run_logs`, one document per run). The log is masked first (values of API keys, tokens and passwords are replaced; ordinary numbers such as `tokens=1234` are kept), compressed, and stored only if it fits in one document (about 700 thousand characters after packing); a longer one stays local and the run is marked as not shared. A teammate opening the Results tab sees your log as if it were theirs; it is fetched when opened and cached, one document read per log. The experiment zip also falls back to the shared log when a log is not on the machine that builds the zip.
+
+- **Share my earlier logs** (Queue tab, Log screen) shares the logs of runs made on this machine before this feature existed. It only sends runs made here.
+- **Turn it off**: `RELIOPS_LOG_MIRROR=0` in the Lab's `.env`. The local log is never touched either way.
+- Masking is pattern-based, so it is a safety net, not a guarantee: do not paste a key into a prompt or a problem description and rely on the mask to hide it.
+
+### Check the sync between two machines (10 minutes)
+
+The automated tests use a fake Firestore. To check the real one once, with Omar's machine (A) and one teammate's (B), both on the latest `main`, both with Firebase connected, and the queue paused on both:
+
+1. On A, save a queue with 2 or more shares. On B, open the Queue tab: the queue is listed. If it is not, check the Firebase pill in the page header on both machines (it should say connected) and reload.
+2. On A, **Assign** share 2 to B's person. On B, type that name in the header: the board shows the assignment.
+3. On A, type an experiment name, then **Redistribute…** one unfinished problem to another share and Apply. On B, reload: the problem sits in the new share.
+4. On A, unlock the Tasks tab, add a task for B's person with this queue and the experiment name. On B, the Tasks tab shows it with a number on the tab; press Doing with a note. On A, **Everyone's** shows B's status within about 90 seconds.
+5. On B, run one cheap problem. On A, the Overview counts it under B's name, and opening that run in Results shows its log (it comes from the shared copy). The run's `machine_versions` appears in the machine-versions panel.
+6. If any step fails, note which step, the Firebase pill text on both machines and the Lab's console output; do not retry more than once.
 
 ## Deleting a saved queue
 

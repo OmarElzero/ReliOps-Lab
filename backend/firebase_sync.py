@@ -580,6 +580,44 @@ def write_story(run_id: str, text: str) -> str:
     return write_doc("stories", run_id, {"run_id": run_id, "text": text})
 
 
+def _log_doc_id(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name or "")[:200]
+
+
+def write_log(name: str, text: str, run_id: str = "") -> str:
+    """Shares one redacted, compressed per-problem log under its file name (logmirror.py). Never raises."""
+    import logmirror
+    if not name:
+        return "not written: no log file name"
+    packed = logmirror.pack(text)
+    return write_doc("run_logs", _log_doc_id(name), {"log_file": name, "run_id": run_id, **packed})
+
+
+_log_cache: dict[str, str] = {}
+
+
+def read_log(name: str) -> str | None:
+    """A teammate's log by file name, or None. One document read, cached for the session of the page."""
+    import logmirror
+    status()
+    key = _log_doc_id(name)
+    if key in _log_cache:
+        return _log_cache[key]
+    if _client is None or not key:
+        return None
+    try:
+        doc = _client.collection("run_logs").document(key).get()
+        _spend(1)
+        text = logmirror.unpack(doc.to_dict() or {}) if doc.exists else None
+        if text:
+            if len(_log_cache) >= 20:
+                _log_cache.pop(next(iter(_log_cache)))
+            _log_cache[key] = text
+        return text
+    except Exception:  # noqa: BLE001
+        return None
+
+
 _story_cache: dict[str, str] = {}
 
 

@@ -343,6 +343,30 @@ class QueueApiTests(TmpRepoCase):
         self.assertEqual(sorted(sum(saved, [])), sorted(probs))
         self.assertEqual(sorted(saved[2]), ["p2", "p3", "p4"])
 
+    def test_every_recorded_run_field_reaches_the_results(self):
+        """A field the Lab records must come out of _collect_runs (Results page, exports, statistics) or be listed here as
+        deliberately turned into something else. machine_versions was recorded for days and silently dropped."""
+        import ast
+        src = open(os.path.join(os.path.dirname(__file__), "runner.py"), encoding="utf-8").read()
+        keys = []
+        for fn in ast.walk(ast.parse(src)):
+            if isinstance(fn, ast.FunctionDef) and fn.name == "stream_campaign":
+                for d in ast.walk(fn):
+                    if isinstance(d, ast.Dict) and any(isinstance(k, ast.Constant) and k.value == "run_id" for k in d.keys):
+                        keys = [k.value for k in d.keys if isinstance(k, ast.Constant)]
+        self.assertIn("machine_versions", keys)
+        turned_into_something_else = {"row", "transcript_rel"}      # row -> pass/fail columns; transcript_rel -> has_story
+        record = {k: f"value-of-{k}" for k in keys}
+        record["row"] = {}
+        import firebase_sync
+        with mock.patch.object(firebase_sync, "list_runs_ex", return_value={"runs": None, "live": False, "error": None, "synced_at": None}), \
+             mock.patch.object(runner, "list_local_runs", return_value=[record]):
+            _, runs = self.app_module._collect_runs(10)
+        self.assertEqual(len(runs), 1)
+        missing = [k for k in keys if k not in runs[0] and k not in turned_into_something_else]
+        self.assertEqual(missing, [], f"recorded but not passed on to the results: {missing}")
+        self.assertEqual(runs[0]["machine_versions"], "value-of-machine_versions")
+
     def test_activity_rate(self):
         now = 1_800_000_000.0
         import time as _t
@@ -682,6 +706,45 @@ class MachineShareTests(unittest.TestCase):
         after = campaign.slice_cells([("c", 1), ("d", 1)], 2, 2, manifest)   # machine 1 finished a and b
         self.assertEqual(before, [("b", 1), ("d", 1)])
         self.assertEqual(after, [("d", 1)])                                     # still never takes c
+
+
+class FrozenSlicingTests(unittest.TestCase):
+    """The frozen 30 on 5 machines with 3 agents: every (problem, repeat) is run by exactly one machine, and all
+    three agents of that pair run on the same machine (the paired comparison needs that)."""
+
+    def _queue(self, split, repeats):
+        probs = [f"f{i:02d}" for i in range(1, 31)]
+        steps = [step(problems=probs, repeat_n=repeats, config_label=c) for c in ("null", "v1", "stratus")]
+        return queueplan.clean_queue({"name": "frozen", "machines": 5, "split": split, "steps": steps})
+
+    def _check(self, split, repeats):
+        q = self._queue(split, repeats)
+        lists = queueplan.share_lists(q)
+        flat = [u for x in lists for u in x]
+        self.assertEqual(len(flat), len(set(flat)), "a unit sits in two shares")
+        self.assertEqual(sorted(flat), sorted(queueplan.queue_units(q)))
+        sizes = [len(x) for x in lists]
+        self.assertLessEqual(max(sizes) - min(sizes), 1)
+        owners = {}
+        for s in q["steps"]:
+            for p in s["problems"]:
+                for r in range(1, s["repeat_n"] + 1):
+                    hit = [k for k in range(1, 6) if queueplan.in_share(queueplan.share_set(q, k), p, r)]
+                    self.assertEqual(len(hit), 1, f"{p} #{r} is in shares {hit}")
+                    owners.setdefault((p, r), set()).add(hit[0])
+        self.assertEqual(len(owners), 30 * repeats)
+        self.assertTrue(all(len(v) == 1 for v in owners.values()), "agents of one pair landed on different machines")
+        total = sum(len(queueplan.cells(s, [], None, None)) for s in q["steps"])
+        self.assertEqual(total, 3 * 30 * repeats)
+
+    def test_split_by_problem(self):
+        self._check("problem", 3)
+
+    def test_split_by_repeat(self):
+        self._check("repeat", 3)
+
+    def test_split_by_repeat_single_repeat(self):
+        self._check("repeat", 1)
 
 
 class QueueSummaryTests(unittest.TestCase):
@@ -1105,9 +1168,6 @@ class QueueBoardStabilityTests(unittest.TestCase):
         self.assertIn("Type the experiment name above", js)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class MachineVersionTests(unittest.TestCase):
     def test_preview_groups_runs_by_versions(self):
@@ -1149,3 +1209,7 @@ class CellOrderProgressTests(unittest.TestCase):
         j.add("----- recorded result for p: x -----\n")
         j.add("\n##### [QUEUE] step 2/2 start: B | runs 7 to do #####\n")
         self.assertEqual((j.progress["step_runs"], j.progress["step_recorded"]), (7, 0))
+
+
+if __name__ == "__main__":
+    unittest.main()

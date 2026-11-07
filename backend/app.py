@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, Query
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -38,6 +38,7 @@ import pins
 import dashboard
 import publish
 import store
+import screening
 import tasks as tasks_mod
 
 app = FastAPI(title="ReliOps Lab")
@@ -322,6 +323,10 @@ def _collect_runs(limit: int) -> tuple[str, list[dict]]:
             "has_story": bool(r.get("transcript_rel") or r.get("story_shared")),
             "manifest_id": r.get("manifest_id"),
             "git_commit": r.get("git_commit"),
+            # The tools this run used (kind, kubectl, docker, helm), and why it has no result: the paper needs both, and the
+            # "machines differ" warning reads the first. They were recorded but dropped here, so results and exports lacked them.
+            "machine_versions": r.get("machine_versions") or "",
+            "incomplete_kind": r.get("incomplete_kind") or "",
             "key_slot": r.get("key_slot"),
             **_token_fields(r),
             "num_llm_calls": r.get("num_llm_calls"),
@@ -460,8 +465,28 @@ def get_log(name: str):
         return PlainTextResponse("invalid log file name", status_code=400)
     log_path = runner.reliops_dir() / "results" / "gui_logs" / name
     if not log_path.is_file():
-        return PlainTextResponse(f"no such log file: {name}", status_code=404)
+        shared = firebase_sync.read_log(name)     # a teammate's run: the log was shared when it finished (keys masked)
+        if shared:
+            return PlainTextResponse(shared, media_type="text/plain; charset=utf-8")
+        return PlainTextResponse(f"no such log file on this machine: {name}. No shared copy found either (logs are shared when Firebase is "
+                                 "connected on the machine that ran it).", status_code=404)
     return FileResponse(log_path, media_type="text/plain; charset=utf-8")
+
+
+@app.post("/api/logs/share-existing")
+def share_existing_logs():
+    """Shares the logs of runs already made on this machine (those made before log sharing existed, or while Firebase was off).
+    Runs made here only; each log is one document write."""
+    if not _log_mirror_on():
+        return JSONResponse({"error": "Log sharing is turned off on this machine (RELIOPS_LOG_MIRROR=0 in the Lab's .env)."}, status_code=400)
+    sent = skipped = 0
+    for r in runner.list_local_runs(100000):
+        if (r.get("log_file") or "") and _share_log(r):
+            sent += 1
+        else:
+            skipped += 1
+    return {"ok": True, "shared": sent, "skipped": skipped,
+            "note": "Skipped runs have no log file on this machine, or Firebase is not connected."}
 
 
 @app.get("/api/cluster")
@@ -502,6 +527,24 @@ def demo():
     return _sse(runner.stream_demo(), "demo")
 
 
+def _log_mirror_on() -> bool:
+    return str(runner.merged_env_vars().get("RELIOPS_LOG_MIRROR") or os.environ.get("RELIOPS_LOG_MIRROR") or "1").strip() not in ("0", "off", "false", "no")
+
+
+def _share_log(record: dict) -> bool:
+    """Shares this run's raw log with the other machines (logmirror.py). Best effort: the local log is never touched and a failure
+    only means the log stays on this machine."""
+    name = record.get("log_file") or ""
+    if not name or "/" in name or "\\" in name or ".." in name or not _log_mirror_on():
+        return False
+    p = runner.reliops_dir() / "results" / "gui_logs" / name
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return firebase_sync.write_log(name, text, record.get("run_id") or "").startswith("written")
+
+
 def _on_result(record: dict) -> None:
     """Called after every individual run with the record we could recover: share the story with
     teammates, mirror the row to Firestore, and append it to the local raw backup and the CSV."""
@@ -510,6 +553,7 @@ def _on_result(record: dict) -> None:
         record["story_shared"] = firebase_sync.write_story(record["run_id"], runner.render_story(record)).startswith("written")
     except (FileNotFoundError, ValueError, OSError):
         record["story_shared"] = False
+    record["log_shared"] = _share_log(record)
     outcome = firebase_sync.write_run(record)
     record["_firebase"] = outcome
     # Full record, every field, nothing dropped — the raw backup.
@@ -774,6 +818,50 @@ def delete_queue(queue_id: str, x_delete_password: Optional[str] = Header(defaul
         return JSONResponse({"error": "unknown queue"}, status_code=404)
     store.append("queues", {**q, "deleted": True})
     return {"ok": True}
+
+
+# ---- Screening report ---------------------------------------------------------------
+@app.get("/api/screening")
+def screening_report(experiment: str = "", queue_id: str = "", base: str = screening.DEFAULT_BASE,
+                     all_label: str = Query(screening.DEFAULT_ALL, alias="all"), metric: str = "e2e_pass", exclude_commits: str = "", include_null: bool = False, format: str = "json"):
+    """The switch-ladder screening of one experiment (screening.py): per-configuration rates, the 16 paired contrasts with Holm,
+    a verdict per switch. It counts what the queue counts: the newest round of the experiment name, with any "Restart my share"
+    applied, and never a quick run. Problems the null agent passes are left out unless include_null is set."""
+    name = (experiment or "").strip()
+    if not name:
+        return JSONResponse({"error": "Give the experiment name: the report is made from the runs recorded under it."}, status_code=400)
+    _, runs = _collect_runs(5000)
+    label = queueplan.experiment_label(name, runs)
+    q = _find_queue(queue_id) if queue_id else None
+    mine = [r for r in runs if (r.get("experiment") or "") == label and r.get("origin") != "quick"]
+    if q is not None:
+        mine = queueplan.apply_resets(q, mine, _resets(), label)
+    expected = None
+    if q is not None:
+        in_design = lambda lab: lab in (base, all_label) or lab.startswith(base + " +") or lab.startswith(all_label + " -")     # noqa: E731
+        expected = {(p, rep) for st in q["steps"] if st["enabled"] and in_design(st["config_label"] or "")
+                    for p in st["problems"] for rep in range(1, int(st["repeat_n"]) + 1)} or None
+    null_problems = set() if include_null else {r["problem_id"] for r in runs if "NULL_AGENT" in (r.get("agent_switches") or "") and r.get("e2e_pass") is True and r.get("problem_id")}
+    ladder_runs = [r for r in mine if "NULL_AGENT" not in (r.get("agent_switches") or "")]
+    try:
+        rep = screening.screen(ladder_runs, base=base, all_label=all_label, metric=metric, expected=expected, excluded_problems=null_problems,
+                               exclude_commits={c.strip() for c in exclude_commits.split(",") if c.strip()})
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    rep["experiment"] = label
+    rep["runs_used"] = len(ladder_runs)
+    rep["people"] = sorted({r.get("run_by") or "?" for r in ladder_runs})
+    rep["commits"] = sorted({(r.get("git_commit") or "?")[:8] for r in ladder_runs})
+    if format == "md":
+        return PlainTextResponse(screening.to_markdown(rep, f"Screening report: {label}"), media_type="text/markdown; charset=utf-8",
+                                 headers={"Content-Disposition": "attachment; filename=screening_report.md"})
+    if format in ("csv", "csv-configs"):
+        return PlainTextResponse(screening.configs_csv(rep), media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": "attachment; filename=screening_configs.csv"})
+    if format == "csv-contrasts":
+        return PlainTextResponse(screening.contrasts_csv(rep), media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": "attachment; filename=screening_contrasts.csv"})
+    return rep
 
 
 # ---- Tasks tab ----------------------------------------------------------------------
@@ -1514,7 +1602,9 @@ def export_experiment_zip(name: str):
         if not fn or "/" in fn or "\\" in fn or ".." in fn:
             return None
         p = runner.reliops_dir() / "results" / "gui_logs" / fn
-        return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
+        if p.is_file():
+            return p.read_text(encoding="utf-8", errors="replace")
+        return firebase_sync.read_log(fn)     # a teammate's run: the shared copy (keys masked)
 
     def read_story(run):
         rec = raw.get(run.get("run_id"))

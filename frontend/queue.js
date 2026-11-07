@@ -380,7 +380,7 @@
   }
 
   // ---- views: Overview | Steps | Shares & people | Log -------------------------------------------------------------------
-  const VIEWS = ["overview", "steps", "shares", "log"];
+  const VIEWS = ["overview", "steps", "shares", "screening", "log"];
   let view = pref.get("lab_q_view", "overview");
   let stepsMode = pref.get("lab_q_steps_mode", "compact");
   const expandedSteps = new Set();
@@ -396,7 +396,71 @@
     pref.set("lab_q_view", view);
     layoutViews();
     if (view === "overview" || view === "shares") refreshPreview(true);
+    if (view === "screening") loadScreening();
   }
+  // ---- Screening: the ladder's 16 contrasts, verdict per switch, candidate (backend/screening.py) ----------------------
+  function scrParams(extra) {
+    const p = new URLSearchParams({ experiment: expName(), base: $("scr-base").value.trim() || "R2 B2", all: $("scr-all").value.trim() || "R2 ALL" });
+    if (Q.queue_id) p.set("queue_id", Q.queue_id);
+    if ($("scr-commits").value.trim()) p.set("exclude_commits", $("scr-commits").value.trim());
+    if ($("scr-null").checked) p.set("include_null", "true");
+    Object.entries(extra || {}).forEach(([k, v]) => p.set(k, v));
+    return p.toString();
+  }
+  const pct = (x) => (x == null ? "–" : `${Math.round(100 * x)}%`);
+  const pfmt = (x) => (x == null ? "–" : x < 0.0001 ? "<0.0001" : x.toFixed(4));
+  async function loadScreening() {
+    const out = $("scr-out"), dl = $("scr-dl");
+    dl.replaceChildren();
+    if (!expName()) { out.replaceChildren(h("p", { class: "hint", text: "Type the experiment name in the bar above: the report is made from the runs recorded under it." })); return; }
+    out.replaceChildren(h("p", { class: "hint", text: "Working…" }));
+    let rep;
+    try {
+      const res = await fetch("/api/screening?" + scrParams());
+      rep = await res.json();
+      if (!res.ok) { out.replaceChildren(h("p", { class: "step-issue", text: rep.error || `The Lab answered ${res.status}.` })); return; }
+    } catch (e) { out.replaceChildren(h("p", { class: "step-issue", text: "The Lab did not answer." })); return; }
+    [["Markdown", "md"], ["Configurations CSV", "csv-configs"], ["Contrasts CSV", "csv-contrasts"]].forEach(([t, f]) =>
+      dl.append(h("a", { class: "button-link small", href: "/api/screening?" + scrParams({ format: f }), text: t, download: "" })));
+    const th = (t, cls) => h("th", { text: t, class: cls || "" });
+    const cfg = h("table", { class: "qt" }, h("thead", {}, h("tr", {}, th("Configuration"), th("Cells", "num"), th("Pass", "num"), th("Rate", "num"), th("95% interval"), th("Missing", "num"), th("Worst case"), th(`All ${rep.repeats} repeats pass`))),
+      h("tbody", {}, rep.configs.map((c) => h("tr", { class: c.in_design ? "" : "off" },
+        h("td", { text: c.label }), h("td", { class: "num", text: String(c.cells) }), h("td", { class: "num", text: String(c.passes) }), h("td", { class: "num", text: pct(c.rate) }),
+        h("td", { text: c.wilson ? `${pct(c.wilson[0])} to ${pct(c.wilson[1])}` : "–" }), h("td", { class: "num", text: String(c.missing) }),
+        h("td", { text: c.missing ? `${pct(c.worst_low)} to ${pct(c.worst_high)}` : "–" }), h("td", { text: c.problems_full ? `${c.pass_all} of ${c.problems_full}` : "–", title: "Problems with a result for every repeat, and how many of them pass every repeat" })))));
+    const verdict = Object.fromEntries(rep.verdicts.map((v) => [v.switch, v]));
+    const row = (c) => h("tr", {}, h("td", { text: c.id }), h("td", { text: `${c.treated} vs ${c.control}` }), h("td", { class: "num", text: String(c.pairs) }),
+      h("td", { class: "num", text: `${c.treated_only} / ${c.control_only}`, title: "pairs only the first passes / only the second passes" }),
+      h("td", { class: "num" + (c.passes_raw ? " sig" : ""), text: pfmt(c.p) }), h("td", { class: "num" + (c.passes_holm ? " sig" : ""), text: c.kind === "all" ? "outside the 16" : pfmt(c.p_holm) }));
+    const con = h("table", { class: "qt" }, h("thead", {}, h("tr", {}, th("Contrast"), th("Compared"), th("Pairs", "num"), th("Flipped (for / against)", "num"), th("p (exact)", "num"), th("p Holm (16)", "num"))),
+      h("tbody", {}, [...rep.contrasts, rep.all_vs_base].map(row)));
+    const ver = h("table", { class: "qt" }, h("thead", {}, h("tr", {}, th("Switch"), th("Verdict"), th("Why"))),
+      h("tbody", {}, rep.verdicts.map((v) => h("tr", {}, h("td", { text: v.switch }),
+        h("td", {}, h("span", { class: "st " + (v.verdict.startsWith("finding: helps") ? "st-finished" : v.verdict.startsWith("candidate") ? "st-paused" : v.verdict.includes("hurts") ? "st-stopped" : "st-ended"), text: v.verdict })),
+        h("td", { text: v.why })))));
+    const cand = rep.candidate;
+    out.replaceChildren();
+    put(out,
+      h("p", { class: "hint", text: `${rep.experiment} · ${plural(rep.runs_used, "run")} by ${rep.people.join(", ") || "nobody"} · commits ${rep.commits.join(", ") || "–"} · ${rep.pairs_expected} pairs expected per configuration` +
+        (rep.excluded_problems.length ? ` · left out (null agent passes them): ${rep.excluded_problems.join(", ")}` : "") }),
+      ...rep.warnings.map((w) => h("div", { class: "warn-box", text: w })),
+      h("h3", { text: "Configurations" }), h("div", { class: "scr-scroll" }, cfg),
+      h("h3", { text: "Verdict per switch" }), h("div", { class: "scr-scroll" }, ver),
+      cand ? h("div", { class: "scr-cand" }, h("strong", { text: "Candidate by the doc 15 rule: " }), cand.note, (cand.switches || []).length ? ` Switches: ${cand.switches.join(", ")}.` : "") : null,
+      h("h3", { text: "The 16 contrasts, and ALL against B2" }), h("div", { class: "scr-scroll" }, con),
+      h("details", { class: "scr-rule" }, h("summary", { text: "The rule" }), h("p", { text: rep.rule })));
+  }
+  $("q-share-logs").addEventListener("click", async () => {
+    const hint = $("q-log-hint"), btn = $("q-share-logs");
+    btn.disabled = true; hint.textContent = "Sharing the logs of your earlier runs…";
+    try {
+      const res = await fetch("/api/logs/share-existing", { method: "POST" });
+      const d = await res.json();
+      hint.textContent = res.ok ? `Shared ${plural(d.shared, "log")}; ${d.skipped} skipped. ${d.note}` : (d.error || `The Lab answered ${res.status}.`);
+    } catch (e) { hint.textContent = "The Lab did not answer."; }
+    btn.disabled = false;
+  });
+  $("scr-refresh").addEventListener("click", loadScreening);
   document.querySelectorAll(".q-view-btn").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
   function setStepsMode(m) {
     stepsMode = m === "cards" ? "cards" : "compact";

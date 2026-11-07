@@ -129,7 +129,7 @@ def experiment_zip(name: str, runs: list[dict], read_log, read_story) -> tuple[b
                 report["incomplete"] += 1
             log = read_log(r)
             if log is None:
-                notes.append("no log file on this machine")
+                notes.append("no log file on this machine and no shared copy")
             else:
                 data = log.encode("utf-8", "replace")
                 if len(data) > MAX_LOG_BYTES:
