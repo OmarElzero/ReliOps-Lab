@@ -448,22 +448,30 @@ def unit_of(queue: dict, problem: str, repeat: int) -> str:
     return unit(problem, repeat) if (queue.get("split") or "problem") == "repeat" else problem
 
 
-def undone_units(queue: dict, runs: list[dict], manifests: list[dict], experiment: str | None,
-                 resets: list[dict] | None = None) -> set[str]:
-    """Share units that still have a cell to run (in an enabled step) under this experiment name."""
+def undone_runs(queue: dict, runs: list[dict], manifests: list[dict], experiment: str | None,
+                resets: list[dict] | None = None) -> dict[str, int]:
+    """For every share unit that still has cells to run (in an enabled step) under this experiment name: how many runs
+    are left. A unit is a problem, or a "problem #r" pair; one unit is one cell per enabled step, so it can be many runs."""
     base = (experiment or "").strip()
     label = experiment_label(base, runs) if base else None
     runs = apply_resets(queue, runs, resets or [], label)
     scope = label if label else _NO_EXPERIMENT
     by_id = {m.get("manifest_id"): m for m in manifests}
-    out: set[str] = set()
+    out: dict[str, int] = {}
     for s in queue["steps"]:
         if not s["enabled"]:
             continue
         for c in cells(s, runs, by_id.get(s["manifest_id"]) if s["manifest_id"] else None, scope):
             if _is_todo(s, c):
-                out.add(unit_of(queue, c["problem"], c["repeat"]))
+                u = unit_of(queue, c["problem"], c["repeat"])
+                out[u] = out.get(u, 0) + 1
     return out
+
+
+def undone_units(queue: dict, runs: list[dict], manifests: list[dict], experiment: str | None,
+                 resets: list[dict] | None = None) -> set[str]:
+    """Share units that still have a cell to run (in an enabled step) under this experiment name."""
+    return set(undone_runs(queue, runs, manifests, experiment, resets))
 
 
 def _check_share(queue: dict, k: int) -> int:
@@ -491,9 +499,11 @@ def move_units(queue: dict, units: list[str], to_share: int) -> list[list[str]]:
     return lists
 
 
-def redistribute(queue: dict, from_share: int, to_shares: list[int] | None, movable: set[str]) -> tuple[list[list[str]], list[tuple[str, int]]]:
-    """Moves the work of `from_share` that is not done yet (`movable`) to the other shares, one unit at a time to whichever
-    target has the least left. Units already done stay where they were, so the record of who did what does not change.
+def redistribute(queue: dict, from_share: int, to_shares: list[int] | None, movable: set[str] | dict[str, int]) -> tuple[list[list[str]], list[tuple[str, int]]]:
+    """Moves the work of `from_share` that is not done yet (`movable`) to the other shares, to whichever target has the
+    fewest runs left. `movable` is a set of units, or a dict unit -> runs left (better: the balance is then by runs, not by
+    number of problems; a plain set weighs every unit the same). Biggest units are placed first, which levels the load
+    best. Units already done stay where they were, so the record of who did what does not change.
     Returns (new shares, [(unit, target share)])."""
     _check_share(queue, from_share)
     n = int(queue.get("machines") or 1)
@@ -502,16 +512,50 @@ def redistribute(queue: dict, from_share: int, to_shares: list[int] | None, mova
         raise ValueError("choose at least one other share to move the work to")
     for t in targets:
         _check_share(queue, t)
+    weight = dict(movable) if isinstance(movable, dict) else {u: 1 for u in movable}
     lists = [list(x) for x in share_lists(queue)]
-    moving = [u for u in lists[from_share - 1] if u in movable]
+    moving = [u for u in lists[from_share - 1] if u in weight]
     if not moving:
         raise ValueError(f"share {from_share} has nothing left to move")
-    lists[from_share - 1] = [u for u in lists[from_share - 1] if u not in set(moving)]
-    load = {t: sum(1 for u in lists[t - 1] if u in movable) for t in targets}
+    gone = set(moving)
+    lists[from_share - 1] = [u for u in lists[from_share - 1] if u not in gone]
+    load = {t: sum(weight.get(u, 0) for u in lists[t - 1]) for t in targets}
     moved = []
-    for u in moving:
+    for u in sorted(moving, key=lambda x: (-weight[x], moving.index(x))):
         t = min(targets, key=lambda k: (load[k], k))
         lists[t - 1].append(u)
-        load[t] += 1
+        load[t] += weight[u]
         moved.append((u, t))
     return lists, moved
+
+
+def reassign(queue: dict, moves: list[tuple[str, int]], movable: set[str]) -> tuple[list[list[str]], list[tuple[str, int]]]:
+    """The shares after sending each unit to the share you chose for it (any unit, from whichever share holds it now).
+    Only units that still have runs to do can move: a finished unit already has its result under the share that ran it.
+    A unit sent to the share that already holds it is left alone. Returns (new shares, the moves that changed something)."""
+    if not moves:
+        raise ValueError("choose at least one problem to move")
+    seen: dict[str, int] = {}
+    for u, to in moves:
+        u = str(u).strip()
+        _check_share(queue, to)
+        if u in seen and seen[u] != to:
+            raise ValueError(f"{u} is listed for two different shares")
+        seen[u] = to
+    known = set(queue_units(queue))
+    bad = [u for u in seen if u not in known]
+    if bad:
+        raise ValueError(f"not part of this queue: {', '.join(bad[:3])}")
+    done = [u for u in seen if u not in movable]
+    if done:
+        raise ValueError(f"already finished, cannot move: {', '.join(done[:3])}")
+    lists = [list(x) for x in share_lists(queue)]
+    where = {u: i for i, x in enumerate(lists) for u in x}
+    changed = [(u, to) for u, to in seen.items() if where.get(u) != to - 1]
+    if not changed:
+        raise ValueError("nothing to change: every problem is already in the share you chose")
+    gone = {u for u, _ in changed}
+    lists = [[u for u in x if u not in gone] for x in lists]
+    for u, to in changed:
+        lists[to - 1].append(u)
+    return lists, changed

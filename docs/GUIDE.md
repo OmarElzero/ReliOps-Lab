@@ -45,14 +45,13 @@ The experiment name, your share and the Run / Pause / Restart buttons sit in one
 
 - **Overview**: live numbers for the whole queue under the experiment name: cells with a result, passed, failed, incomplete, left, the pace of the last 24 hours (attempts per hour, all machines), a time-left estimate, and how many shares are running. Below: a table of problems (done, pass rate, one square per step, and **who ran it**), a table of people (cells, pass, fail, what they are running now) and a chart of attempts per hour by person. The time-left estimate uses the pace actually recorded in the last 24 hours, stops included, so it is longer than a "non-stop" estimate; it is an estimate, not a promise. The page refreshes itself every minute and when you open the screen.
 - **Steps**: one row per step (Compact) or the full cards with every problem and repeat (Detailed). The arrow at the end of a row opens that step's problem-by-repeat grid.
-- **Shares & people**: the board of a queue split across machines, with **Assign**, **Split…** and **Move…** (below).
+- **Shares & people**: the board of a queue split across machines, with **Assign** and **Redistribute…** (below).
 - **Log**: the live output.
 
 ### Who runs which share, and moving work between shares
 
 - **Assign**: write down who runs a share (pick known people, or type a name). It is a plan, not a lock: the board shows it, "This machine runs" warns when you pick a share assigned to someone else, and the Run dialog asks you to start it only if they agreed. If your name is assigned to one share, the picker tells you which.
-- **Split…**: take the work of one share that is not done yet (for example a machine that cannot run it) and deal it out to the other shares you tick, each problem to the share with the least left. Finished problems stay where they were, so who ran what does not change.
-- **Move…**: tick chosen problems of a share and send them to one other share. Finished problems cannot move.
+- **Redistribute…**: take the work of a share that is not done yet (for example a machine that cannot run it) and decide where it goes. Step 1 ticks the shares that may take work (buttons: All, None, "Not started or finished only" to leave out a share somebody is running now, and "keep some here too" to level the share itself as well). Step 2 is one line per unfinished problem with the number of **runs** left (a problem is one run per enabled step, so a problem of an 18-step queue is 18 runs) and a dropdown: stay, or go to share k. **Auto-balance by runs** fills the dropdowns for you, biggest problems first, each to the share with the fewest runs left; change any line by hand afterwards. Step 3 shows runs left per share before and after, live. Apply saves it. Finished problems cannot move and stay where they ran, so who ran what does not change.
 - Both change the saved queue's shares, and the change is shared with the team through the store. A machine that is already running keeps the shares it started with until it presses **Continue** or **Run queue** again; the dialog warns when the share you touch is running. Type the experiment name first (what is left is counted under it) and save the queue first.
 
 ### Quick runs and the queue
@@ -74,6 +73,17 @@ A queue can be shared by the whole team and split across machines, instead of on
 - Everyone uses the **same experiment name**, so all shares fill the same grid.
 
 Frozen campaigns already had a "k of n" slice in the Campaigns tab; it is now counted over the campaign's whole grid, so a slice no longer shifts (and overlaps another) while other machines finish cells.
+
+## Tasks
+
+The Tasks tab tells each person what they have to do now, so the team learns the next piece of work from the Lab itself. I write the tasks; everyone reads them.
+
+- **A task** has a title, details, a phase (for example "Round 2 - main stage"), who it is for (names; empty means everyone), and optionally a saved queue and an experiment name. **Open queue** on a task opens that queue with that experiment name already typed in, so nobody has to copy names around. Example: "Run STRATUS on the 12 dev problems", phase "Round 2 - main stage", for Noura and Ahmed, queue "Ladder R2 - main", experiment "Dev - STRATUS - dev12".
+- **Reading**: type your name in the box at the top right. **My tasks** shows what is for you (a number on the tab says how many are still open); **Everyone's** shows the whole list, grouped by phase. A task for several people shows each person's status next to their name.
+- **Marking progress**: on a task that is for you, press To do, Doing, Done or Blocked, with an optional note (what you did, what blocks you). Only people named on the task can mark it; a task with no names is open to everyone. Your status is saved under your name and shared with the other machines.
+- **Adding, editing, deleting** needs the owner password: put `LAB_OWNER_PASSWORD=your-password` in the Lab's own `.env` (next to `backend/` and `frontend/`; git-ignored), then press **Unlock to add tasks** on the Tasks tab and type it. No restart is needed. Without that line the Tasks tab is read-only on that machine, which is the normal state for everyone except the project owner. A wrong password waits a second before answering.
+- **What this protects, honestly**: the check is on the Lab's server, like the delete password, so a teammate cannot add tasks from a normal Lab without the password. Tasks are stored in the same shared store as every other record, though, so someone who deliberately sets their own `LAB_OWNER_PASSWORD` could add one. It keeps accidents and wrong clicks out; it is not security against a teammate who wants to get round it.
+- **Phases**: the phase is just text. Use the same words on tasks that belong together and they are grouped under one heading, in the order they were created.
 
 ## Setup & quick run
 

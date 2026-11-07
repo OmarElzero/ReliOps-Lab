@@ -309,6 +309,40 @@ class QueueApiTests(TmpRepoCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn("p1 #1", r.json()["queue"]["shares"][1])
 
+    def test_redistribute_balances_by_runs_left_not_by_problem_count(self):
+        probs = [f"p{i}" for i in range(1, 10)]
+        q = queueplan.clean_queue({"name": "W", "machines": 3, "steps": [step(problems=probs, repeat_n=1)]})
+        # shares [p1 p4 p7] [p2 p5 p8] [p3 p6 p9]; p1 is a big problem (9 runs left), share 3 already carries p3 (5 runs)
+        left = {"p1": 9, "p4": 1, "p7": 1, "p2": 1, "p3": 5}
+        lists, moved = queueplan.redistribute(q, 1, [2, 3], left)
+        self.assertEqual(dict(moved), {"p1": 2, "p4": 3, "p7": 3})                  # by count it would have been p1->2, p4->3, p7->2
+        self.assertEqual(sorted(sum(lists, [])), sorted(probs))
+        self.assertEqual(lists[0], [])                                              # share 1 had only unfinished problems left to give
+
+    def test_reassign_you_choose_each_problem(self):
+        c = self.client
+        probs = [f"p{i}" for i in range(1, 5)]
+        q = c.post("/api/queue", json={"name": "Shared", "machines": 3, "steps": [step(problems=probs, repeat_n=1)]}).json()["queue"]
+        qid = q["queue_id"]                                    # [p1,p4] [p2] [p3]
+        runs = [dict(run(1, "p1", 1, True), experiment="X", run_by="Omar")]                 # p1 is done
+        def post(**kw):
+            return c.post(f"/api/queue/{qid}/reassign", json=kw)
+        with mock.patch.object(self.app_module, "_collect_runs", return_value=("local", runs)):
+            self.assertEqual(post(experiment="", moves=[{"unit": "p4", "to_share": 2}]).status_code, 400)       # needs the experiment name
+            self.assertEqual(post(experiment="X", moves=[]).status_code, 400)
+            self.assertEqual(post(experiment="X", moves=[{"unit": "p1", "to_share": 2}]).status_code, 400)     # finished: cannot move
+            self.assertEqual(post(experiment="X", moves=[{"unit": "zz", "to_share": 2}]).status_code, 400)
+            self.assertEqual(post(experiment="X", moves=[{"unit": "p4", "to_share": 9}]).status_code, 400)
+            self.assertEqual(post(experiment="X", moves=[{"unit": "p4", "to_share": 1}]).status_code, 400)     # already there
+            self.assertEqual(post(experiment="X", moves=[{"unit": "p4", "to_share": 2}, {"unit": "p4", "to_share": 3}]).status_code, 400)
+            r = post(experiment="X", moves=[{"unit": "p4", "to_share": 3}, {"unit": "p2", "to_share": 3}, {"unit": "p3", "to_share": 3}])
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual([m["unit"] for m in r.json()["moved"]], ["p4", "p2"])      # p3 was already in share 3: not a move
+        saved = r.json()["queue"]["shares"]
+        self.assertEqual(saved[0], ["p1"])                                         # the finished problem stays where it ran
+        self.assertEqual(sorted(sum(saved, [])), sorted(probs))
+        self.assertEqual(sorted(saved[2]), ["p2", "p3", "p4"])
+
     def test_activity_rate(self):
         now = 1_800_000_000.0
         import time as _t
@@ -338,9 +372,9 @@ class QueueApiTests(TmpRepoCase):
             self.assertIn(f'data-view="{view}"', html)
         for el in ("q-mode-compact", "q-mode-cards", "ov-tiles", "ov-problems", "ov-people", "ov-activity", "q-shares-none"):
             self.assertIn(f'id="{el}"', html)
-        for api in ("/assign", "/move", "/redistribute"):
+        for api in ("/assign", "/reassign"):
             self.assertIn(api, js)
-        for fn in ("renderOverview", "renderStepRows", "buildBoard", "openAssign", "openSplit", "openMove"):
+        for fn in ("renderOverview", "renderStepRows", "buildBoard", "openAssign", "openRedistribute"):
             self.assertIn(f"function {fn}", js)
         self.assertIn("A quick run here is never counted", html)
 

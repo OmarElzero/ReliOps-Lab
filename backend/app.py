@@ -38,6 +38,7 @@ import pins
 import dashboard
 import publish
 import store
+import tasks as tasks_mod
 
 app = FastAPI(title="ReliOps Lab")
 
@@ -100,6 +101,11 @@ def v2_js():
 @app.get("/queue.js")
 def queue_js():
     return _static("queue.js")
+
+
+@app.get("/tasks.js")
+def tasks_js():
+    return _static("tasks.js")
 
 
 @app.get("/dashboard.js")
@@ -770,6 +776,119 @@ def delete_queue(queue_id: str, x_delete_password: Optional[str] = Header(defaul
     return {"ok": True}
 
 
+# ---- Tasks tab ----------------------------------------------------------------------
+def _owner_password() -> str:
+    """LAB_OWNER_PASSWORD in the Lab's .env (or the shell): the password that lets this Lab add, edit and delete tasks.
+    Read on every call, so no restart is needed. Empty means task editing is locked on this machine."""
+    env = runner.merged_env_vars()
+    return str(env.get("LAB_OWNER_PASSWORD") or os.environ.get("LAB_OWNER_PASSWORD") or "").strip()
+
+
+def _owner_gate(password: Optional[str]):
+    """None when the password is right; otherwise the error response. Checked here, not only in the page."""
+    import hmac
+    import time
+    secret = _owner_password()
+    if not secret:
+        return JSONResponse({"error": "Adding tasks is locked on this machine. Set LAB_OWNER_PASSWORD in the Lab's .env to unlock it "
+                                       "(see docs/GUIDE.md)."}, status_code=403)
+    if not hmac.compare_digest((password or "").encode(), secret.encode()):
+        time.sleep(1.0)    # slows down guessing
+        return JSONResponse({"error": "Wrong owner password."}, status_code=403)
+    return None
+
+
+class TaskIn(BaseModel):
+    title: str = ""
+    detail: str = ""
+    phase: str = ""
+    assignees: list[str] = []
+    queue_id: str = ""
+    experiment: str = ""
+    due: str = ""
+    run_by: Optional[str] = None
+
+
+class TaskProgressIn(BaseModel):
+    who: str = ""
+    status: str = "doing"
+    note: str = ""
+
+
+@app.get("/api/tasks/lock")
+def tasks_lock():
+    """Whether this machine has an owner password set. The password itself never leaves the server."""
+    return {"locked_off": not _owner_password()}
+
+
+@app.post("/api/tasks/unlock")
+def tasks_unlock(x_owner_password: Optional[str] = Header(default=None)):
+    bad = _owner_gate(x_owner_password)
+    return bad if bad else {"ok": True}
+
+
+@app.get("/api/tasks")
+def tasks_list():
+    tasks = [t for t in store.read("tasks") if not t.get("deleted")]
+    tasks.sort(key=lambda t: (t.get("phase") or "~", t.get("created_at") or t.get("updated_at") or ""))
+    ids = {t["task_id"] for t in tasks}
+    return {"tasks": tasks, "progress": [p for p in store.read("task_progress") if p.get("task_id") in ids],
+            "locked_off": not _owner_password()}
+
+
+@app.post("/api/tasks")
+def tasks_create(body: TaskIn, x_owner_password: Optional[str] = Header(default=None)):
+    bad = _owner_gate(x_owner_password)
+    if bad:
+        return bad
+    try:
+        t = tasks_mod.clean_task(body.model_dump(), created_by=body.run_by or "")
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    import time as _t
+    return {"ok": True, "task": store.append("tasks", {**t, "created_at": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())})}
+
+
+@app.put("/api/tasks/{task_id}")
+def tasks_edit(task_id: str, body: TaskIn, x_owner_password: Optional[str] = Header(default=None)):
+    bad = _owner_gate(x_owner_password)
+    if bad:
+        return bad
+    old = next((t for t in store.read("tasks") if t["task_id"] == task_id and not t.get("deleted")), None)
+    if old is None:
+        return JSONResponse({"error": "unknown task"}, status_code=404)
+    try:
+        t = tasks_mod.clean_task(body.model_dump(), task_id=task_id, created_by=old.get("created_by") or body.run_by or "")
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"ok": True, "task": store.append("tasks", {**t, "created_at": old.get("created_at", "")})}
+
+
+@app.delete("/api/tasks/{task_id}")
+def tasks_delete(task_id: str, x_owner_password: Optional[str] = Header(default=None)):
+    bad = _owner_gate(x_owner_password)
+    if bad:
+        return bad
+    old = next((t for t in store.read("tasks") if t["task_id"] == task_id and not t.get("deleted")), None)
+    if old is None:
+        return JSONResponse({"error": "unknown task"}, status_code=404)
+    store.append("tasks", {**old, "deleted": True})
+    return {"ok": True}
+
+
+@app.post("/api/tasks/{task_id}/progress")
+def tasks_progress(task_id: str, body: TaskProgressIn):
+    """Anyone can say where they are on a task that is for them (todo, doing, done, blocked, with a note)."""
+    t = next((t for t in store.read("tasks") if t["task_id"] == task_id and not t.get("deleted")), None)
+    if t is None:
+        return JSONResponse({"error": "unknown task"}, status_code=404)
+    try:
+        rec = tasks_mod.clean_progress(t, body.who, body.status, body.note)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"ok": True, "progress": store.append("task_progress", rec)}
+
+
 _head_cache: dict = {"at": 0.0, "sha": ""}
 
 
@@ -1113,6 +1232,12 @@ class MoveIn(BaseModel):
     run_by: Optional[str] = None
 
 
+class ReassignIn(BaseModel):
+    experiment: str = ""
+    moves: list[dict] = []        # [{"unit": "problem" or "problem #r", "to_share": 2}, ...]
+    run_by: Optional[str] = None
+
+
 class RedistributeIn(BaseModel):
     experiment: str = ""
     from_share: int
@@ -1184,12 +1309,35 @@ def queue_redistribute(queue_id: str, body: RedistributeIn):
     if not (body.experiment or "").strip():
         return JSONResponse({"error": "Type the experiment name first: what is left is counted under it."}, status_code=400)
     _, runs = _collect_runs(5000)
-    movable = queueplan.undone_units(q, runs, store.read("manifests"), body.experiment, resets=_resets())
+    movable = queueplan.undone_runs(q, runs, store.read("manifests"), body.experiment, resets=_resets())
     try:
         lists, moved = queueplan.redistribute(q, body.from_share, body.to_shares or None, movable)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return _share_move_response(q, lists, moved, body.experiment, (body.from_share,))
+
+
+@app.post("/api/queue/{queue_id}/reassign")
+def queue_reassign(queue_id: str, body: ReassignIn):
+    """You choose, problem by problem, which share each one goes to (the Redistribute dialog sends exactly this). Only
+    problems that still have runs to do can move."""
+    q = _find_queue(queue_id)
+    if q is None:
+        return JSONResponse({"error": "unknown queue"}, status_code=404)
+    if not (body.experiment or "").strip():
+        return JSONResponse({"error": "Type the experiment name first: what is left is counted under it."}, status_code=400)
+    try:
+        moves = [(str(m.get("unit", "")).strip(), int(m.get("to_share"))) for m in body.moves]
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "each move needs a unit and a share number"}, status_code=400)
+    _, runs = _collect_runs(5000)
+    movable = queueplan.undone_units(q, runs, store.read("manifests"), body.experiment, resets=_resets())
+    try:
+        lists, moved = queueplan.reassign(q, moves, movable)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    where = {u: i + 1 for i, x in enumerate(queueplan.share_lists(q)) for u in x}
+    return _share_move_response(q, lists, moved, body.experiment, tuple(sorted({where[u] for u, _ in moved if u in where})))
 
 
 # ---- Problem cards ------------------------------------------------------------------

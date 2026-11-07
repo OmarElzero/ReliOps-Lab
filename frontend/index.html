@@ -12,6 +12,7 @@
     <h1 class="brand">ReliOps Lab <span class="tag">local</span></h1>
     <nav class="tabs" role="tablist" aria-label="Sections">
       <button id="tab-btn-queue" class="tab-btn active" data-tab="queue" type="button" role="tab">Queue</button>
+      <button id="tab-btn-tasks" class="tab-btn" data-tab="tasks" type="button" role="tab">Tasks <span id="tasks-badge" class="tab-badge" hidden></span></button>
       <button id="tab-btn-run" class="tab-btn" data-tab="run" type="button" role="tab">Setup &amp; quick run</button>
       <button id="tab-btn-results" class="tab-btn" data-tab="results" type="button" role="tab">Results</button>
       <button id="tab-btn-campaigns" class="tab-btn" data-tab="campaigns" type="button" role="tab">Campaigns</button>
@@ -149,6 +150,14 @@
     </section>
     </section>
 
+  </div>
+
+  <div id="tab-tasks" class="tab-panel" hidden>
+    <section class="card tk-wrap">
+      <h2>Tasks</h2>
+      <p class="hint">What each person has to do now. The project owner writes them; you see yours here, mark where you are, and open the right queue with one click.</p>
+      <div id="tk-root"></div>
+    </section>
   </div>
 
   <div id="tab-run" class="tab-panel" hidden>
@@ -759,6 +768,7 @@
 <script src="/app.js"></script>
 <script src="/v2.js"></script>
 <script src="/queue.js"></script>
+<script src="/tasks.js"></script>
   <script src="/dashboard.js"></script>
 </body>
 </html>

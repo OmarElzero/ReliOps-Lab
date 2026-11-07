@@ -665,46 +665,105 @@
       h("p", { text: data.note || "" }),
       h("div", { class: "row-end" }, h("button", { class: "primary", type: "button", text: "Close", onclick: close })));
   }
-  function openSplit(sh) {
-    const shares = (preview && preview.shares) || [];
-    const left = undoneOf(sh);
-    modal((d, close) => {
-      const targets = shares.filter((x) => x.share !== sh.share).map((x) => h("label", {}, h("input", { type: "checkbox", value: String(x.share), checked: true }),
-        `Share ${x.share}` + ((x.assigned || []).length ? ` · ${x.assigned.join(", ")}` : "") + ` · ${undoneOf(x).length} left`));
-      const err = h("p", { class: "step-issue", hidden: true });
-      const run = sh.claim && sh.state === "running" ? h("div", { class: "warn-box", text: `${sh.claim.run_by || "Someone"} is running this share now. They keep their old share until they press Continue; ask them to pause first.` }) : null;
-      put(d, h("h3", { text: `Split share ${sh.share} across the others` }),
-        h("p", { text: left.length ? `${plural(left.length, "problem")} not finished yet will be dealt out, each to the share with the least left: ${left.join(", ")}. Finished ones stay in share ${sh.share}, so the record of who ran what does not change.` : `Share ${sh.share} has nothing left to move.` }),
-        run, h("p", { text: "Move it to:" }), h("div", { class: "pick-list" }, targets), err,
-        h("div", { class: "row-end" }, h("button", { class: "secondary", type: "button", text: "Cancel", onclick: close }),
-          h("button", { class: "primary", type: "button", text: "Split", disabled: !left.length, onclick: go })));
-      async function go() {
-        if (!expName()) { err.hidden = false; err.textContent = "Type the experiment name in the bar above first: what is left is counted under it."; return; }
-        if (!(await needSaved())) return;
-        const to = Array.from(d.querySelectorAll('input[type="checkbox"]:checked')).map((x) => Number(x.value));
-        if (!to.length) { err.hidden = false; err.textContent = "Choose at least one share."; return; }
-        const r = await applyShareChange(`/api/queue/${encodeURIComponent(Q.queue_id)}/redistribute`, { experiment: expName(), from_share: sh.share, to_shares: to, run_by: who() || null });
-        if (!r.ok) { err.hidden = false; err.textContent = r.error; return; }
-        resultBox(d, close, r.data);
-      }
+  // Runs left per share unit (a problem, or "problem #r"): one run per enabled step that still has a result to get.
+  function unitLeftMap() {
+    const m = new Map();
+    Q.steps.forEach((s) => {
+      if (s.enabled === false) return;
+      const sp = stepPreview(s);
+      if (!sp) return;
+      sp.cells.forEach((c) => { if (c.status === "missing" || c.status === "incomplete") m.set(unitOf(c), (m.get(unitOf(c)) || 0) + 1); });
     });
+    return m;
   }
-  function openMove(sh) {
+  function openRedistribute(sh) {
     const shares = (preview && preview.shares) || [];
-    const left = new Set(undoneOf(sh));
+    const m = unitLeftMap();
+    const mine = sh.problems.filter((u) => m.has(u));
+    const others = shares.filter((x) => x.share !== sh.share);
+    const base = new Map(shares.map((x) => [x.share, x.problems.reduce((a, u) => a + (m.get(u) || 0), 0)]));
+    const myRuns = base.get(sh.share) || 0;
+    const tag = (x) => (x.assigned || []).length ? ` · ${x.assigned.join(", ")}` : "";
     modal((d, close) => {
-      const list = sh.problems.map((u) => h("label", { class: left.has(u) ? "" : "dis" }, h("input", { type: "checkbox", value: u, disabled: !left.has(u) }), u + (left.has(u) ? "" : " (done)")));
-      const to = h("select", { "aria-label": "Move to share" }, ...shares.filter((x) => x.share !== sh.share).map((x) => h("option", { value: String(x.share), text: `Share ${x.share}${(x.assigned || []).length ? " · " + x.assigned.join(", ") : ""} · ${undoneOf(x).length} left` })));
+      d.classList.add("wide");
       const err = h("p", { class: "step-issue", hidden: true });
-      put(d, h("h3", { text: `Move problems out of share ${sh.share}` }), h("p", { text: "Tick the problems to move. Finished ones cannot move: they already have a result." }),
-        h("div", { class: "pick-list" }, list), h("label", { class: "hint", text: "Move to " }, to), err,
-        h("div", { class: "row-end" }, h("button", { class: "secondary", type: "button", text: "Cancel", onclick: close }), h("button", { class: "primary", type: "button", text: "Move", onclick: go })));
-      async function go() {
-        const units = Array.from(d.querySelectorAll('.pick-list input:checked')).map((x) => x.value);
-        if (!units.length) { err.hidden = false; err.textContent = "Tick at least one problem."; return; }
+      const showErr = (t) => { err.hidden = !t; err.textContent = t || ""; };
+      const warn = [];
+      if (!expName()) warn.push(h("div", { class: "warn-box", text: "Type the experiment name in the bar above first: what is left is counted under it." }));
+      if (sh.claim && sh.state === "running") warn.push(h("div", { class: "warn-box", text: `${sh.claim.run_by || "Someone"} is running this share now. They keep their old share until they press Continue; ask them to pause first.` }));
+      // 1. where the work may go
+      const boxes = others.map((x) => h("label", {}, h("input", { type: "checkbox", value: String(x.share), checked: true }),
+        h("span", { class: "grow", text: `Share ${x.share}${tag(x)}` }), h("span", { class: "hint", text: `${stateText(x).split(" · ")[0]} · ${base.get(x.share) || 0} runs left` })));
+      const keep = h("input", { type: "checkbox", id: "rd-keep" });
+      const setTargets = (fn) => d.querySelectorAll(".rd-targets input[type=checkbox]").forEach((c) => { c.checked = fn(others.find((x) => String(x.share) === c.value)); });
+      // 2. each problem: stay or go to a share
+      const sels = new Map();
+      const rows = mine.map((u) => {
+        const sel = h("select", { "aria-label": `Where ${u} goes` }, h("option", { value: "0", text: `Stay in share ${sh.share}` }),
+          ...others.map((x) => h("option", { value: String(x.share), text: `Share ${x.share}${tag(x)}` })));
+        sel.addEventListener("change", refresh);
+        sels.set(u, sel);
+        return h("tr", {}, h("td", { text: u }), h("td", { class: "num", text: String(m.get(u)) }), h("td", {}, sel));
+      });
+      // 3. what it adds up to
+      const sumBody = h("tbody");
+      function chosen() { const out = new Map(); sels.forEach((sel, u) => { const v = Number(sel.value); if (v) out.set(u, v); }); return out; }
+      function refresh() {
+        const mv = chosen(), after = new Map(base);
+        mv.forEach((to, u) => { after.set(sh.share, after.get(sh.share) - m.get(u)); after.set(to, (after.get(to) || 0) + m.get(u)); });
+        sumBody.replaceChildren(...shares.map((x) => {
+          const was = base.get(x.share) || 0, now = after.get(x.share) || 0, diff = now - was;
+          return h("tr", { class: diff ? "chg" : "" }, h("td", { text: `Share ${x.share}${tag(x)}` }), h("td", { class: "num", text: String(was) }),
+            h("td", { class: "num", text: String(now) }), h("td", { class: "num", text: diff ? (diff > 0 ? `+${diff}` : String(diff)) : "" }));
+        }));
+        go.disabled = !mv.size;
+        go.textContent = mv.size ? `Apply: move ${plural(mv.size, "problem")} (${[...mv.keys()].reduce((a, u) => a + m.get(u), 0)} runs)` : "Apply";
+      }
+      function auto() {
+        showErr("");
+        const to = Array.from(d.querySelectorAll(".rd-targets input:checked")).map((x) => Number(x.value));
+        if (keep.checked) to.push(sh.share);
+        if (!to.length) { showErr("Tick at least one share to move work to."); return; }
+        const load = new Map(to.map((t) => [t, t === sh.share ? 0 : (base.get(t) || 0)]));
+        sels.forEach((sel) => { sel.value = "0"; });
+        [...mine].sort((a, b) => m.get(b) - m.get(a)).forEach((u) => {
+          const t = to.reduce((best, k) => (load.get(k) < load.get(best) || (load.get(k) === load.get(best) && k < best) ? k : best), to[0]);
+          load.set(t, load.get(t) + m.get(u));
+          sels.get(u).value = t === sh.share ? "0" : String(t);
+        });
+        refresh();
+      }
+      const go = h("button", { class: "primary", type: "button", text: "Apply", disabled: true, onclick: apply });
+      put(d, h("h3", { text: `Redistribute share ${sh.share}` }),
+        h("p", { text: mine.length
+          ? `${plural(mine.length, Q.split === "repeat" ? "problem × repeat pair" : "problem")} not finished yet, ${myRuns} runs left. One of these counts all its runs (one per enabled step), so the numbers below are runs, not problems. Choose where each one goes, or let the Lab balance by runs. Finished problems stay in share ${sh.share}, so the record of who ran what does not change.`
+          : `Share ${sh.share} has nothing left to move.` }),
+        ...warn,
+        h("h4", { text: "1. Shares that may take work" }),
+        h("div", { class: "pick-list rd-targets" }, boxes),
+        h("div", { class: "rd-quick" },
+          h("button", { class: "ghost small", type: "button", text: "All", onclick: () => setTargets(() => true) }),
+          h("button", { class: "ghost small", type: "button", text: "None", onclick: () => setTargets(() => false) }),
+          h("button", { class: "ghost small", type: "button", text: "Not started or finished only", title: "Leave out shares somebody is running right now", onclick: () => setTargets((x) => x.state === "not taken" || x.state === "finished") }),
+          h("label", { class: "hint" }, keep, " keep some of it here too (level this share as well)"),
+          h("button", { class: "secondary small", type: "button", text: "Auto-balance by runs", onclick: auto, disabled: !mine.length }),
+          h("button", { class: "ghost small", type: "button", text: "Reset", title: "Everything stays where it is", onclick: () => { sels.forEach((x) => { x.value = "0"; }); showErr(""); refresh(); } })),
+        h("h4", { text: "2. Each problem" }),
+        h("div", { class: "rd-scroll" }, h("table", { class: "rd-table" }, h("thead", {}, h("tr", {}, h("th", { text: Q.split === "repeat" ? "Problem #repeat" : "Problem" }), h("th", { class: "num", text: "Runs left" }), h("th", { text: "Goes to" }))), h("tbody", {}, rows))),
+        h("h4", { text: "3. Runs left per share, before and after" }),
+        h("div", { class: "rd-scroll" }, h("table", { class: "rd-table" }, h("thead", {}, h("tr", {}, h("th", { text: "Share" }), h("th", { class: "num", text: "Now" }), h("th", { class: "num", text: "After" }), h("th", { class: "num", text: "Change" }))), sumBody)),
+        err,
+        h("div", { class: "row-end" }, h("button", { class: "secondary", type: "button", text: "Cancel", onclick: close }), go));
+      refresh();
+      async function apply() {
+        showErr("");
+        if (!expName()) { showErr("Type the experiment name in the bar above first: what is left is counted under it."); return; }
+        const mv = chosen();
+        if (!mv.size) { showErr("Nothing is set to move."); return; }
         if (!(await needSaved())) return;
-        const r = await applyShareChange(`/api/queue/${encodeURIComponent(Q.queue_id)}/move`, { experiment: expName(), units, to_share: Number(to.value), run_by: who() || null });
-        if (!r.ok) { err.hidden = false; err.textContent = r.error; return; }
+        const moves = [...mv].map(([unit, to_share]) => ({ unit, to_share }));
+        const r = await applyShareChange(`/api/queue/${encodeURIComponent(Q.queue_id)}/reassign`, { experiment: expName(), moves, run_by: who() || null });
+        if (!r.ok) { showErr(r.error); return; }
         resultBox(d, close, r.data);
       }
     });
@@ -730,8 +789,7 @@
         h("td", { class: "probs" }, h("div", { class: "clamp", text: plist, title: plist })),
         h("td", { class: "acts" },
           h("button", { class: "secondary small", type: "button", text: "Assign", title: "Plan who runs this share", onclick: () => openAssign(sh) }),
-          h("button", { class: "secondary small", type: "button", text: "Split…", title: "Deal the unfinished work of this share out to the others", disabled: !sh.left, onclick: () => openSplit(sh) }),
-          h("button", { class: "secondary small", type: "button", text: "Move…", title: "Move chosen problems to another share", disabled: !sh.left, onclick: () => openMove(sh) }))));
+          h("button", { class: "secondary small", type: "button", text: "Redistribute…", title: "Choose where the unfinished problems of this share go, or let the Lab balance them by runs", disabled: !sh.left, onclick: () => openRedistribute(sh) }))));
     });
     const t = h("table", {}, h("thead", {}, h("tr", {}, th("Share"), th("Assigned to"), th("Taken by"), th("Status"), th("Done"), th("Pass / fail"), th("Left"), th(Q.split === "repeat" ? "Problem #repeat" : "Problems"), th(""))), tb);
     const scroll = h("div", { class: "board-scroll" }, t);

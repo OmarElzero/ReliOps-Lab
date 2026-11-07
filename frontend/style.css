@@ -649,3 +649,49 @@ dialog.q-modal input[type="text"] { width: 100%; }
 
 .ov-tile .v.long { font-size: 17px; line-height: 1.5; }
 .legend i.heat-key { margin-right: 4px; }
+
+/* Redistribute dialog */
+dialog.q-modal.wide { max-width: min(760px, calc(100vw - 32px)); width: 100%; max-height: calc(100vh - 32px); overflow: auto; }
+dialog.q-modal h4 { margin: 14px 0 4px; font-size: 13px; }
+dialog.q-modal .pick-list .grow { flex: 1; }
+dialog.q-modal .rd-quick { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 4px 0; }
+dialog.q-modal .rd-scroll { max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+dialog.q-modal table.rd-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+dialog.q-modal table.rd-table th, dialog.q-modal table.rd-table td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+dialog.q-modal table.rd-table th { position: sticky; top: 0; background: var(--sunken); font-weight: 600; }
+dialog.q-modal table.rd-table .num { text-align: right; font-variant-numeric: tabular-nums; width: 80px; }
+dialog.q-modal table.rd-table tr.chg td { background: var(--warn-soft); }
+dialog.q-modal table.rd-table select { max-width: 100%; }
+
+/* Tasks tab */
+.tab-badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 3px; border-radius: 9px; background: var(--accent); color: var(--accent-ink, #fff); font-size: 11px; line-height: 18px; text-align: center; font-weight: 700; }
+.tk-head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 10px 0 4px; }
+.tk-seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 9px; overflow: hidden; }
+.tk-seg .seg-b { border: 0; border-radius: 0; background: none; padding: 6px 12px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.tk-seg .seg-b + .seg-b { border-left: 1px solid var(--border-strong); }
+.tk-seg .seg-b.on { background: var(--accent-soft); color: var(--text); }
+.tk-ownerbox { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.tk-unlock { display: flex; gap: 6px; align-items: center; }
+.tk-unlock input { width: 150px; }
+.tk-ok { color: var(--ok); font-weight: 650; font-size: 12.5px; }
+.tk-msg { margin: 8px 0; }
+.tk-phase h2 { font-size: 14px; margin: 18px 0 6px; }
+.tk-card { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin: 8px 0; background: var(--surface); display: flex; flex-direction: column; gap: 8px; }
+.tk-card.done { opacity: .65; }
+.tk-top { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+.tk-top h3 { margin: 0; font-size: 15px; }
+.tk-due { font-size: 12px; color: var(--warn); background: var(--warn-soft); padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.tk-detail { margin: 0; font-size: 13px; white-space: pre-wrap; color: var(--text); }
+.tk-meta, .tk-mine, .tk-owner-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tk-meta .hint, .tk-mine .hint { margin: 0; }
+.tk-mine input[type="text"] { flex: 1 1 220px; min-width: 0; }
+.tk-chip { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--sunken); border: 1px solid var(--border); }
+.tk-chip.s-done { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.tk-chip.s-doing { background: var(--accent-soft); border-color: transparent; }
+.tk-chip.s-blocked { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+.tk-note { font-size: 12.5px; color: var(--muted); }
+.tk-empty { padding: 14px 0; }
+.tk-field { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 0; font-size: 12.5px; color: var(--muted); }
+.tk-field input[type="text"], .tk-field textarea, .tk-field select { width: 100%; font: inherit; color: var(--text); }
+.tk-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 560px) { .tk-two { grid-template-columns: 1fr; } .tk-ownerbox { margin-left: 0; } }
