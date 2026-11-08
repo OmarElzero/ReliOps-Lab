@@ -33,7 +33,7 @@ RELIOPS_BRANCH = os.environ.get("RELIOPS_BRANCH", "claude/determined-einstein-mj
 # every switch not chosen for a step is passed as "off", so a stray line in a .env cannot turn one on.
 AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AWARE", "FAULT_EXISTS", "SURVEY", "LEDGER",
                   "SELFCHECK", "SOAK", "CATALOGUE_V2", "K8S_KNOWLEDGE",
-                  "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "NULL_AGENT")
+                  "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "ROUTE_REVIEW", "ROUTE_MULTI", "NULL_AGENT")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
@@ -50,6 +50,8 @@ AGENT_SWITCH_HELP = {
     "CHANGE_DIFF": "R2: a read action listing every object changed after creation and each Deployment's template diff",
     "OUTPUT_TRIM": "R2: merge repeated lines in long observations, keep head and tail",
     "VERIFY_UNDO": "R2: record objects before each fix; on submit, wait, re-check health, undo if worse or no effect",
+    "ROUTE_REVIEW": "R3: needs ROUTING; before the diagnosis is accepted, check it against the procedure's conclusion test; reroute if it fails",
+    "ROUTE_MULTI": "R3: needs ROUTING; one procedure when the abnormal things are in one place, up to two (max three) when scattered or none",
     "ROUTING": "R3: triage, pick a problem category, follow its general procedure (needs knowledge/procedures.md); writes wait for it",
     "NULL_AGENT": "calibration: a do-nothing agent (no model call); a problem it passes has a check that passes without a fix",
 }
@@ -106,6 +108,10 @@ VARIANT_PRESETS = [
     # Round 3 trial (ReliOps change C-014): compared with "R2 B2" on the same dev-12 pairs.
     _variant("R3 B2 +ROUTING", "Round 3 trial", "reliops_v2", "typed+shell", _B2 + ["ROUTING"],
              "B2 plus triage, a problem category and its general procedure (C-014)"),
+    _variant("R3 B2 +ROUTING +REVIEW", "Round 3 trial", "reliops_v2", "typed+shell", _B2 + ["ROUTING", "ROUTE_REVIEW"],
+             "ROUTING plus a review of the route before the diagnosis is accepted (C-016)"),
+    _variant("R3 B2 +ROUTING +MULTI", "Round 3 trial", "reliops_v2", "typed+shell", _B2 + ["ROUTING", "ROUTE_MULTI"],
+             "ROUTING plus one or several procedures depending on where the abnormal things are (C-017)"),
 ] + [_variant(f"R2 B2 +{f}", "Round 2: one switch on B2", "reliops_v2", "typed+shell", _B2 + [f], f"B2 plus {f} only")
      for f in _R2_SWITCHES] \
   + [_variant(f"R2 ALL -{f}", "Round 2: one switch off ALL", "reliops_v2", "typed+shell", [x for x in _ALL if x != f], f"ALL without {f}")
