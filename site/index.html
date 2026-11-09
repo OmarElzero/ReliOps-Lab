@@ -126,6 +126,12 @@ footer{color:var(--muted);font-size:12px}
   </section>
 
   <section class="card">
+    <h2>Tool versions by machine</h2>
+    <div class="scroll"><table id="tools"></table></div>
+    <div class="sub" style="margin-top:8px" id="toolsnote"></div>
+  </section>
+
+  <section class="card">
     <h2>Why runs did not finish</h2>
     <ul class="reasons" id="reasons"></ul>
   </section>
@@ -311,6 +317,7 @@ footer{color:var(--muted);font-size:12px}
     var vs = variantOrder(runs), ps = uniq(runs.map(function(r){ return r.problem_id; })).sort();
     var head = el("tr"); head.appendChild(el("th",{text:"Problem"}));
     vs.forEach(function(v){ head.appendChild(el("th",{cls:"v", text:v})); });
+    head.appendChild(el("th",{cls:"num", text:"Solved (all runs)"}));
     t.appendChild(el("thead",{},[head]));
     var body = el("tbody");
     ps.forEach(function(p){
@@ -319,6 +326,8 @@ footer{color:var(--muted);font-size:12px}
         var rs = runs.filter(function(r){ return r.problem_id === p && vkey(r) === v; });
         var td = el("td"); td.appendChild(cellFor(rs)); tr.appendChild(td);
       });
+      var all = runs.filter(function(r){ return r.problem_id === p && done(r); }), solved = all.filter(function(r){ return r.e2e_pass; }).length;
+      tr.appendChild(el("td",{cls:"num", title:"Completed runs of this problem in view, over every variant and every person", text: all.length ? solved + " of " + all.length : "–"}));
       body.appendChild(tr);
     });
     t.appendChild(body);
@@ -362,6 +371,31 @@ footer{color:var(--muted);font-size:12px}
     });
     t.appendChild(body);
   }
+  function renderTools(runs){
+    var t = $("tools"), note = $("toolsnote"); clear(t);
+    var g = {};
+    runs.forEach(function(r){
+      var v = (r.machine_versions || "").trim() || "not recorded";
+      var o = g[v] || (g[v] = {n:0, people:{}, last:""});
+      o.n++; o.people[r.run_by || "unknown"] = 1;
+      if (String(r.timestamp_utc) > o.last) o.last = String(r.timestamp_utc);
+    });
+    var keys = Object.keys(g).sort(function(a,b){ return g[b].n - g[a].n; });
+    if (!keys.length){ t.appendChild(el("tr",{},[el("td",{cls:"empty",text:"No runs match."})])); note.textContent = ""; return; }
+    var head = el("tr"); ["Tools (kind, kubectl, k8s, docker, helm)","Runs","Run by","Last run"].forEach(function(h, i){ head.appendChild(el("th",{cls:i===1?"num":"",text:h})); });
+    t.appendChild(el("thead",{},[head]));
+    var body = el("tbody");
+    keys.forEach(function(k){
+      var tr = el("tr");
+      tr.appendChild(el("td",{text:k})); tr.appendChild(el("td",{cls:"num",text:String(g[k].n)}));
+      tr.appendChild(el("td",{text:Object.keys(g[k].people).sort().join(", ")})); tr.appendChild(el("td",{text: g[k].last ? ago(g[k].last) : "–"}));
+      body.appendChild(tr);
+    });
+    t.appendChild(body);
+    var real = keys.filter(function(k){ return k !== "not recorded"; });
+    note.textContent = real.length > 1 ? "Machines differ in their tools. Runs from different versions are still recorded, but check that a difference between machines is not a difference between versions."
+      : "Every recorded run used the same tool versions.";
+  }
   function renderReasons(runs){
     var ul = $("reasons"); clear(ul);
     var c = {};
@@ -375,7 +409,7 @@ footer{color:var(--muted);font-size:12px}
   function renderAll(){
     if (!snap) return;
     var runs = selected();
-    renderSummary(runs); renderGrid(runs); renderRecent(runs); renderReasons(runs);
+    renderSummary(runs); renderGrid(runs); renderRecent(runs); renderTools(runs); renderReasons(runs);
     var n = $("notice"), msgs = [], bad = false;
     if (snap.hidden_final_runs) msgs.push(snap.hidden_final_runs + " run(s) on the frozen evaluation set are not shown here on purpose.");
     var sy = snap.sync;
