@@ -106,7 +106,7 @@
   function openQueue(q) {
     Q = q ? JSON.parse(JSON.stringify({ queue_id: q.queue_id, name: q.name, steps: q.steps || [],
                                         machines: q.machines || 1, shares: q.shares || null, split: q.split || "problem", order: q.order || "step" })) : blankQueue();
-    dirty = false;
+    dirty = false; layoutEdited = false;
     pref.set("lab_queue_id", Q.queue_id || "");
     $("q-name").value = Q.name;
     $("q-machines").value = String(Q.machines || 1);
@@ -115,16 +115,21 @@
     loadExpName();
     renderAll(); refreshPreview(true); renderOpen();
   }
+  let layoutEdited = false;   // true only after this page changed machines / split / order itself
   function markDirty() { dirty = true; renderHead(); renderTotals(); refreshPreview(); }
 
   async function saveQueue(quiet) {
     Q.name = $("q-name").value.trim();
     if (!Q.name) { $("q-name").focus(); setStatus("Give the queue a name first.", "warn"); return false; }
     const { ok, data } = await jsonPost("/api/queue", { queue_id: Q.queue_id, name: Q.name, steps: Q.steps, created_by: who(),
-                                                        machines: Q.machines || 1, shares: Q.shares, split: Q.split || "problem", order: Q.order || "step" });
+                                                        machines: Q.machines || 1, shares: Q.shares, split: Q.split || "problem", order: Q.order || "step",
+                                                        layout_edited: layoutEdited });
     if (!ok) { setStatus(data.error || "Could not save the queue.", "warn"); return false; }
     Q.queue_id = data.queue.queue_id;
-    dirty = false;
+    // take the layout the server kept (it may be newer than the one this page opened with)
+    Q.machines = data.queue.machines || 1; Q.shares = data.queue.shares || null; Q.split = data.queue.split || "problem"; Q.order = data.queue.order || "step";
+    $("q-machines").value = String(Q.machines); $("q-split").value = Q.split; $("q-order").value = Q.order;
+    dirty = false; layoutEdited = false;
     pref.set("lab_queue_id", Q.queue_id);
     await loadSaved();
     renderHead();
@@ -265,9 +270,9 @@
     buildBoard(panel, shares, k, keepTop, keepLeft);
   }
   $("q-share").addEventListener("change", (e) => { pref.set(shareKey(), e.target.value); renderShares(); refreshPreview(true); });
-  $("q-order").addEventListener("change", (e) => { Q.order = e.target.value === "cell" ? "cell" : "step"; markDirty(); });
+  $("q-order").addEventListener("change", (e) => { Q.order = e.target.value === "cell" ? "cell" : "step"; layoutEdited = true; markDirty(); });
   $("q-split").addEventListener("change", (e) => {
-    Q.split = e.target.value === "repeat" ? "repeat" : "problem";
+    Q.split = e.target.value === "repeat" ? "repeat" : "problem"; layoutEdited = true;
     Q.shares = null;                                           // hand-made shares are lists of problems
     markDirty(); renderShares();
   });
@@ -275,7 +280,7 @@
     const n = Math.max(1, Math.min(20, Math.round(Number(e.target.value) || 1)));
     e.target.value = String(n);
     if (n === (Q.machines || 1)) return;
-    Q.machines = n;
+    Q.machines = n; layoutEdited = true;
     if (Q.shares && Q.shares.length !== n) Q.shares = null;   // hand-made shares only fit the count they were made for
     markDirty(); renderShares();
   });
@@ -709,7 +714,7 @@
     let data = {};
     try { data = await res.json(); } catch (e) { /* not JSON */ }
     if (!res.ok) return { ok: false, error: data.error || `The Lab answered ${res.status}.` };
-    if (data.queue) { Q.shares = data.queue.shares || null; Q.machines = data.queue.machines || Q.machines; dirty = false; await loadSaved(); renderAll(); }
+    if (data.queue) { Q.shares = data.queue.shares || null; Q.machines = data.queue.machines || Q.machines; dirty = false; layoutEdited = false; await loadSaved(); renderAll(); }
     refreshPreview(true);
     return { ok: true, data };
   }

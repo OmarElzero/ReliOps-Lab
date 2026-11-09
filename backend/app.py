@@ -762,6 +762,7 @@ class QueueIn(BaseModel):
     order: str = "step"             # run step by step, or every step of one (problem, repeat) back to back
     experiment: str = ""       # only used by the preview: the name typed in the run bar
     share: Optional[int] = None     # only used by the preview: the machine share picked on this machine
+    layout_edited: bool = True      # False = this page did not change machines/shares/split/order, so a save must keep the stored ones
 
 
 def _queues() -> list[dict]:
@@ -780,8 +781,16 @@ def queues():
 
 @app.post("/api/queue")
 def save_queue(body: QueueIn):
+    raw = body.model_dump()
+    # A page that opened the queue earlier still holds the old shares. If it did not edit them itself, saving (Run, Continue,
+    # Restart) must not put them back over a redistribution made meanwhile: keep the stored layout.
+    if not body.layout_edited and body.queue_id:
+        stored = _find_queue(body.queue_id)
+        if stored:
+            for k in ("machines", "shares", "split", "order"):
+                raw[k] = stored.get(k)
     try:
-        q = queueplan.clean_queue(body.model_dump())
+        q = queueplan.clean_queue(raw)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return {"ok": True, "queue": store.append("queues", q)}

@@ -281,6 +281,22 @@ class QueueApiTests(TmpRepoCase):
             # nothing left to move from a finished share
             self.assertEqual(c.post(f"/api/queue/{qid}/redistribute", json={"experiment": "X", "from_share": 1}).status_code, 400)
 
+    def test_stale_page_save_does_not_undo_a_redistribution(self):
+        c = self.client
+        probs = [f"p{i}" for i in range(1, 7)]
+        q = c.post("/api/queue", json={"name": "Shared", "machines": 3, "steps": [step(problems=probs, repeat_n=1)]}).json()["queue"]
+        qid, old = q["queue_id"], q["shares"]
+        r = c.post(f"/api/queue/{qid}/move", json={"experiment": "", "units": ["p4"], "to_share": 2})
+        moved = r.json()["queue"]["shares"] if r.status_code == 200 else None
+        self.assertIsNotNone(moved, r.text)
+        self.assertNotEqual(moved, old)
+        # a page that opened the queue before the change saves it again (Run / Continue), without editing the layout
+        body = {"queue_id": qid, "name": "Shared", "machines": 3, "shares": old, "steps": q["steps"], "layout_edited": False}
+        self.assertEqual(c.post("/api/queue", json=body).json()["queue"]["shares"], moved)
+        # a page that really edited the layout still wins
+        body["layout_edited"] = True
+        self.assertEqual(c.post("/api/queue", json=body).json()["queue"]["shares"], old)
+
     def test_move_chosen_problems_and_warn_when_a_share_is_running(self):
         c = self.client
         probs = [f"p{i}" for i in range(1, 5)]
