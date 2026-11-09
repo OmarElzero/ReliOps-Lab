@@ -504,6 +504,63 @@ def cluster_node_problems(timeout: int = 15) -> list[str] | None:
     return [f"{c[0]} ({c[1]})" for c in rows if not c[1].startswith("Ready")]
 
 
+NODE_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$")
+
+
+def _node_exec(node: str, *cmd: str, timeout: int = 90) -> bool:
+    """Runs a command inside a kind node container (docker exec). True when it succeeded. The node name comes from
+    `kubectl get nodes` and is checked against a name pattern before it is used; the command is fixed by the caller."""
+    if not NODE_NAME_RE.match(node) or not shutil.which("docker"):
+        return False
+    try:
+        r = subprocess.run(["docker", "exec", node, *cmd], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def gate_cluster_nodes(out: list, grace_s: int = 60, heal_wait_s: int = 150, sleep=None) -> Iterator[str]:
+    """The check before every run. Yields log lines; leaves the nodes that are still not Ready in `out` (empty = go ahead).
+
+    1. All nodes Ready (or the cluster cannot be checked at all): nothing to do.
+    2. Otherwise wait `grace_s` seconds, because nodes often settle by themselves after a restart.
+    3. Still not Ready: restart containerd, then kubelet, inside each such node, once (the fix found on 9 Nov 2026 when a
+       node reported 'container runtime is down' while containerd was alive), and wait `heal_wait_s` seconds.
+    4. Still not Ready: the caller stops the queue. A run on a broken node costs about 30 minutes and gives no result.
+    """
+    sleep = sleep or time.sleep
+    out.clear()
+    bad = cluster_node_problems()
+    if not bad:
+        return
+    yield (f"[check] cluster nodes not Ready: {', '.join(bad)}. Waiting up to {grace_s} s in case they are still settling.\n")
+    waited = 0
+    while waited < grace_s:
+        sleep(10)
+        waited += 10
+        bad = cluster_node_problems()
+        if bad is not None and not bad:
+            yield "[check] all nodes are Ready now.\n"
+            return
+    names = [b.split(" ")[0] for b in (bad or []) if b]
+    for n in names:
+        yield f"[heal] {n}: restarting containerd, then kubelet (once).\n"
+        ok = _node_exec(n, "systemctl", "restart", "containerd")
+        sleep(20)
+        ok = ok and _node_exec(n, "systemctl", "restart", "kubelet")
+        if not ok:
+            yield f"[heal] {n}: the restart did not work (docker exec failed).\n"
+    waited = 0
+    while waited < heal_wait_s:
+        sleep(10)
+        waited += 10
+        bad = cluster_node_problems()
+        if bad is not None and not bad:
+            yield "[heal] all nodes are Ready again; the run goes ahead.\n"
+            return
+    out.extend(bad or ["the cluster is not answering"])
+
+
 def key_looks_garbled(value: str) -> bool:
     """True when a key value carries text that is never part of a key (whitespace, quotes, '#').
 
@@ -1865,6 +1922,7 @@ def stream_campaign(
         return
     via_base = bool((base_env.get("AGENT_API_BASE") or "").strip())
     streak_limit = max_incomplete_streak(base_env)
+    node_gate = (base_env.get("RELIOPS_NODE_GATE") or "1").strip() != "0"   # check (and heal once) the kind nodes before every run
     retry_limit = max_external_retries(base_env)
     retries: dict[tuple[str, int], int] = {}
     incomplete_streak = 0
@@ -1934,11 +1992,22 @@ def stream_campaign(
             f"\n===== [{i}/{total_runs}] problem={problem}{repeat_note} agent={agent} "
             f"action_space={action_space or '-'} =====\n"
         )
-        bad_nodes = cluster_node_problems()
-        if bad_nodes:
-            yield (f"[check] cluster nodes not Ready right now: {', '.join(bad_nodes)}. SREGym tries to revive a stopped kubelet "
-                   "at the start of each problem, so the run goes ahead; if it ends with 'Cluster not ready', the queue stops "
-                   "and the cluster needs fixing first (kubectl get nodes).\n")
+        if not node_gate:
+            bad_nodes = cluster_node_problems()
+            if bad_nodes:
+                yield (f"[check] cluster nodes not Ready right now: {', '.join(bad_nodes)}. SREGym tries to revive a stopped kubelet "
+                       "at the start of each problem, so the run goes ahead; if it ends with 'Cluster not ready', the queue stops "
+                       "and the cluster needs fixing first (kubectl get nodes).\n")
+        else:
+            still_bad: list = []
+            yield from gate_cluster_nodes(still_bad)
+            if still_bad:
+                yield (f"\n[stopped: cluster nodes are still not Ready after one restart of containerd and kubelet: {', '.join(still_bad)}. "
+                       "A run on a broken node would wait about 30 minutes and give no result. Open Setup & quick run, Cluster health "
+                       "(restart the kind nodes, or rebuild), or run 'kubectl get nodes'. Finished runs are kept; press Continue "
+                       "afterwards and only the missing cells run. Set RELIOPS_NODE_GATE=0 in .env to turn this stop off.]\n")
+                _halt("cluster nodes are not Ready")
+                return
         started_at = time.time()
         run_id = str(__import__("uuid").uuid4())
         recorder = None

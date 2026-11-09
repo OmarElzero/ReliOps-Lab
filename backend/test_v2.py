@@ -661,10 +661,60 @@ class SetupGuardTests(unittest.TestCase):
         self.assertEqual(len(records), 5)
         self.assertTrue(all(r["incomplete_reason"] == "" and r["incomplete_kind"] == "" for r in records))
 
-    def test_nodes_not_ready_before_a_run_give_a_warning_and_the_run_still_goes_ahead(self):
-        log, records = self._run([{"Diagnosis.success": True, "Mitigation.success": True}] * 5, nodes=["kind-worker3 (NotReady)"])
+    def test_with_the_node_gate_off_not_ready_nodes_give_a_warning_and_the_run_still_goes_ahead(self):
+        log, records = self._run([{"Diagnosis.success": True, "Mitigation.success": True}] * 5, env={"RELIOPS_NODE_GATE": "0"},
+                                 nodes=["kind-worker3 (NotReady)"])
         self.assertIn("kind-worker3 (NotReady)", log)
         self.assertEqual(len(records), 5)
+
+    def test_a_node_that_stays_not_ready_after_one_heal_stops_the_queue_before_any_run(self):
+        from unittest import mock
+        with mock.patch.object(self.r.time, "sleep"), mock.patch.object(self.r, "_node_exec", return_value=True) as ex:
+            log, records = self._run([{"Diagnosis.success": True, "Mitigation.success": True}] * 5, nodes=["kind-worker2 (NotReady)"])
+        self.assertEqual(records, [])
+        self.assertIn("[stopped: cluster nodes are still not Ready", log)
+        self.assertIn("kind-worker2 (NotReady)", log)
+        self.assertEqual(self.r.halt_reason(), "cluster nodes are not Ready")
+        self.assertEqual([c.args for c in ex.call_args_list],
+                         [("kind-worker2", "systemctl", "restart", "containerd"), ("kind-worker2", "systemctl", "restart", "kubelet")])
+
+    def test_gate_does_nothing_when_all_nodes_are_ready_or_the_cluster_cannot_be_checked(self):
+        from unittest import mock
+        for answer in ([], None):
+            out = ["x"]
+            with mock.patch.object(self.r, "cluster_node_problems", return_value=answer), mock.patch.object(self.r, "_node_exec") as ex:
+                self.assertEqual(list(self.r.gate_cluster_nodes(out, sleep=lambda s: None)), [])
+            self.assertEqual(out, [])
+            ex.assert_not_called()
+
+    def test_gate_waits_first_and_does_not_restart_a_node_that_settles_by_itself(self):
+        from unittest import mock
+        out = []
+        with mock.patch.object(self.r, "cluster_node_problems", side_effect=[["kind-worker2 (NotReady)"], ["kind-worker2 (NotReady)"], []]), \
+             mock.patch.object(self.r, "_node_exec") as ex:
+            log = "".join(self.r.gate_cluster_nodes(out, sleep=lambda s: None))
+        self.assertIn("all nodes are Ready now", log)
+        self.assertEqual(out, [])
+        ex.assert_not_called()
+
+    def test_gate_restarts_containerd_then_kubelet_once_and_lets_the_run_go_when_the_node_recovers(self):
+        from unittest import mock
+        out = []
+        answers = [["kind-worker2 (NotReady)"]] * 7 + [["kind-worker2 (NotReady)"], []]   # initial + 6 grace polls, then the heal wait
+        with mock.patch.object(self.r, "cluster_node_problems", side_effect=answers), \
+             mock.patch.object(self.r, "_node_exec", return_value=True) as ex:
+            log = "".join(self.r.gate_cluster_nodes(out, sleep=lambda s: None))
+        self.assertIn("[heal] kind-worker2: restarting containerd", log)
+        self.assertIn("all nodes are Ready again", log)
+        self.assertEqual(out, [])
+        self.assertEqual(ex.call_count, 2)
+
+    def test_gate_never_passes_an_odd_node_name_to_docker(self):
+        from unittest import mock
+        with mock.patch.object(self.r.shutil, "which", return_value="/usr/bin/docker"), mock.patch.object(self.r.subprocess, "run") as run:
+            self.assertFalse(self.r._node_exec("kind-worker; rm -rf /", "systemctl", "restart", "containerd"))
+            self.assertFalse(self.r._node_exec("--privileged", "x"))
+        run.assert_not_called()
 
     def test_node_check_reads_kubectl_output_and_stays_quiet_when_it_cannot_run(self):
         out = "kind-control-plane   Ready      control-plane   5d   v1.35\nkind-worker3   NotReady   <none>   5d   v1.35\n" \
