@@ -33,7 +33,7 @@ RELIOPS_BRANCH = os.environ.get("RELIOPS_BRANCH", "claude/determined-einstein-mj
 # every switch not chosen for a step is passed as "off", so a stray line in a .env cannot turn one on.
 AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AWARE", "FAULT_EXISTS", "SURVEY", "LEDGER",
                   "SELFCHECK", "SOAK", "CATALOGUE_V2", "K8S_KNOWLEDGE",
-                  "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "ROUTE_REVIEW", "ROUTE_MULTI", "NULL_AGENT")
+                  "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "ROUTE_REVIEW", "ROUTE_MULTI", "FLAT_ARGS", "NULL_AGENT")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
@@ -51,6 +51,7 @@ AGENT_SWITCH_HELP = {
     "OUTPUT_TRIM": "R2: merge repeated lines in long observations, keep head and tail",
     "VERIFY_UNDO": "R2: record objects before each fix; on submit, wait, re-check health, undo if worse or no effect",
     "ROUTE_REVIEW": "R3: needs ROUTING; before the diagnosis is accepted, check it against the procedure's conclusion test; reroute if it fails",
+    "FLAT_ARGS": "C-019: accept action arguments written next to \"action\" (or under arguments/parameters/input), not only under \"args\"",
     "ROUTE_MULTI": "R3: needs ROUTING; one procedure when the abnormal things are in one place, up to two (max three) when scattered or none",
     "ROUTING": "R3: triage, pick a problem category, follow its general procedure (needs knowledge/procedures.md); writes wait for it",
     "NULL_AGENT": "calibration: a do-nothing agent (no model call); a problem it passes has a check that passes without a fix",
@@ -112,6 +113,15 @@ VARIANT_PRESETS = [
              "ROUTING plus a review of the route before the diagnosis is accepted (C-016)"),
     _variant("R3 B2 +ROUTING +MULTI", "Round 3 trial", "reliops_v2", "typed+shell", _B2 + ["ROUTING", "ROUTE_MULTI"],
              "ROUTING plus one or several procedures depending on where the abnormal things are (C-017)"),
+    # C-019: the model writes arguments next to "action"; the old parser dropped them. Control and treatment both get the fix.
+    _variant("R3 B2 +FLAT", "Round 3 trial", "reliops_v2", "typed+shell", _B2 + ["FLAT_ARGS"],
+             "B2 plus tolerant argument parsing (C-019): the control for the +FLAT routing variants"),
+    _variant("R3 B2 +ROUTING +FLAT", "Round 3 trial", "reliops_v2", "typed+shell", _B2 + ["ROUTING", "FLAT_ARGS"],
+             "ROUTING (C-014) with tolerant argument parsing (C-019)"),
+    _variant("R3 B2 +ROUTING +REVIEW +FLAT", "Round 3 trial", "reliops_v2", "typed+shell", _B2 + ["ROUTING", "ROUTE_REVIEW", "FLAT_ARGS"],
+             "ROUTING plus route review (C-016) with tolerant argument parsing (C-019)"),
+    _variant("R3 B2 +ROUTING +MULTI +FLAT", "Round 3 trial", "reliops_v2", "typed+shell", _B2 + ["ROUTING", "ROUTE_MULTI", "FLAT_ARGS"],
+             "ROUTING plus one-or-several procedures (C-017) with tolerant argument parsing (C-019)"),
 ] + [_variant(f"R2 B2 +{f}", "Round 2: one switch on B2", "reliops_v2", "typed+shell", _B2 + [f], f"B2 plus {f} only")
      for f in _R2_SWITCHES] \
   + [_variant(f"R2 ALL -{f}", "Round 2: one switch off ALL", "reliops_v2", "typed+shell", [x for x in _ALL if x != f], f"ALL without {f}")
