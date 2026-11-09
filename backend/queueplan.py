@@ -347,6 +347,8 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
             c["mine"] = in_share(only, c["problem"], c["repeat"])
         mine = [c for c in cs if c["mine"]]
         counts = {k: sum(1 for c in mine if c["status"] == k) for k in ("pass", "fail", "incomplete", "missing")}
+        # The whole queue (every machine's share), so a machine running one share also sees the team's progress.
+        all_counts = {k: sum(1 for c in cs if c["status"] == k) for k in ("pass", "fail", "incomplete", "missing")}
         n_todo = sum(1 for c in mine if _is_todo(s, c)) if s["enabled"] else 0
         if s["enabled"]:
             total += len(mine)
@@ -367,7 +369,8 @@ def preview(queue: dict, runs: list[dict], manifests: list[dict], experiment: st
         if s["manifest_id"] and manifest is None:
             issue = "frozen campaign not found (was it created on another machine that is not synced?)"
         out.append({"step_id": s["step_id"], "cells": cs, "counts": counts, "total": len(mine), "todo": n_todo,
-                    "issue": issue})
+                    "all_counts": all_counts, "all_total": len(cs),
+                    "all_todo": sum(1 for c in cs if _is_todo(s, c)) if s["enabled"] else 0, "issue": issue})
     info = {"runs": 0, "people": [], "first": "", "last": "", "commits": []}
     if label:
         mine_runs = [r for r in runs if (r.get("experiment") or "") == label and r.get("origin") != "quick"]

@@ -1213,3 +1213,16 @@ class CellOrderProgressTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WholeQueueCountsTests(unittest.TestCase):
+    """A machine running one share also sees the whole queue's counts (9 Nov 2026)."""
+
+    def test_share_counts_and_whole_queue_counts(self):
+        q = queueplan.clean_queue({"name": "q", "machines": 2, "split": "problem", "steps": [step()]})
+        runs = [run(1, "p1", 1, True, experiment="E"), run(2, "p2", 1, False, experiment="E"), run(3, "p2", 2, True, experiment="E")]
+        lists = queueplan.share_lists(q)
+        mine = 1 if "p1" in lists[0] else 2          # the share that holds p1
+        p = queueplan.preview(q, runs, [], "E", share=mine)["steps"][0]
+        self.assertEqual((p["counts"]["pass"], p["counts"]["fail"], p["total"]), (1, 0, 2))
+        self.assertEqual((p["all_counts"]["pass"], p["all_counts"]["fail"], p["all_total"], p["all_todo"]), (2, 1, 4, 1))

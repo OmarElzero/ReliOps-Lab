@@ -320,12 +320,15 @@
     byProblem.forEach((cs, problem) => {
       const other = cs.length && cs[0].mine === false;
       const row = h("div", { class: "camp-row" + (other ? " other" : "") }, h("span", { class: "camp-name", text: problem, title: problem + (other ? " (another machine's share)" : "") }));
+      const passed = cs.filter((c) => c.status === "pass").length, decided = cs.filter((c) => c.status === "pass" || c.status === "fail").length;
       cs.forEach((c) => {
         const isNow = run && run.problem === problem && run.repeat === c.repeat && c.status !== "pass" && c.status !== "fail";
         const sym = isNow ? "…" : { pass: "✓", fail: "✗", incomplete: "?", missing: "·" }[c.status];
         const by = c.by ? ` · run by ${c.by}` : "";
         row.append(h("span", { class: `cell ${isNow ? "running" : c.status}${c.mine === false ? " other" : ""}`, text: sym, title: `${problem}, repeat ${c.repeat}: ${isNow ? "running now" : c.status}${by}` }));
       });
+      row.append(h("span", { class: "camp-sum" + (decided && !passed ? " bad" : passed ? " ok" : ""), text: decided ? `${passed}/${cs.length} solved` : `0/${cs.length}`,
+                             title: `${problem}: ${passed} fully solved (diagnosis and fix) of ${cs.length} repeats; ${decided} with a result so far` }));
       grid.append(row);
     });
     return grid;
@@ -366,10 +369,20 @@
           h("span", { class: "b-fail", style: `width:${(100 * c.fail) / n}%` }),
           h("span", { class: "b-inc", style: `width:${(100 * c.incomplete) / n}%` })));
         li.append(h("div", { class: "step-counts" },
-          h("span", {}, h("b", { text: c.pass + c.fail }), ` of ${sp.total} done${myShare() ? " in your share" : ""}`),
+          myShare() ? h("span", { class: "who-lbl", text: "Your share:" }) : null,
+          h("span", {}, h("b", { text: c.pass + c.fail }), ` of ${sp.total} done`),
           h("span", {}, h("b", { text: c.pass }), " passed"), h("span", {}, h("b", { text: c.fail }), " failed"),
           c.incomplete ? h("span", { title: "Ran, but no outcome was recorded. Never counted as a failure; run again on the next start." }, h("b", { text: c.incomplete }), " incomplete") : null,
           h("span", {}, h("b", { text: s.enabled === false ? 0 : sp.todo }), " to run")));
+        if (myShare() && sp.all_counts) {
+          const a = sp.all_counts;
+          li.append(h("div", { class: "step-counts all" },
+            h("span", { class: "who-lbl", text: "Whole queue (all machines):" }),
+            h("span", {}, h("b", { text: a.pass + a.fail }), ` of ${sp.all_total} done`),
+            h("span", {}, h("b", { text: a.pass }), " passed"), h("span", {}, h("b", { text: a.fail }), " failed"),
+            a.incomplete ? h("span", {}, h("b", { text: a.incomplete }), " incomplete") : null,
+            h("span", {}, h("b", { text: s.enabled === false ? 0 : sp.all_todo }), " to run")));
+        }
         if (sp.issue) li.append(h("p", { class: "step-issue", text: sp.issue }));
         const det = h("details", { class: "step-cells", "data-step": s.step_id }, h("summary", { text: "Show every problem and repeat" }), cellsGrid(s, sp));
         if (openCells.has(s.step_id)) det.open = true;
@@ -499,9 +512,10 @@
         h("td", { class: "bar-cell" }, sp ? h("div", { class: "bar", role: "img", "aria-label": `${c.pass} passed, ${c.fail} failed, ${c.incomplete} incomplete of ${sp.total}` },
           h("span", { class: "b-pass", style: `width:${(100 * c.pass) / n}%` }), h("span", { class: "b-fail", style: `width:${(100 * c.fail) / n}%` }),
           h("span", { class: "b-inc", style: `width:${(100 * c.incomplete) / n}%` })) : "—"),
-        h("td", { class: "num", text: sp ? `${c.pass + c.fail}/${sp.total}` : "—", title: "done / total" }),
-        h("td", { class: "num pp-ok", text: sp ? String(c.pass) : "" }),
-        h("td", { class: "num pp-bad", text: sp ? String(c.fail) : "" }),
+        h("td", { class: "num", text: sp ? `${c.pass + c.fail}/${sp.total}` + (myShare() && sp.all_counts ? ` · ${sp.all_counts.pass + sp.all_counts.fail}/${sp.all_total}` : "") : "—",
+                  title: myShare() ? "done / total: your share · whole queue" : "done / total" }),
+        h("td", { class: "num pp-ok", text: sp ? String(c.pass) + (myShare() && sp.all_counts ? ` · ${sp.all_counts.pass}` : "") : "", title: myShare() ? "passed: your share · whole queue" : "" }),
+        h("td", { class: "num pp-bad", text: sp ? String(c.fail) + (myShare() && sp.all_counts ? ` · ${sp.all_counts.fail}` : "") : "", title: myShare() ? "failed: your share · whole queue" : "" }),
         h("td", { class: "num", text: sp ? (s.enabled === false ? "0" : String(sp.todo)) : "", title: "cells still to run" }),
         h("td", {}, h("label", { class: "switch", title: "Switched-off steps are skipped when the queue runs" },
           h("input", { type: "checkbox", checked: s.enabled !== false, onchange: (e) => { s.enabled = e.target.checked; markDirty(); renderSteps(); } }), "On")),
@@ -537,6 +551,7 @@
         let p = out.problems.get(c.problem);
         if (!p) { p = { problem: c.problem, pass: 0, fail: 0, inc: 0, missing: 0, steps: [], by: new Map() }; out.problems.set(c.problem, p); }
         p[c.status === "pass" ? "pass" : c.status === "fail" ? "fail" : c.status === "incomplete" ? "inc" : "missing"]++;
+        if (c.mine !== false) { p.myN = (p.myN || 0) + 1; if (c.status === "pass") p.myPass = (p.myPass || 0) + 1; }
         (p.steps[si] = p.steps[si] || { name: s.name, pass: 0, fail: 0, inc: 0, missing: 0 })[c.status === "pass" ? "pass" : c.status === "fail" ? "fail" : c.status === "incomplete" ? "inc" : "missing"]++;
         if (c.by) {
           p.by.set(c.by, (p.by.get(c.by) || 0) + 1);
@@ -601,12 +616,14 @@
       return h("tr", {},
         h("td", { class: "pn", text: p.problem }),
         h("td", { class: "num", text: `${done}/${n}` }),
-        h("td", { class: "num " + (done && !p.pass ? "pp-bad" : ""), text: done ? `${Math.round(100 * p.pass / done)}%` : "—" }),
+        h("td", { class: "num " + (done && !p.pass ? "pp-bad" : p.pass ? "pp-ok" : ""), text: `${p.pass} of ${n}`,
+                  title: `fully solved (diagnosis and fix) in ${p.pass} of ${n} cells of the whole queue (all steps × repeats, all machines); ${done} with a result so far` }),
+        myShare() ? h("td", { class: "num", text: p.myN ? `${p.myPass || 0} of ${p.myN}` : "—", title: "the same, counting only your share" }) : null,
         h("td", {}, heat),
         h("td", {}, chips.length ? chips : h("span", { class: "hint", text: "nobody yet" })));
     });
     $("ov-prob-hint").textContent = `${rows.length} problems × ${d.enabled.length} steps; each square is one step (all repeats of the problem)`;
-    $("ov-problems").replaceChildren(h("table", { class: "ov" }, h("thead", {}, h("tr", {}, ...["Problem", "Done", "Pass", "Steps", "Who ran it"].map((t) => h("th", { text: t })))), h("tbody", {}, rows)),
+    $("ov-problems").replaceChildren(h("table", { class: "ov" }, h("thead", {}, h("tr", {}, ...["Problem", "Done", "Solved (team)", ...(myShare() ? ["Solved (yours)"] : []), "Steps", "Who ran it"].map((t) => h("th", { text: t })))), h("tbody", {}, rows)),
       h("div", { class: "legend" }, h("span", { text: "Faded square = some repeats not run yet." }), ...[["pass", "passed"], ["mix", "mixed"], ["fail", "failed"], ["inc", "incomplete"]].map(([c, t]) => h("span", {}, h("i", { class: "heat-key", style: `background:${{ pass: "var(--ok)", fail: "var(--bad)", mix: "linear-gradient(135deg,var(--ok) 50%,var(--bad) 50%)", inc: "#e3b04b" }[c]}` }), t))));
   }
   function renderOvPeople(d) {
