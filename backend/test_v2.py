@@ -1625,3 +1625,42 @@ class SwitchKnownByAgentCodeTests(unittest.TestCase):
         with mock.patch.object(runner.shutil, "which", side_effect=lambda c: "/x/" + c if c in ("kind", "helm") else None), \
              mock.patch.object(runner, "_probe", side_effect=fake):
             self.assertEqual(runner.machine_versions(), "kind 0.30.0; helm v3.16.4")
+
+
+class AgentImageStaleTests(unittest.TestCase):
+    """A run must not use an agent image older than the agent copy it is built from (9 Nov 2026: FLAT_ARGS was ignored)."""
+
+    def _setup(self, created_iso, file_age_s):
+        import time as _t
+        d = tempfile.mkdtemp()
+        f = Path(d) / "clients" / "reliops_v2" / "features.py"
+        f.parent.mkdir(parents=True)
+        f.write_text("x")
+        t = _t.time() - file_age_s
+        os.utime(f, (t, t))
+        out = mock.Mock(returncode=0 if created_iso else 1, stdout=created_iso or "")
+        return [mock.patch.object(runner, "sregym_dir", lambda: Path(d)),
+                mock.patch.object(runner.shutil, "which", lambda _: "/usr/bin/docker"),
+                mock.patch.object(runner.subprocess, "run", lambda *a, **k: out)]
+
+    def _check(self, created_iso, file_age_s, agent="reliops_v2"):
+        patches = self._setup(created_iso, file_age_s)
+        for p in patches:
+            p.start()
+        try:
+            return runner.agent_image_stale(agent)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_copy_newer_than_image_means_rebuild(self):
+        self.assertIn("changed after the agent image was built", self._check("2020-01-01T00:00:00.000000000Z", 10))
+
+    def test_image_newer_than_copy_means_no_rebuild(self):
+        self.assertIsNone(self._check("2999-01-01T00:00:00.000000000Z", 10))
+
+    def test_missing_image_means_build(self):
+        self.assertEqual(self._check(None, 10), "there is no agent image yet")
+
+    def test_other_agents_are_left_alone(self):
+        self.assertIsNone(self._check("2020-01-01T00:00:00Z", 10, agent="stratus"))

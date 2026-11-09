@@ -1450,7 +1450,10 @@
       const when = t0.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
       if (running) {
         $("q-now-title").textContent = job.kind === "queue" ? `Running "${job.name}"` : job.kind === "cluster" ? `Cluster repair: ${job.name}` : "Quick run in progress";
-        $("q-now-sub").textContent = `started ${when}`;
+        // The queue open below may not be the one running (a copy, or an older queue with other variant names). Then its
+        // cards cannot show the running cell or the new results, which looks like the Lab is stuck; say so instead.
+        const other = job.kind === "queue" && Q && !queueRunning();
+        $("q-now-sub").textContent = `started ${when}` + (other ? ` · not the queue open below: open "${job.name}" to see its cells and results` : "");
         const main = [];
         if (p.step && p.steps) main.push(`Step ${p.step}/${p.steps}: ${p.step_name}`);
         $("q-now-main").textContent = p.problem ? `${main.join(" · ")}${main.length ? "  →  " : ""}${p.problem}${p.repeat_n > 1 ? ` (repeat ${p.repeat}/${p.repeat_n})` : ""}` : (main.join(" · ") || "starting…");

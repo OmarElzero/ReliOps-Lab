@@ -1234,6 +1234,33 @@ def machine_versions() -> str:
     return "; ".join(parts)
 
 
+def agent_image_stale(agent: str) -> str | None:
+    """Why the agent image must be rebuilt before this run, or None. The image is built from the agent copy in the SREGym
+    clone (clients/<agent>, written by scripts/sync_agent.sh). If any file there is newer than the image, the image holds
+    old code and a run would silently use it (9 Nov 2026: a run asked for FLAT_ARGS and the agent never saw it)."""
+    if agent not in OUR_AGENTS or not shutil.which("docker"):
+        return None
+    copy = sregym_dir() / "clients" / agent
+    if not copy.is_dir():
+        return None
+    try:
+        r = subprocess.run(["docker", "image", "inspect", "-f", "{{.Created}}", "sregym-agent-base:latest"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:  # noqa: BLE001  docker not answering: leave the decision to the run
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return "there is no agent image yet"
+    try:
+        from datetime import datetime
+        created = datetime.fromisoformat(r.stdout.strip().replace("Z", "+00:00")[:26].rstrip(".") + "+00:00").timestamp()
+    except ValueError:
+        return None
+    newest = max((f.stat().st_mtime for f in copy.rglob("*") if f.is_file() and "__pycache__" not in f.parts), default=0.0)
+    if newest > created:
+        return "the agent code in the SREGym clone changed after the agent image was built"
+    return None
+
+
 def agent_switch_problem(agent: str, switches: list[str]) -> str | None:
     """A problem that would make a run ignore a requested switch, or None. A switch name the agent code on this machine
     does not know is silently ignored by the agent, so the run would record the switch and not apply it. Checked in the
@@ -1823,6 +1850,11 @@ def stream_campaign(
         base_env.setdefault(k, v)
 
     pool = key_pool(base_env)
+    if not force_build:
+        stale = agent_image_stale(agent)
+        if stale:
+            force_build = True
+            yield f"[build] {stale}, so the agent image is rebuilt before the first run (a few minutes, once).\n"
     for w in preflight_warnings(base_env, model, agent, rebuilding=bool(force_build)):
         yield w + "\n"
     setup_problem = agent_setup_problem(agent) or agent_switch_problem(agent, switches)
