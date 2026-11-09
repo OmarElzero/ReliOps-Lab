@@ -52,7 +52,7 @@ AGENT_SWITCH_HELP = {
     "VERIFY_UNDO": "R2: record objects before each fix; on submit, wait, re-check health, undo if worse or no effect",
     "ROUTE_REVIEW": "R3: needs ROUTING; before the diagnosis is accepted, check it against the procedure's conclusion test; reroute if it fails",
     "FLAT_ARGS": "C-019: accept action arguments written next to \"action\" (or under arguments/parameters/input), not only under \"args\"",
-    "PROC_V2": "C-020: needs ROUTING; procedures v2 (rule-out step 0, IF branches, EXIT, known noise, ready commands) and an event-age rule in triage",
+    "PROC_V2": "C-020/C-021: needs ROUTING; procedures v2 (rule-out step 0, IF branches, EXIT, known noise, ready commands, Ingress first), an event-age rule in triage, and the read action inspect_tls_secret",
     "ROUTE_MULTI": "R3: needs ROUTING; one procedure when the abnormal things are in one place, up to two (max three) when scattered or none",
     "ROUTING": "R3: triage, pick a problem category, follow its general procedure (needs knowledge/procedures.md); writes wait for it",
     "NULL_AGENT": "calibration: a do-nothing agent (no model call); a problem it passes has a check that passes without a fix",
