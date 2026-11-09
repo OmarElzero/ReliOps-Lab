@@ -33,7 +33,7 @@ RELIOPS_BRANCH = os.environ.get("RELIOPS_BRANCH", "claude/determined-einstein-mj
 # every switch not chosen for a step is passed as "off", so a stray line in a .env cannot turn one on.
 AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AWARE", "FAULT_EXISTS", "SURVEY", "LEDGER",
                   "SELFCHECK", "SOAK", "CATALOGUE_V2", "K8S_KNOWLEDGE",
-                  "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "ROUTE_REVIEW", "ROUTE_MULTI", "FLAT_ARGS", "PROC_V2", "NULL_AGENT")
+                  "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "ROUTE_REVIEW", "ROUTE_MULTI", "FLAT_ARGS", "PROC_V2", "REF", "EXCAP", "FLOW", "NULL_AGENT")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
@@ -53,6 +53,9 @@ AGENT_SWITCH_HELP = {
     "ROUTE_REVIEW": "R3: needs ROUTING; before the diagnosis is accepted, check it against the procedure's conclusion test; reroute if it fails",
     "FLAT_ARGS": "C-019: accept action arguments written next to \"action\" (or under arguments/parameters/input), not only under \"args\"",
     "PROC_V2": "C-020/C-021: needs ROUTING; procedures v2 (rule-out step 0, IF branches, EXIT, known noise, ready commands, Ingress first), an event-age rule in triage, and the read action inspect_tls_secret",
+    "REF": "C-023: needs ROUTING and PROC_V2; reference entries by failure family (knowledge/reference.md), listed under a loaded procedure, read with load_reference (max 3 per run)",
+    "EXCAP": "C-024: needs ROUTING; three fixed examples of reasoning moves (start-up noise vs fault, EXIT with a rule-out, evidence before a write)",
+    "FLOW": "C-025: output caps per tool, older observations as one-line digests (read action reopen), the loaded procedure pinned, mitigation starts from a hand-off",
     "ROUTE_MULTI": "R3: needs ROUTING; one procedure when the abnormal things are in one place, up to two (max three) when scattered or none",
     "ROUTING": "R3: triage, pick a problem category, follow its general procedure (needs knowledge/procedures.md); writes wait for it",
     "NULL_AGENT": "calibration: a do-nothing agent (no model call); a problem it passes has a check that passes without a fix",
@@ -83,6 +86,13 @@ _ALL = _B2 + _R2_SWITCHES
 def _variant(id_: str, group: str, agent_id: str, space: str, switches: list[str], help_: str, needs_notes: bool = False) -> dict:
     return {"id": id_, "group": group, "agent_id": agent_id, "action_space": space, "switches": switches, "help": help_,
             "needs_notes": needs_notes}
+
+
+# Round 4 (ReliOps plan 18): the 2 x 2 x 2 design of REF (C-023), EXCAP (C-024) and FLOW (C-025) on A, the R3 variant with
+# procedures v2 and route review. "R4 A" is A again, run beside the others so every comparison is paired on the same
+# machine and agent code.
+_R4_A = _B2 + ["ROUTING", "ROUTE_REVIEW", "FLAT_ARGS", "PROC_V2"]
+_R4_COMBOS = [(), ("REF",), ("EXCAP",), ("FLOW",), ("REF", "EXCAP"), ("REF", "FLOW"), ("EXCAP", "FLOW"), ("REF", "EXCAP", "FLOW")]
 
 
 VARIANT_PRESETS = [
@@ -129,7 +139,12 @@ VARIANT_PRESETS = [
     _variant("R3 B2 +ROUTING +REVIEW +FLAT +PROCV2", "Round 3 trial", "reliops_v2", "typed+shell",
              _B2 + ["ROUTING", "ROUTE_REVIEW", "FLAT_ARGS", "PROC_V2"],
              "procedures v2 (C-020) plus route review (C-016), tolerant argument parsing (C-019)"),
-] + [_variant(f"R2 B2 +{f}", "Round 2: one switch on B2", "reliops_v2", "typed+shell", _B2 + [f], f"B2 plus {f} only")
+] + [_variant("R4 A" + "".join(f" +{x}" for x in combo), "Round 4: REF / EXCAP / FLOW", "reliops_v2", "typed+shell",
+              _R4_A + list(combo),
+              "A = procedures v2 + route review" + ("".join(f" + {x}" for x in combo) or " (re-run beside the R4 variants)")
+              + " (ReliOps plan 18, C-023 to C-025)")
+     for combo in _R4_COMBOS] \
+  + [_variant(f"R2 B2 +{f}", "Round 2: one switch on B2", "reliops_v2", "typed+shell", _B2 + [f], f"B2 plus {f} only")
      for f in _R2_SWITCHES] \
   + [_variant(f"R2 ALL -{f}", "Round 2: one switch off ALL", "reliops_v2", "typed+shell", [x for x in _ALL if x != f], f"ALL without {f}")
      for f in _R2_SWITCHES]
