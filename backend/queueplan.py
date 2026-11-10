@@ -104,6 +104,10 @@ def clean_queue(raw: dict) -> dict:
     order = raw.get("order") or "step"
     if order not in ORDERS:
         raise ValueError("order must be 'step' or 'cell'")
+    if shares is None and split == "repeat" and machines > 1 and not raw.get("queue_id"):
+        # A new queue split by repeat gets its shares written down once, dealt so that one problem's repeats land on
+        # different machines (see deal_repeat_shares). Existing queues keep the plain round-robin they started with.
+        shares = deal_repeat_shares({"steps": steps, "split": split}, machines)
     return {"queue_id": raw.get("queue_id") or uuid.uuid4().hex[:10], "name": name, "steps": steps,
             "created_by": raw.get("created_by") or "unknown", "machines": machines, "shares": shares, "split": split,
             "order": order}
@@ -145,6 +149,24 @@ def queue_units(queue: dict) -> list[str]:
             reps[p] = max(reps.get(p, 0), int(s.get("repeat_n") or 1))
     top = max(reps.values(), default=1)
     return [unit(p, r) for r in range(1, top + 1) for p in probs if r <= reps[p]]
+
+
+def deal_repeat_shares(queue: dict, machines: int) -> list[list[str]]:
+    """Shares of "problem #r" units for a queue split by repeat. Plain round-robin over the repeat-major unit list puts
+    every repeat of a problem on the same machine whenever the problem count is a multiple of the machine count (12
+    problems on 4 machines: machine 1 gets problems 1, 5 and 9 three times), which is a split by problem in disguise:
+    one broken machine then loses whole problems. Here repeat r is shifted by r - 1 machines in that case, so the
+    repeats of one problem go to different machines and the shares stay the same size. When the problem count is not
+    a multiple, round-robin already mixes them and is kept as it is."""
+    probs = queue_problems(queue)
+    units = queue_units(queue)
+    n = max(1, int(machines))
+    out: list[list[str]] = [[] for _ in range(n)]
+    rotate = bool(probs) and len(probs) % n == 0
+    for k, u in enumerate(units):
+        r = int(u.rsplit("#", 1)[1]) if "#" in u else 1
+        out[(k + (r - 1 if rotate else 0)) % n].append(u)
+    return out
 
 
 def queue_problems(queue: dict) -> list[str]:

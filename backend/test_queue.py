@@ -612,6 +612,32 @@ class QueueApiTests(TmpRepoCase):
         self.assertIn("[[DONE]]", r.text)
 
 
+class RepeatDealTests(unittest.TestCase):
+    """A new queue split by repeat must not turn into a split by problem when the problem count is a multiple of the
+    machine count (R4: 12 problems on 4 machines gave each machine 3 whole problems)."""
+
+    def _q(self, machines, **kw):
+        return queueplan.clean_queue({"name": "x", "machines": machines, "split": "repeat",
+                                      "steps": [step(problems=[f"p{i}" for i in range(1, 13)], repeat_n=3)], **kw})
+
+    def test_repeats_of_one_problem_go_to_different_machines(self):
+        q = self._q(4)
+        self.assertEqual([len(x) for x in q["shares"]], [9, 9, 9, 9])
+        owner = {u: i for i, sh in enumerate(q["shares"]) for u in sh}
+        for i in range(1, 13):
+            self.assertEqual(len({owner[f"p{i} #{r}"] for r in (1, 2, 3)}), 3, f"p{i}")
+        self.assertEqual(queueplan.share_lists(q), q["shares"])
+
+    def test_round_robin_kept_when_it_already_mixes(self):
+        q = self._q(5)
+        self.assertEqual(q["shares"], queueplan.share_lists({**q, "shares": None}))
+
+    def test_existing_queues_are_not_re_dealt(self):
+        self.assertIsNone(self._q(4, queue_id="abc")["shares"])
+        self.assertIsNone(queueplan.clean_queue({"name": "x", "machines": 4, "split": "problem",
+                                                 "steps": [step(problems=["a", "b", "c", "d"])]})["shares"])
+
+
 class MachineShareTests(unittest.TestCase):
     """One queue, shown whole to everyone; each machine picks share k of N and runs only that share's problems."""
 
