@@ -144,6 +144,8 @@ VARIANT_PRESETS = [
               "A = procedures v2 + route review" + ("".join(f" + {x}" for x in combo) or " (re-run beside the R4 variants)")
               + " (ReliOps plan 18, C-023 to C-025)")
      for combo in _R4_COMBOS] \
+  + [_variant("R4 B2 +FLAT", "Round 4: REF / EXCAP / FLOW", "reliops_v2", "typed+shell", _B2 + ["FLAT_ARGS"],
+              "plain control without routing, run beside the R4 variants (in R3 it fixed more than every routing variant)")] \
   + [_variant(f"R2 B2 +{f}", "Round 2: one switch on B2", "reliops_v2", "typed+shell", _B2 + [f], f"B2 plus {f} only")
      for f in _R2_SWITCHES] \
   + [_variant(f"R2 ALL -{f}", "Round 2: one switch off ALL", "reliops_v2", "typed+shell", [x for x in _ALL if x != f], f"ALL without {f}")
