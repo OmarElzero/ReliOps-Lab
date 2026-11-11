@@ -31,7 +31,7 @@
     d3: "D3 Scope: does it avoid blaming what the card says not to blame, and avoid contradicting claims?",
   };
   const st = { plans: [], audit: store.get("lab_audit_id", ""), labeler: store.get("lab_audit_labeler", ""), mine: null, cur: null,
-               ans: {}, story: null, msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
+               ans: {}, story: null, card: null, prob: "", cards: {}, manage: null, confirmDelete: false, editMsg: "", msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
 
   async function ownerCall(method, url, body) {
     const res = await fetch(url, { method, headers: { "Content-Type": "application/json", "x-owner-password": pw.get() }, body: body ? JSON.stringify(body) : undefined });
@@ -41,7 +41,7 @@
     return { ok: res.ok, data: out };
   }
 
-  async function load() {
+  async function load(keep) {
     try { st.plans = (await jsonGet("/api/audit/plans")).plans || []; } catch (e) { st.plans = []; }
     if (!st.plans.find((p) => p.audit_id === st.audit)) st.audit = st.plans[0] ? st.plans[0].audit_id : "";
     const plan = st.plans.find((p) => p.audit_id === st.audit);
@@ -49,9 +49,21 @@
       const me = (typeof who === "function" ? who() : "").toLowerCase();
       st.labeler = (plan.labelers || []).find((l) => l.toLowerCase() === me) || "";
     }
-    await loadMine();
+    if (!st.audit) { st.mine = null; st.manage = null; }
+    else if (keep && st.mine) {
+      try {
+        const d = await (await fetch(`/api/audit/mine?audit_id=${encodeURIComponent(st.audit)}&labeler=${encodeURIComponent(st.labeler)}`)).json();
+        st.mine = d.items ? d : null;
+        if (st.mine && !st.mine.items.find((i) => i.item_id === st.cur)) { const f = st.mine.items.find((i) => !i.done) || st.mine.items[0]; select(f ? f.item_id : null); }
+      } catch (e) { /* keep the old list */ }
+    } else await loadMine();
     if (pw.get() && !st.owner) await tryUnlock(pw.get(), true);
+    if (st.owner && st.audit) await loadManage();
     render();
+  }
+  async function loadManage() {
+    const r = await ownerCall("GET", `/api/audit/manage?audit_id=${encodeURIComponent(st.audit)}`);
+    st.manage = r.ok ? r.data : null;
   }
   async function loadMine() {
     st.mine = null;
@@ -61,11 +73,13 @@
     if (!r.ok) { st.msg = d.error || "Could not load your items."; return; }
     st.mine = d;
     const open = d.items.find((i) => i.item_id === st.cur) || d.items.find((i) => !i.done) || d.items[0] || null;
-    select(open ? open.item_id : null);
+    if (!(open && open.item_id === st.cur)) select(open ? open.item_id : null);
   }
   function select(id) {
     st.cur = id;
     const it = st.mine && st.mine.items.find((i) => i.item_id === id);
+    if (it) st.prob = it.problem_id || "";
+    st.card = null;
     st.ans = it && it.mine ? { ...it.mine } : { d1: null, d2: null, d3: null, confidence: null, reason: "" };
     st.story = null;
   }
@@ -84,7 +98,7 @@
     st.msg = "";
     const wasDone = it.done;
     await loadMine();
-    if (!wasDone) { const next = st.mine.items.find((i) => !i.done); if (next) select(next.item_id); }
+    if (!wasDone) { const next = st.mine.items.find((i) => !i.done && (i.problem_id || "?") === st.prob) || st.mine.items.find((i) => !i.done); if (next) select(next.item_id); }
     try { st.plans = (await jsonGet("/api/audit/plans")).plans || []; } catch (e) { /* ignore */ }
     render();
   }
@@ -112,6 +126,23 @@
             h("span", { class: "hint", text: "The judge only saw the diagnosis text above, so judge that first. Opening the story is recorded with your label." }))
         : h("div", {}, h("div", { class: "hint", text: "Agent story (opened; recorded with your label)" }), h("pre", { class: "detail-body", style: "max-height:420px;overflow:auto", text: st.story })));
   }
+  function cardBox(it) {
+    const id = it.problem_id;
+    const toggle = async () => {
+      if (st.card !== null) { st.card = null; render(); return; }
+      st.card = "loading…"; render();
+      if (!(id in st.cards)) {
+        try { const r = await fetch("/api/card/" + encodeURIComponent(id)); st.cards[id] = await r.text(); } catch (e) { st.cards[id] = "Could not load the card."; }
+      }
+      st.card = st.cards[id]; render();
+    };
+    return h("div", { class: "aa-q" },
+      h("div", { class: "row" },
+        h("button", { type: "button", class: "secondary", onclick: toggle, text: st.card === null ? "Show the full problem card" : "Hide the problem card" }),
+        h("button", { type: "button", class: "secondary", onclick: () => window.openProblem && window.openProblem(id), text: "Open in the Problems tab" }),
+        h("span", { class: "hint", text: "Your answers stay here when you come back." })),
+      st.card === null ? null : h("pre", { class: "detail-body", style: "max-height:420px;overflow:auto", text: st.card }));
+  }
   function itemForm() {
     const it = st.mine.items.find((i) => i.item_id === st.cur);
     if (!it) return h("p", { class: "hint", text: "No items." });
@@ -120,6 +151,7 @@
     return h("div", {},
       h("div", { class: "cfg-label", text: `${it.item_id} · ${it.problem_id || "?"}` }),
       h("div", { class: "label-text", text: it.diagnosis_text }),
+      cardBox(it),
       storyBox(it),
       h("div", { class: "label-expected", text: it.expected || "No problem card for this problem yet. Label against the problem's rubric and say so in the reason." }),
       yn("d1"), yn("d2"), yn("d3"),
@@ -144,8 +176,15 @@
     const body = [h("div", { class: "row" }, sel, me), h("p", { class: "hint", text: prog })];
     if (!st.labeler) body.push(h("p", { class: "hint", text: "Pick your name to see your items." }));
     else if (st.mine) {
-      body.push(h("p", { class: "hint", text: `${st.mine.done} of ${st.mine.total} done. Work alone; do not discuss items until everyone has finished.` }));
-      body.push(h("div", { class: "row aa-chips" }, st.mine.items.map((i) =>
+      body.push(h("p", { class: "hint", text: `${st.mine.done} of ${st.mine.total} done. Each problem below is yours to learn once: read its card, then label all its runs. Work alone; do not discuss items until everyone has finished.` }));
+      const probs = [...new Set(st.mine.items.map((i) => i.problem_id || "?"))];
+      body.push(h("div", { class: "row aa-chips" }, probs.map((p) => {
+        const its = st.mine.items.filter((i) => (i.problem_id || "?") === p);
+        const dn = its.filter((i) => i.done).length;
+        return h("button", { type: "button", class: p === st.prob ? "primary" : "secondary", title: p,
+          onclick: () => { const first = its.find((i) => !i.done) || its[0]; select(first.item_id); st.msg = ""; render(); }, text: `${p} ${dn}/${its.length}` });
+      })));
+      body.push(h("div", { class: "row aa-chips" }, st.mine.items.filter((i) => (i.problem_id || "?") === st.prob).map((i) =>
         h("button", { type: "button", class: i.item_id === st.cur ? "primary" : "secondary", onclick: () => { select(i.item_id); st.msg = ""; render(); }, text: `${i.done ? "✓ " : ""}${i.item_id}` }))));
       body.push(itemForm());
     } else if (st.msg) body.push(h("p", { class: "hint", style: "color:var(--bad)", text: st.msg }));
@@ -171,9 +210,11 @@
     const name = h("input", { placeholder: "audit name, e.g. Final audit", value: store.get("lab_audit_name", "Final audit") });
     const people = h("input", { placeholder: "labelers, comma separated", value: store.get("lab_audit_people", "Omar Betawy, Noura, Zeinab Mohamed"), style: "flex:1 1 320px" });
     const groups = h("textarea", { rows: "3", style: "width:100%" , value: store.get("lab_audit_groups", cfg.default_groups) });
+    const assign = h("select", { style: "width:auto" }, h("option", { value: "by_problem", text: "Whole problems per person (recommended)" }), h("option", { value: "spread", text: "Spread runs round-robin" }));
+    const overlap = h("input", { type: "number", min: "0", max: "5", value: store.get("lab_audit_overlap", "1"), style: "width:80px", title: "problems each person also labels from the previous person's set" });
     const out = h("p", { class: "hint", text: st.preview || "" });
-    const body = () => ({ name: name.value, labelers: people.value.split(",").map((s) => s.trim()).filter(Boolean), groups: groups.value, by: (typeof who === "function" ? who() : "") });
-    const remember = () => { store.set("lab_audit_name", name.value); store.set("lab_audit_people", people.value); store.set("lab_audit_groups", groups.value); };
+    const body = () => ({ name: name.value, labelers: people.value.split(",").map((s) => s.trim()).filter(Boolean), groups: groups.value, by: (typeof who === "function" ? who() : ""), assign: assign.value, overlap_problems: parseInt(overlap.value || "0", 10) || 0 });
+    const remember = () => { store.set("lab_audit_name", name.value); store.set("lab_audit_people", people.value); store.set("lab_audit_groups", groups.value); store.set("lab_audit_overlap", overlap.value); };
     const go = async (preview) => {
       remember();
       const r = await ownerCall("POST", "/api/audit/draw", { ...body(), preview });
@@ -181,19 +222,58 @@
       if (r.ok && !preview) await load(); else render();
     };
     box.append(
-      h("p", { class: "hint", text: "Draw once, on the final exports. The sample stores run ids, so later runs cannot change it, and it freezes when the first label arrives. Half of every stratum is judge-pass and half judge-fail; the first 3 runs of each stratum are labelled by everyone." }),
+      h("p", { class: "hint", text: "Draw once, on the final exports; the sample stores run ids, so later runs cannot change it. Half of every stratum is judge-pass and half judge-fail. With whole problems per person, nobody learns more problems than needed; the overlap problems (labelled by two people) are what measure how far the labelers agree. After labels arrive you can still redistribute, add runs or remove runs below, but not draw the same name again." }),
       h("div", { class: "row" }, name, people), h("p", { class: "hint", text: `Known names on this Lab: ${(cfg.people || []).join(", ") || "none yet"}. Type the names exactly as each person should appear.` }),
       h("div", { class: "hint", text: "Groups: one line per `prefix | split or pooled | runs`. split = one stratum per configuration starting with the prefix." }), groups,
+      h("div", { class: "row", style: "margin-top:8px" }, assign, h("span", { class: "hint", text: "Overlap problems per person:" }), overlap),
       h("div", { class: "row", style: "margin-top:8px" },
         h("button", { type: "button", class: "secondary", text: "Preview", onclick: () => go(true) }),
         h("button", { type: "button", class: "primary", text: "Draw and assign", onclick: () => go(false) })), out,
       table(["Configuration", "Eligible runs", "Judge passed"], (cfg.configs || []).map((c) => [c.config_label || "(none)", c.eligible, c.judged_pass])),
+      manageView(),
       h("div", { class: "row", style: "margin-top:12px" },
         h("button", { type: "button", class: "secondary", text: "Score the selected audit", onclick: async () => {
           const r = await ownerCall("GET", `/api/audit/score?audit_id=${encodeURIComponent(st.audit)}`);
           st.score = r.ok ? r.data : { error: r.data.error || "Failed." }; render(); } })),
       scoreView());
     return box;
+  }
+  function manageView() {
+    const m = st.manage;
+    if (!st.audit) return h("span");
+    if (!m) return h("p", { class: "hint", text: "Draw an audit to manage it here." });
+    const say = (t) => { st.editMsg = t; render(); };
+    const edit = async (payload, okText) => {
+      const r = await ownerCall("POST", "/api/audit/edit", { audit_id: st.audit, by: (typeof who === "function" ? who() : ""), ...payload });
+      if (!r.ok) { st.editMsg = r.data.error || "Failed."; render(); return; }
+      st.editMsg = typeof okText === "function" ? okText(r.data) : okText; st.confirmDelete = false;
+      await load(true);
+    };
+    const people = h("input", { value: store.get("lab_audit_redeal", m.labelers.map((l) => l.labeler).join(", ")), style: "flex:1 1 320px" });
+    const ov = h("input", { type: "number", min: "0", max: "5", value: "1", style: "width:80px" });
+    const more = h("input", { value: "R3 | split | 2", style: "flex:1 1 240px", title: "same format as the groups above" });
+    const rem = h("input", { placeholder: "item ids, e.g. I004, I010", style: "flex:1 1 240px" });
+    const asList = (t) => t.split(",").map((x) => x.trim()).filter(Boolean);
+    return h("div", { style: "margin-top:12px" }, h("h3", { text: "Manage this audit" }),
+      table(["Labeler", "Items", "Done", "Problems (items, done, shared with another labeler)"],
+        m.labelers.map((l) => [l.labeler, l.items, l.done, l.problems.map((p) => `${p.problem_id} (${p.items}, ${p.done}${p.overlap ? `, ${p.overlap} shared` : ""})`).join("; ")])),
+      h("p", { class: "hint", text: `${m.items} items, ${m.unlabeled.length} with no label yet.` }),
+      h("div", { class: "hint", text: "Redistribute: re-deal the items nobody has labelled yet among these people (whole problems stay together; every label already given is kept). Use it to add a person, drop a person or even out the load." }),
+      h("div", { class: "row" }, people, h("span", { class: "hint", text: "Overlap problems:" }), ov,
+        h("button", { type: "button", class: "secondary", text: "Redistribute", onclick: () => { store.set("lab_audit_redeal", people.value); edit({ action: "redistribute", labelers: asList(people.value), overlap_problems: parseInt(ov.value || "0", 10) || 0 }, (d) => `Re-dealt ${d.re_dealt} items, kept ${d.kept} that already have labels.`); } })),
+      h("div", { class: "hint", text: "Add runs: draw more by the same rules (never a run already in the sample); a problem stays with whoever holds it." }),
+      h("div", { class: "row" }, more,
+        h("button", { type: "button", class: "secondary", text: "Add runs", onclick: () => edit({ action: "extend", groups: more.value, seed: Math.floor(Math.random() * 1e6) }, (d) => `${(d.notes || []).join(" | ")}. Now ${d.items} items.`) })),
+      h("div", { class: "hint", text: "Remove runs: only items nobody has labelled." }),
+      h("div", { class: "row" }, rem,
+        h("button", { type: "button", class: "secondary", text: "Remove", onclick: () => edit({ action: "remove", item_ids: asList(rem.value) }, (d) => `Removed ${d.removed.length}${d.refused.length ? `; not removed (already labelled or unknown): ${d.refused.join(", ")}` : ""}. Now ${d.items} items.`) })),
+      h("div", { class: "row", style: "margin-top:10px" },
+        st.confirmDelete
+          ? [h("button", { type: "button", class: "primary", text: "Yes, delete this audit", onclick: () => edit({ action: "delete" }, "Audit deleted (its labels are kept in the store).") }),
+             h("button", { type: "button", class: "secondary", text: "Keep it", onclick: () => { st.confirmDelete = false; render(); } })]
+          : h("button", { type: "button", class: "secondary", text: "Delete this audit", onclick: () => { st.confirmDelete = true; render(); } })),
+      st.editMsg ? h("p", { class: "hint", text: st.editMsg }) : null,
+      m.history.length ? h("details", {}, h("summary", { text: `History (${m.history.length})` }), h("pre", { class: "detail-body", text: m.history.map((e) => `${e.at}  ${e.by || "?"}  ${e.action}: ${e.detail}`).join("\n") })) : null);
   }
   function scoreView() {
     const s = st.score;
@@ -215,5 +295,5 @@
       labelerPanel(), ownerPanel()));
   }
   const previous = TAB_LOADERS.audit;
-  TAB_LOADERS.audit = () => { if (previous) previous(); load(); };
+  TAB_LOADERS.audit = () => { if (previous) previous(); load(true); };
 })();

@@ -31,8 +31,8 @@ class PureTests(unittest.TestCase):
         runs = fake_runs(["R3 a", "R3 b", "R3 c", "R3 d", "R2 x", "R2 y"]) + [
             {"run_id": "f", "problem_id": "p1", "config_label": "R3 dumb-baseline", "judge_model_id": "j", "diagnosis_pass": False, "diagnosis_text": "t"}]
         groups = audit_plan.parse_groups(audit_plan.DEFAULT_GROUPS)
-        items, notes = audit_plan.draw(runs, groups, NAMES, 7)
-        again, _ = audit_plan.draw(runs, groups, NAMES, 7)
+        items, notes = audit_plan.draw(runs, groups, NAMES, 7, assign="spread")
+        again, _ = audit_plan.draw(runs, groups, NAMES, 7, assign="spread")
         self.assertEqual(items, again)
         self.assertEqual(len(items), 60)
         self.assertEqual(sum(i["anchor"] for i in items), 15)
@@ -46,6 +46,61 @@ class PureTests(unittest.TestCase):
             self.assertEqual(sum(by[i["run_id"]]["diagnosis_pass"] for i in rows), 6)
             probs = [by[i["run_id"]]["problem_id"] for i in rows]
             self.assertLessEqual(max(probs.count(p) for p in set(probs)), 2)
+
+    def test_by_problem_gives_whole_problems_and_balances(self):
+        runs = fake_runs(["R3 a", "R3 b", "R3 c", "R3 d", "R2 x", "R2 y"])
+        groups = audit_plan.parse_groups(audit_plan.DEFAULT_GROUPS)
+        items, _ = audit_plan.draw(runs, groups, NAMES, 7, overlap_problems=1)
+        self.assertEqual(len(items), 60)
+        owners = {}
+        for it in items:
+            owners.setdefault(it["problem_id"], set()).add(it["labelers"][0])
+        self.assertTrue(all(len(v) == 1 for v in owners.values()))              # one owner per problem
+        per = {n: {i["problem_id"] for i in items if n in i["labelers"]} for n in NAMES}
+        own = {n: {p for p, v in owners.items() if n in v} for n in NAMES}
+        for n in NAMES:
+            self.assertLessEqual(len(per[n]), len(own[n]) + 1)                  # own problems plus one overlap problem
+            self.assertLess(len(per[n]), 10)                                    # nobody needs all 10 problems
+        loads = [sum(1 for i in items if n in i["labelers"]) for n in NAMES]
+        self.assertLessEqual(max(loads) - min(loads), 12)
+        self.assertTrue(any(i["anchor"] for i in items))
+        solo = audit_plan.draw(runs, groups, ["Noura"], 7)[0]
+        self.assertTrue(all(i["labelers"] == ["Noura"] and not i["anchor"] for i in solo))
+
+    def test_redistribute_keeps_labels_and_whole_problems(self):
+        runs = fake_runs(["R3 a", "R3 b", "R2 x"])
+        groups = audit_plan.parse_groups(audit_plan.DEFAULT_GROUPS)
+        items, _ = audit_plan.draw(runs, groups, NAMES, 3)
+        plan = {"labelers": list(NAMES), "items": items}
+        first = next(i for i in items if len(i["labelers"]) == 1)
+        labels = [{"item_id": first["item_id"], "labeler": first["labelers"][0], "overall_correct": True}]
+        res = audit_plan.redistribute(plan, labels, ["Noura", "Zeinab Mohamed"], 0)
+        self.assertEqual(res["kept"], 1)
+        self.assertEqual(plan["labelers"], ["Noura", "Zeinab Mohamed"])
+        kept = next(i for i in plan["items"] if i["item_id"] == first["item_id"])
+        self.assertEqual(kept["labelers"], first["labelers"])                   # a labelled item is untouched
+        for it in plan["items"]:
+            if it["item_id"] != first["item_id"]:
+                self.assertTrue(set(it["labelers"]) <= {"Noura", "Zeinab Mohamed"})
+        owner = {}
+        for it in plan["items"]:
+            owner.setdefault(it["problem_id"], set()).add(it["labelers"][0])
+        free_owners = {p: o for p, o in owner.items() if p != first["problem_id"]}
+        self.assertTrue(all(len(o) == 1 for o in free_owners.values()))
+
+    def test_extend_and_remove(self):
+        runs = fake_runs(["R3 a", "R3 b"], per=40)
+        items, _ = audit_plan.draw(runs, audit_plan.parse_groups("R3 | split | 6"), NAMES, 1)
+        plan = {"labelers": list(NAMES), "items": items}
+        before = {i["run_id"] for i in items}
+        notes = audit_plan.extend(plan, runs, [], audit_plan.parse_groups("R3 | split | 4"), 2)
+        self.assertEqual(len(plan["items"]), 12 + 8)
+        self.assertEqual(len({i["item_id"] for i in plan["items"]}), 20)           # new ids do not collide
+        self.assertEqual(len(before & {i["run_id"] for i in plan["items"][:0]}), 0)
+        self.assertEqual(len({i["run_id"] for i in plan["items"]}), 20)            # no run twice
+        keep = plan["items"][0]["item_id"]
+        removed, refused = audit_plan.remove_items(plan, [{"item_id": keep, "labeler": "Noura"}], [keep, plan["items"][1]["item_id"]])
+        self.assertEqual((len(removed), refused), (1, [keep]))
 
     def test_validate_label(self):
         item = {"item_id": "I001", "labelers": ["Noura"]}
@@ -112,6 +167,28 @@ class ApiTests(TmpRepoCase):
         c.post("/api/audit/label", json={"audit_id": "final-audit", "item_id": it["item_id"], "labeler": "Noura", "d1": True, "d2": True, "d3": True, "confidence": 3, "used_story": True})
         sc = c.get("/api/audit/score", params={"audit_id": "final-audit"}, headers=self.H).json()
         self.assertEqual(sc["story_used"], 1)
+
+    def test_edit_actions_are_owner_only_and_delete_hides(self):
+        c = self.client
+        self.draw()
+        edit = lambda **kw: c.post("/api/audit/edit", json={"audit_id": "final-audit", **kw}, headers=self.H)
+        self.assertEqual(c.post("/api/audit/edit", json={"audit_id": "final-audit", "action": "delete"}).status_code, 403)
+        self.assertEqual(c.get("/api/audit/manage", params={"audit_id": "final-audit"}).status_code, 403)
+        m = c.get("/api/audit/manage", params={"audit_id": "final-audit"}, headers=self.H).json()
+        self.assertEqual(m["items"], 18)
+        self.assertEqual(sum(x["items"] for x in m["labelers"]) >= 18, True)
+        r = edit(action="redistribute", labelers=["Noura", "Zeinab Mohamed"], overlap_problems=0).json()
+        self.assertEqual(r["re_dealt"], 18)
+        m = c.get("/api/audit/manage", params={"audit_id": "final-audit"}, headers=self.H).json()
+        self.assertEqual([x["labeler"] for x in m["labelers"]], ["Noura", "Zeinab Mohamed"])
+        self.assertEqual(sum(x["items"] for x in m["labelers"]), 18)
+        self.assertEqual(edit(action="extend", groups="R3 | split | 2").json()["items"], 22)
+        gone = edit(action="remove", item_ids=m["unlabeled"][:2]).json()
+        self.assertEqual(len(gone["removed"]), 2)
+        self.assertEqual(c.get("/api/audit/manage", params={"audit_id": "final-audit"}, headers=self.H).json()["history"][-1]["action"], "remove")
+        self.assertTrue(edit(action="delete").json()["ok"])
+        self.assertEqual(c.get("/api/audit/plans").json()["plans"], [])
+        self.assertEqual(self.draw().status_code, 409)           # the name of a deleted audit is not reused
 
     def test_cannot_label_someone_elses_item_and_score_is_owner_only(self):
         c = self.client

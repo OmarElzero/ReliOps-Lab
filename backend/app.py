@@ -1526,6 +1526,20 @@ class AuditDrawIn(BaseModel):
     max_per_problem: int = 2
     preview: bool = False
     by: str = ""
+    assign: str = "by_problem"          # by_problem: whole problems per person; spread: round-robin
+    overlap_problems: int = 1           # by_problem only: problems each person also labels from the previous person's set
+
+
+class AuditEditIn(BaseModel):
+    audit_id: str
+    action: str                          # redistribute | extend | remove | delete
+    labelers: list[str] = []
+    groups: str = ""
+    seed: int = 1
+    item_ids: list[str] = []
+    overlap_problems: int = 1
+    max_per_problem: int = 2
+    by: str = ""
 
 
 class AuditLabelIn(BaseModel):
@@ -1540,8 +1554,24 @@ class AuditLabelIn(BaseModel):
     used_story: bool = False
 
 
-def _audit_plan(audit_id: str):
+def _audit_plan_any(audit_id: str):
     return next((p for p in store.read("audit_plans") if p.get("audit_id") == audit_id), None)
+
+
+def _audit_plan(audit_id: str):
+    p = _audit_plan_any(audit_id)
+    return None if (p is None or p.get("deleted")) else p
+
+
+def _audit_labels(audit_id: str) -> list[dict]:
+    return [l for l in store.read("audit_labels") if l.get("audit_id") == audit_id]
+
+
+def _audit_save(plan: dict, action: str, detail: str, by: str):
+    """Writes the changed plan as a new record (latest wins) with a line in its history."""
+    rec = {k: v for k, v in plan.items() if not k.startswith("_") and k != "updated_at"}
+    rec["history"] = list(plan.get("history") or []) + [{"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "by": by, "action": action, "detail": detail}]
+    return store.append("audit_plans", rec)
 
 
 @app.get("/api/audit/configs")
@@ -1562,6 +1592,8 @@ def audit_configs():
 def audit_plans():
     out = []
     for p in store.read("audit_plans"):
+        if p.get("deleted"):
+            continue
         out.append({"audit_id": p["audit_id"], "name": p.get("name"), "labelers": p.get("labelers"), "created_by": p.get("created_by"),
                     "created_at": p.get("created_at"), "items": len(p.get("items") or []),
                     "progress": audit_plan.progress(p, [l for l in store.read("audit_labels") if l.get("audit_id") == p["audit_id"]])})
@@ -1580,17 +1612,20 @@ def audit_draw(body: AuditDrawIn, x_owner_password: Optional[str] = Header(defau
     try:
         groups = audit_plan.parse_groups(body.groups)
         _, runs = _collect_runs(100000)
-        items, notes = audit_plan.draw(runs, groups, body.labelers, body.seed, body.anchors_per_stratum, body.max_per_problem)
+        items, notes = audit_plan.draw(runs, groups, body.labelers, body.seed, body.anchors_per_stratum, body.max_per_problem,
+                                       body.assign, body.overlap_problems)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     if body.preview:
         return {"preview": True, "items": len(items), "notes": notes}
-    existing = _audit_plan(audit_id)
-    if existing and any(l.get("audit_id") == audit_id for l in store.read("audit_labels")):
-        return JSONResponse({"error": "This audit already has labels, so its sample is frozen. Use another name."}, status_code=409)
+    existing = _audit_plan_any(audit_id)
+    if existing and (existing.get("deleted") or _audit_labels(audit_id)):
+        return JSONResponse({"error": "This audit name already has labels or was deleted, so it cannot be drawn again. Use another name, "
+                                      "or change the existing audit with Redistribute, Add runs or Remove."}, status_code=409)
     labelers = list(dict.fromkeys(x.strip() for x in body.labelers if x.strip()))
     plan = store.append("audit_plans", {"audit_id": audit_id, "name": body.name.strip(), "labelers": labelers, "seed": body.seed,
-                                        "groups": body.groups, "anchors_per_stratum": body.anchors_per_stratum,
+                                        "groups": body.groups, "anchors_per_stratum": body.anchors_per_stratum, "assign": body.assign,
+                                        "overlap_problems": body.overlap_problems,
                                         "created_by": body.by.strip(),
                                         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "notes": notes, "items": items})
     return {"ok": True, "audit_id": audit_id, "items": len(items), "notes": notes, "firebase": plan.get("_firebase")}
@@ -1616,9 +1651,10 @@ def audit_mine(audit_id: str, labeler: str):
         r = by_run.get(it["run_id"]) or {}
         card = runner.read_card(r.get("problem_id") or "")
         lab = mine_labels.get(it["item_id"])
-        items.append({"item_id": it["item_id"], "problem_id": r.get("problem_id"), "diagnosis_text": r.get("diagnosis_text") or "(run not found on this machine)",
+        items.append({"item_id": it["item_id"], "problem_id": r.get("problem_id") or it.get("problem_id"), "diagnosis_text": r.get("diagnosis_text") or "(run not found on this machine)",
                       "expected": runner.card_section(card, 4), "done": bool(lab),
                       "mine": ({k: lab.get(k) for k in ("d1", "d2", "d3", "overall_correct", "confidence", "reason")} if lab else None)})
+    items.sort(key=lambda i: (i["problem_id"] or "", i["item_id"]))
     return {"audit_id": audit_id, "labeler": who, "items": items, "done": sum(1 for i in items if i["done"]), "total": len(items)}
 
 
@@ -1646,6 +1682,53 @@ def audit_story(audit_id: str, labeler: str, item_id: str):
     if not item or not any(l.casefold() == labeler.strip().casefold() for l in item["labelers"]):
         return PlainTextResponse("This item is not assigned to you.", status_code=403)
     return story(item["run_id"])
+
+
+@app.get("/api/audit/manage")
+def audit_manage(audit_id: str, x_owner_password: Optional[str] = Header(default=None)):
+    """Owner only: who holds which problems, how far they are, the unlabelled items and the edit history."""
+    bad = _owner_gate(x_owner_password, "Managing an audit")
+    if bad:
+        return bad
+    plan = _audit_plan(audit_id)
+    if not plan:
+        return JSONResponse({"error": "No such audit."}, status_code=404)
+    return audit_plan.overview(plan, _audit_labels(audit_id))
+
+
+@app.post("/api/audit/edit")
+def audit_edit(body: AuditEditIn, x_owner_password: Optional[str] = Header(default=None)):
+    """Owner only. redistribute: re-deal the items nobody has labelled among the given labelers (whole problems stay together).
+    extend: add more runs by the same rules. remove: drop unlabelled items. delete: hide the audit (its labels are kept)."""
+    bad = _owner_gate(x_owner_password, "Changing an audit")
+    if bad:
+        return bad
+    plan = _audit_plan(body.audit_id)
+    if not plan:
+        return JSONResponse({"error": "No such audit."}, status_code=404)
+    labels = _audit_labels(body.audit_id)
+    by = body.by.strip()
+    try:
+        if body.action == "delete":
+            plan["deleted"] = True
+            _audit_save(plan, "delete", f"{len(plan['items'])} items, {len(labels)} labels kept", by)
+            return {"ok": True}
+        if body.action == "redistribute":
+            res = audit_plan.redistribute(plan, labels, body.labelers, body.overlap_problems)
+            _audit_save(plan, "redistribute", f"labelers {', '.join(plan['labelers'])}; re-dealt {res['re_dealt']}, kept {res['kept']}", by)
+            return {"ok": True, **res}
+        if body.action == "extend":
+            _, runs = _collect_runs(100000)
+            notes = audit_plan.extend(plan, runs, labels, audit_plan.parse_groups(body.groups), body.seed, body.max_per_problem, 0)
+            _audit_save(plan, "extend", "; ".join(notes), by)
+            return {"ok": True, "notes": notes, "items": len(plan["items"])}
+        if body.action == "remove":
+            removed, refused = audit_plan.remove_items(plan, labels, body.item_ids)
+            _audit_save(plan, "remove", f"removed {', '.join(removed) or 'none'}" + (f"; kept (already labelled) {', '.join(refused)}" if refused else ""), by)
+            return {"ok": True, "removed": removed, "refused": refused, "items": len(plan["items"])}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"error": "Unknown action."}, status_code=400)
 
 
 @app.get("/api/audit/progress")

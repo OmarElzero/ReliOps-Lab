@@ -73,14 +73,9 @@ def _draw_stratum(rows, n, rng, cap):
     return chosen
 
 
-def draw(runs: list[dict], groups: list[dict], labelers: list[str], seed: int, anchors_per_stratum: int = 3,
-         max_per_problem: int = 2) -> tuple[list[dict], list[str]]:
-    """Returns (items, notes). Each item: item_id, run_id, stratum, anchor, labelers."""
-    labelers = [x for x in dict.fromkeys(l.strip() for l in labelers) if x]
-    if not labelers:
-        raise ValueError("Name at least one labeler.")
-    rng = random.Random(seed)
-    pool = eligible(runs)
+def _sample(runs, groups, rng, cap, exclude=frozenset()):
+    """Items (run_id, problem_id, stratum) for every stratum of `groups`, half judge-pass and half judge-fail each."""
+    pool = [r for r in eligible(runs) if r["run_id"] not in exclude]
     strata: list[tuple[str, list[dict], int]] = []
     for g in groups:
         sel = [r for r in pool if (r.get("config_label") or "").startswith(g["prefix"])]
@@ -94,20 +89,161 @@ def draw(runs: list[dict], groups: list[dict], labelers: list[str], seed: int, a
         if not rows:
             notes.append(f"{name}: no eligible runs, skipped")
             continue
-        got = _draw_stratum(rows, min(n, len(rows)), rng, max_per_problem)
+        got = _draw_stratum(rows, min(n, len(rows)), rng, cap)
         npass = sum(1 for r in got if r["diagnosis_pass"])
         notes.append(f"{name}: {len(got)} drawn from {len(rows)} eligible ({npass} judged pass, {len(got) - npass} judged fail)")
         rng.shuffle(got)
-        for i, r in enumerate(got):
-            items.append({"run_id": r["run_id"], "stratum": name, "anchor": i < anchors_per_stratum})
+        items += [{"run_id": r["run_id"], "problem_id": r["problem_id"], "stratum": name} for r in got]
+    return items, notes
+
+
+def assign_by_problem(items, labelers, overlap_problems=1, load=None, pref=None):
+    """Whole problems go to one labeler, so nobody has to learn every problem: biggest problems first, each to the
+    labeler with the fewest items so far (`load`), or to `pref[problem]` when that person already started it.
+    Overlap: each labeler also labels `overlap_problems` of the previous labeler's problems, which is what lets the
+    labelers' agreement be measured. Sets item['labelers'] and item['anchor'] (anchor = labelled by two people)."""
+    ld = {l: (load or {}).get(l, 0) for l in labelers}
+    byp = defaultdict(list)
+    for it in items:
+        byp[it["problem_id"]].append(it)
+    owner = {}
+    for pid in sorted(byp, key=lambda p: (-len(byp[p]), p)):
+        who = pref[pid] if pref and pref.get(pid) in ld else min(labelers, key=lambda l: (ld[l], labelers.index(l)))
+        owner[pid] = who
+        ld[who] += len(byp[pid])
+        for it in byp[pid]:
+            it["labelers"], it["anchor"] = [who], False
+    if len(labelers) > 1 and overlap_problems > 0:
+        for i, l in enumerate(labelers):
+            prev = labelers[i - 1]
+            mine = sorted((p for p, w in owner.items() if w == prev), key=lambda p: (-len(byp[p]), p))[:overlap_problems]
+            for pid in mine:
+                for it in byp[pid]:
+                    it["labelers"], it["anchor"] = [prev, l], True
+
+
+def _spread(items, labelers, rng, anchors_per_stratum):
+    """Older rule: the first runs of each stratum go to everyone, the rest round-robin."""
+    rr = itertools.cycle(range(len(labelers)))
+    seen = defaultdict(int)
+    for it in items:
+        seen[it["stratum"]] += 1
+        it["anchor"] = seen[it["stratum"]] <= anchors_per_stratum
+        it["labelers"] = list(labelers) if it["anchor"] else [labelers[next(rr)]]
+
+
+def _clean_labelers(labelers):
+    out = [x for x in dict.fromkeys(l.strip() for l in labelers) if x]
+    if not out:
+        raise ValueError("Name at least one labeler.")
+    return out
+
+
+def draw(runs: list[dict], groups: list[dict], labelers: list[str], seed: int, anchors_per_stratum: int = 3,
+         max_per_problem: int = 2, assign: str = "by_problem", overlap_problems: int = 1) -> tuple[list[dict], list[str]]:
+    """Returns (items, notes). Each item: item_id, run_id, problem_id, stratum, anchor, labelers."""
+    labelers = _clean_labelers(labelers)
+    rng = random.Random(seed)
+    items, notes = _sample(runs, groups, rng, max_per_problem)
+    if assign == "spread":
+        _spread(items, labelers, rng, anchors_per_stratum)
+    else:
+        assign_by_problem(items, labelers, overlap_problems)
     ids = list(range(1, len(items) + 1))
     rng.shuffle(ids)
-    rr = itertools.cycle(range(len(labelers)))
     for it, i in zip(items, ids):
         it["item_id"] = f"I{i:03d}"
-        it["labelers"] = list(labelers) if it["anchor"] else [labelers[next(rr)]]
     items.sort(key=lambda x: x["item_id"])
     return items, notes
+
+
+def _done_map(labels):
+    d = defaultdict(set)
+    for l in labels:
+        d[l["item_id"]].add(l["labeler"])
+    return d
+
+
+def _loads(items, labelers):
+    return {l: sum(1 for i in items if l in i["labelers"]) for l in labelers}
+
+
+def redistribute(plan: dict, labels: list[dict], labelers: list[str], overlap_problems: int = 1) -> dict:
+    """Re-deals the items nobody has labelled yet among `labelers`, keeping whole problems together and keeping every label
+    already given. Items with a label keep their labelers (minus anyone removed who has not labelled them)."""
+    labelers = _clean_labelers(labelers)
+    done = _done_map(labels)
+    items = plan["items"]
+    fixed = [i for i in items if done.get(i["item_id"])]
+    free = [i for i in items if not done.get(i["item_id"])]
+    for it in fixed:
+        it["labelers"] = [l for l in it["labelers"] if l in labelers or l in done[it["item_id"]]]
+        it["anchor"] = len(it["labelers"]) > 1
+    pref: dict[str, str] = {}
+    cnt: dict[tuple, int] = defaultdict(int)
+    for it in fixed:
+        for l in done[it["item_id"]]:
+            if l in labelers:
+                cnt[(it["problem_id"], l)] += 1
+    for (pid, l), n in sorted(cnt.items(), key=lambda kv: -kv[1]):
+        pref.setdefault(pid, l)
+    assign_by_problem(free, labelers, overlap_problems, _loads(fixed, labelers), pref)
+    plan["labelers"] = labelers
+    return {"re_dealt": len(free), "kept": len(fixed)}
+
+
+def extend(plan: dict, runs: list[dict], labels: list[dict], groups: list[dict], seed: int, max_per_problem: int = 2,
+           overlap_problems: int = 0) -> list[str]:
+    """Adds more runs by the same rules (none already in the sample); a problem that already has an owner stays with them."""
+    rng = random.Random(seed)
+    have = {i["run_id"] for i in plan["items"]}
+    new, notes = _sample(runs, groups, rng, max_per_problem, exclude=have)
+    labelers = plan["labelers"]
+    pref: dict[str, str] = {}
+    byp = defaultdict(lambda: defaultdict(int))
+    for it in plan["items"]:
+        if it["labelers"]:
+            byp[it["problem_id"]][it["labelers"][0]] += 1
+    for pid, c in byp.items():
+        who = max(c, key=lambda l: c[l])
+        if who in labelers:
+            pref[pid] = who
+    assign_by_problem(new, labelers, overlap_problems, _loads(plan["items"], labelers), pref)
+    top = max((int(i["item_id"][1:]) for i in plan["items"]), default=0)
+    ids = list(range(top + 1, top + len(new) + 1))
+    rng.shuffle(ids)
+    for it, i in zip(new, ids):
+        it["item_id"] = f"I{i:03d}"
+    plan["items"] = sorted(plan["items"] + new, key=lambda x: x["item_id"])
+    return notes + [f"added {len(new)} runs"]
+
+
+def remove_items(plan: dict, labels: list[dict], item_ids: list[str]) -> tuple[list[str], list[str]]:
+    """Drops items nobody has labelled. Returns (removed, refused)."""
+    done = _done_map(labels)
+    want = set(item_ids)
+    removed = [i["item_id"] for i in plan["items"] if i["item_id"] in want and not done.get(i["item_id"])]
+    refused = sorted(want - set(removed))
+    plan["items"] = [i for i in plan["items"] if i["item_id"] not in set(removed)]
+    return removed, refused
+
+
+def overview(plan: dict, labels: list[dict]) -> dict:
+    """Owner's view: per labeler, the problems and items they hold and how many are done."""
+    done = _done_map(labels)
+    out = []
+    for who in plan["labelers"]:
+        mine = [i for i in plan["items"] if who in i["labelers"]]
+        probs: dict[str, dict] = defaultdict(lambda: {"items": 0, "done": 0, "overlap": 0})
+        for i in mine:
+            p = probs[i["problem_id"]]
+            p["items"] += 1
+            p["done"] += 1 if who in done.get(i["item_id"], ()) else 0
+            p["overlap"] += 1 if i["anchor"] else 0
+        out.append({"labeler": who, "items": len(mine), "done": sum(p["done"] for p in probs.values()),
+                    "problems": [{"problem_id": k, **v} for k, v in sorted(probs.items())]})
+    unlabeled = [i["item_id"] for i in plan["items"] if not done.get(i["item_id"])]
+    return {"labelers": out, "items": len(plan["items"]), "unlabeled": unlabeled, "history": plan.get("history", [])}
 
 
 def validate_label(body: dict, item: dict) -> tuple[dict | None, str | None]:
@@ -143,10 +279,10 @@ def score(plan: dict, runs: list[dict], labels: list[dict]) -> dict:
     byitem: dict[str, dict[str, bool]] = defaultdict(dict)
     for l in labels:
         byitem[l["item_id"]][l["labeler"]] = bool(l["overall_correct"])
-    anchors = [i for i in plan["items"] if i["anchor"]]
+    names = sorted({l["labeler"] for l in labels} | set(plan["labelers"]))
     pairs = []
-    for x, y in itertools.combinations(plan["labelers"], 2):
-        ids = [i["item_id"] for i in anchors if x in byitem[i["item_id"]] and y in byitem[i["item_id"]]]
+    for x, y in itertools.combinations(names, 2):
+        ids = [i["item_id"] for i in plan["items"] if x in byitem[i["item_id"]] and y in byitem[i["item_id"]]]
         if ids:
             A = [byitem[i][x] for i in ids]
             B = [byitem[i][y] for i in ids]
@@ -158,7 +294,7 @@ def score(plan: dict, runs: list[dict], labels: list[dict]) -> dict:
         if not votes:
             continue
         if len(votes) % 2 == 0 and sum(votes) * 2 == len(votes):
-            ties.append(it["item_id"])
+            ties.append(it["item_id"])  # the labelers split: left out of judge-versus-human, listed so the owner can settle it
             continue
         human = sum(votes) * 2 > len(votes)
         run = by_run.get(it["run_id"]) or {}
