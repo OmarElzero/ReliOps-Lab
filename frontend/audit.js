@@ -31,7 +31,7 @@
     d3: "D3 Scope: does it avoid blaming what the card says not to blame, and avoid contradicting claims?",
   };
   const st = { plans: [], audit: store.get("lab_audit_id", ""), labeler: store.get("lab_audit_labeler", ""), mine: null, cur: null,
-               ans: {}, story: null, card: null, prob: "", cards: {}, manage: null, confirmDelete: false, editMsg: "", msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
+               ans: {}, story: null, card: null, results: null, prob: "", cards: {}, manage: null, confirmDelete: false, editMsg: "", msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
 
   async function ownerCall(method, url, body) {
     const res = await fetch(url, { method, headers: { "Content-Type": "application/json", "x-owner-password": pw.get() }, body: body ? JSON.stringify(body) : undefined });
@@ -143,6 +143,31 @@
         h("span", { class: "hint", text: "Your answers stay here when you come back." })),
       st.card === null ? null : h("pre", { class: "detail-body", style: "max-height:420px;overflow:auto", text: st.card }));
   }
+  async function finish() {
+    const r = await jsonPost("/api/audit/finish", { audit_id: st.audit, labeler: st.labeler });
+    if (!r.ok) { st.msg = r.data.error || "Could not finish."; render(); return; }
+    st.msg = ""; await loadResults(); await load(true);
+  }
+  async function loadResults() {
+    const r = await fetch(`/api/audit/results?audit_id=${encodeURIComponent(st.audit)}&labeler=${encodeURIComponent(st.labeler)}`);
+    st.results = r.ok ? await r.json() : null;
+  }
+  function finishBox() {
+    const m = st.mine;
+    if (!m) return h("span");
+    if (m.done < m.total) return h("span");
+    if (!m.finished) {
+      return h("div", { class: "aa-q" }, h("p", { class: "hint", text: "All your items have an answer. When you are sure, finish: your answers get locked and you see the judge's verdict next to each of yours." }),
+        h("button", { type: "button", class: "primary", onclick: finish, text: "Finish and see the judge's verdicts" }));
+    }
+    if (!st.results) { loadResults().then(render); return h("p", { class: "hint", text: "Loading your results…" }); }
+    const R = st.results;
+    return h("div", { class: "aa-q" }, h("h3", { text: "Your answers against the judge" }),
+      h("p", { class: "hint", text: `You and the judge gave the same verdict on ${R.same} of ${R.total} items. Differences are listed first; they are the interesting ones (the judge may be too lenient or too strict, or you may have misread the card).` }),
+      R.rows.map((x) => h("details", { class: "aa-q" }, h("summary", { text: `${x.same === false ? "✗ differ" : "✓ same"} · ${x.item_id} · ${x.problem_id || "?"} · judge: ${x.judge_pass === true ? "pass" : x.judge_pass === false ? "fail" : "?"} · you: ${x.you ? "correct" : "incorrect"}` }),
+        h("div", { class: "hint", text: "Judge's reasoning" }), h("pre", { class: "detail-body", text: x.judge_reasoning || "(none stored)" }),
+        x.your_reason ? h("div", { class: "hint", text: `Your reason: ${x.your_reason}` }) : null)));
+  }
   function itemForm() {
     const it = st.mine.items.find((i) => i.item_id === st.cur);
     if (!it) return h("p", { class: "hint", text: "No items." });
@@ -162,7 +187,7 @@
       h("textarea", { rows: "2", placeholder: "Reason, one sentence (needed when Incorrect or unsure)", value: a.reason || "", style: "width:100%;margin-top:8px",
         oninput: (e) => { a.reason = e.target.value; } }),
       h("div", { class: "row", style: "margin-top:10px" },
-        h("button", { type: "button", class: "primary", onclick: save, disabled: a.d1 === null || a.d2 === null || a.d3 === null || !a.confidence, text: it.done ? "Update" : "Save and next" })),
+        h("button", { type: "button", class: "primary", onclick: save, disabled: it.locked || a.d1 === null || a.d2 === null || a.d3 === null || !a.confidence, text: it.locked ? "Locked (you finished)" : it.done ? "Update" : "Save and next" })),
       st.msg ? h("p", { class: "hint", style: "color:var(--bad)", text: st.msg }) : null);
   }
   function labelerPanel() {
@@ -186,6 +211,7 @@
       })));
       body.push(h("div", { class: "row aa-chips" }, st.mine.items.filter((i) => (i.problem_id || "?") === st.prob).map((i) =>
         h("button", { type: "button", class: i.item_id === st.cur ? "primary" : "secondary", onclick: () => { select(i.item_id); st.msg = ""; render(); }, text: `${i.done ? "✓ " : ""}${i.item_id}` }))));
+      body.push(finishBox());
       body.push(itemForm());
     } else if (st.msg) body.push(h("p", { class: "hint", style: "color:var(--bad)", text: st.msg }));
     return h("div", {}, body);

@@ -29,6 +29,7 @@ KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "task_progress": ("gui_task_progress.jsonl", ("task_id", "who_key")),   # each person's own status on a task
     "audit_plans": ("gui_audit_plans.jsonl", ("audit_id",)),      # a frozen judge-audit sample and who labels what (audit_plan.py)
     "audit_labels": ("gui_audit_labels.jsonl", ("audit_id", "item_id", "labeler")),   # one labeler's answers on one item
+    "audit_finish": ("gui_audit_finish.jsonl", ("audit_id", "labeler")),   # a labeler pressed "finish": their answers are locked and the judge's verdicts are shown
     "share_resets": ("gui_share_resets.jsonl", ("experiment", "share")),   # "Restart my share": runs of the share before `at` are ignored
 }
 

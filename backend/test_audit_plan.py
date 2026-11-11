@@ -154,7 +154,7 @@ class ApiTests(TmpRepoCase):
         mine = c.get("/api/audit/mine", params={"audit_id": "final-audit", "labeler": "noura"}).json()
         self.assertGreater(mine["total"], 0)
         it = mine["items"][0]
-        self.assertEqual(set(it), {"item_id", "problem_id", "diagnosis_text", "expected", "done", "mine"})  # blind
+        self.assertEqual(set(it), {"item_id", "problem_id", "diagnosis_text", "expected", "done", "locked", "mine"})  # blind
         self.assertEqual(c.get("/api/audit/mine", params={"audit_id": "final-audit", "labeler": "Someone"}).status_code, 403)
         ok = c.post("/api/audit/label", json={"audit_id": "final-audit", "item_id": it["item_id"], "labeler": "Noura", "d1": True, "d2": True, "d3": True, "confidence": 3})
         self.assertTrue(ok.json()["overall_correct"])
@@ -189,6 +189,26 @@ class ApiTests(TmpRepoCase):
         self.assertTrue(edit(action="delete").json()["ok"])
         self.assertEqual(c.get("/api/audit/plans").json()["plans"], [])
         self.assertEqual(self.draw().status_code, 409)           # the name of a deleted audit is not reused
+
+    def test_finish_locks_answers_and_shows_the_judge_after(self):
+        c = self.client
+        self.draw()
+        get = lambda n: c.get("/api/audit/mine", params={"audit_id": "final-audit", "labeler": n}).json()
+        lab = lambda n, i, **kw: c.post("/api/audit/label", json={"audit_id": "final-audit", "item_id": i, "labeler": n, "d1": True, "d2": True, "d3": True, "confidence": 3, **kw})
+        self.assertEqual(c.get("/api/audit/results", params={"audit_id": "final-audit", "labeler": "Noura"}).status_code, 403)   # nothing before finishing
+        mine = get("Noura")
+        self.assertEqual(c.post("/api/audit/finish", json={"audit_id": "final-audit", "labeler": "Noura"}).status_code, 400)     # items left
+        for i in mine["items"]:
+            lab("Noura", i["item_id"])
+        self.assertFalse(get("Noura")["finished"])
+        self.assertTrue(c.post("/api/audit/finish", json={"audit_id": "final-audit", "labeler": "Noura"}).json()["ok"])
+        after = get("Noura")
+        self.assertTrue(after["finished"] and all(i["locked"] for i in after["items"]))
+        self.assertEqual(lab("Noura", mine["items"][0]["item_id"], d2=False, reason="changed my mind").status_code, 409)           # locked
+        res = c.get("/api/audit/results", params={"audit_id": "final-audit", "labeler": "Noura"}).json()
+        self.assertEqual(res["total"], len(mine["items"]))
+        self.assertEqual(set(res["rows"][0]), {"item_id", "problem_id", "judge_pass", "judge_reasoning", "you", "your_reason", "same"})
+        self.assertEqual(c.get("/api/audit/results", params={"audit_id": "final-audit", "labeler": "Zeinab Mohamed"}).status_code, 403)  # others still blind
 
     def test_cannot_label_someone_elses_item_and_score_is_owner_only(self):
         c = self.client

@@ -1563,6 +1563,11 @@ def _audit_plan(audit_id: str):
     return None if (p is None or p.get("deleted")) else p
 
 
+def _audit_finished_at(audit_id: str, labeler: str):
+    f = next((x for x in store.read("audit_finish") if x.get("audit_id") == audit_id and x.get("labeler") == labeler), None)
+    return (f or {}).get("updated_at")
+
+
 def _audit_labels(audit_id: str) -> list[dict]:
     return [l for l in store.read("audit_labels") if l.get("audit_id") == audit_id]
 
@@ -1644,6 +1649,7 @@ def audit_mine(audit_id: str, labeler: str):
     _, runs = _collect_runs(100000)
     by_run = {r["run_id"]: r for r in runs}
     mine_labels = {l["item_id"]: l for l in store.read("audit_labels") if l.get("audit_id") == audit_id and l.get("labeler") == who}
+    fin = _audit_finished_at(audit_id, who)
     items = []
     for it in plan["items"]:
         if who not in it["labelers"]:
@@ -1653,9 +1659,11 @@ def audit_mine(audit_id: str, labeler: str):
         lab = mine_labels.get(it["item_id"])
         items.append({"item_id": it["item_id"], "problem_id": r.get("problem_id") or it.get("problem_id"), "diagnosis_text": r.get("diagnosis_text") or "(run not found on this machine)",
                       "expected": runner.card_section(card, 4), "done": bool(lab),
+                      "locked": bool(lab and fin and (lab.get("updated_at") or "") <= fin),
                       "mine": ({k: lab.get(k) for k in ("d1", "d2", "d3", "overall_correct", "confidence", "reason")} if lab else None)})
     items.sort(key=lambda i: (i["problem_id"] or "", i["item_id"]))
-    return {"audit_id": audit_id, "labeler": who, "items": items, "done": sum(1 for i in items if i["done"]), "total": len(items)}
+    return {"audit_id": audit_id, "labeler": who, "items": items, "done": sum(1 for i in items if i["done"]), "total": len(items),
+            "finished": bool(fin) and all(i["locked"] for i in items)}
 
 
 @app.post("/api/audit/label")
@@ -1669,6 +1677,10 @@ def audit_label(body: AuditLabelIn):
     rec, err = audit_plan.validate_label(body.model_dump(), item)
     if err:
         return JSONResponse({"error": err}, status_code=400)
+    fin = _audit_finished_at(body.audit_id, rec["labeler"])
+    prior = next((l for l in _audit_labels(body.audit_id) if l.get("item_id") == body.item_id and l.get("labeler") == rec["labeler"]), None)
+    if fin and prior and (prior.get("updated_at") or "") <= fin:
+        return JSONResponse({"error": "You finished this audit and saw the judge's verdicts, so your answers are locked."}, status_code=409)
     stored = store.append("audit_labels", {"audit_id": body.audit_id, "item_id": body.item_id, **rec})
     return {"ok": True, "overall_correct": rec["overall_correct"], "firebase": stored.get("_firebase")}
 
@@ -1729,6 +1741,54 @@ def audit_edit(body: AuditEditIn, x_owner_password: Optional[str] = Header(defau
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return JSONResponse({"error": "Unknown action."}, status_code=400)
+
+
+class AuditFinishIn(BaseModel):
+    audit_id: str
+    labeler: str
+
+
+@app.post("/api/audit/finish")
+def audit_finish(body: AuditFinishIn):
+    """The labeler is done with every item they hold: lock their answers and allow the results page (the judge's verdicts)."""
+    plan = _audit_plan(body.audit_id)
+    who = next((l for l in (plan or {}).get("labelers", []) if l.casefold() == body.labeler.strip().casefold()), None)
+    if not who:
+        return JSONResponse({"error": "Not a labeler of this audit."}, status_code=403)
+    done = {l["item_id"] for l in _audit_labels(body.audit_id) if l.get("labeler") == who}
+    todo = [i["item_id"] for i in plan["items"] if who in i["labelers"] and i["item_id"] not in done]
+    if todo:
+        return JSONResponse({"error": f"{len(todo)} of your items still have no answer."}, status_code=400)
+    store.append("audit_finish", {"audit_id": body.audit_id, "labeler": who})
+    return {"ok": True}
+
+
+@app.get("/api/audit/results")
+def audit_results(audit_id: str, labeler: str):
+    """Only after the labeler pressed finish: for each item they labelled, the judge's verdict and reasoning next to their own answer.
+    Other labelers' answers are never shown."""
+    plan = _audit_plan(audit_id)
+    who = next((l for l in (plan or {}).get("labelers", []) if l.casefold() == labeler.strip().casefold()), None)
+    if not who:
+        return JSONResponse({"error": "Not a labeler of this audit."}, status_code=403)
+    fin = _audit_finished_at(audit_id, who)
+    if not fin:
+        return JSONResponse({"error": "Finish your items first; the judge's verdicts are shown after that."}, status_code=403)
+    _, runs = _collect_runs(100000)
+    by_run = {r["run_id"]: r for r in runs}
+    mine = {l["item_id"]: l for l in _audit_labels(audit_id) if l.get("labeler") == who and (l.get("updated_at") or "") <= fin}
+    rows = []
+    for it in plan["items"]:
+        lab = mine.get(it["item_id"])
+        if not lab:
+            continue
+        r = by_run.get(it["run_id"]) or {}
+        jp = r.get("diagnosis_pass")
+        rows.append({"item_id": it["item_id"], "problem_id": r.get("problem_id") or it.get("problem_id"), "judge_pass": jp,
+                     "judge_reasoning": r.get("judge_reasoning") or "", "you": lab.get("overall_correct"), "your_reason": lab.get("reason") or "",
+                     "same": (jp == lab.get("overall_correct")) if isinstance(jp, bool) else None})
+    rows.sort(key=lambda x: (x["same"] is not False, x["problem_id"] or "", x["item_id"]))
+    return {"labeler": who, "rows": rows, "same": sum(1 for x in rows if x["same"]), "total": len(rows)}
 
 
 @app.get("/api/audit/progress")
