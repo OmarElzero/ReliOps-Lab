@@ -716,3 +716,6 @@ dialog.q-modal table.rd-table select { max-width: 100%; }
 .camp-row .camp-sum { margin-left: 8px; font: 11.5px var(--mono); color: var(--muted); white-space: nowrap; }
 .camp-row .camp-sum.ok { color: var(--ok); }
 .camp-row .camp-sum.bad { color: var(--bad); }
+
+.aa-q { margin-top: 10px; }
+.aa-chips { flex-wrap: wrap; margin-bottom: 10px; }

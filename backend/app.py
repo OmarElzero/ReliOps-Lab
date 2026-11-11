@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Str
 from pydantic import BaseModel
 
 import audit
+import audit_plan
 import campaign
 import claims
 import cluster
@@ -107,6 +108,11 @@ def queue_js():
 @app.get("/tasks.js")
 def tasks_js():
     return _static("tasks.js")
+
+
+@app.get("/audit.js")
+def audit_js():
+    return _static("audit.js")
 
 
 @app.get("/dashboard.js")
@@ -881,13 +887,13 @@ def _owner_password() -> str:
     return str(env.get("LAB_OWNER_PASSWORD") or os.environ.get("LAB_OWNER_PASSWORD") or "").strip()
 
 
-def _owner_gate(password: Optional[str]):
+def _owner_gate(password: Optional[str], what: str = "Adding tasks"):
     """None when the password is right; otherwise the error response. Checked here, not only in the page."""
     import hmac
     import time
     secret = _owner_password()
     if not secret:
-        return JSONResponse({"error": "Adding tasks is locked on this machine. Set LAB_OWNER_PASSWORD in the Lab's .env to unlock it "
+        return JSONResponse({"error": f"{what} is locked on this machine. Set LAB_OWNER_PASSWORD in the Lab's .env to unlock it "
                                        "(see docs/GUIDE.md)."}, status_code=403)
     if not hmac.compare_digest((password or "").encode(), secret.encode()):
         time.sleep(1.0)    # slows down guessing
@@ -1508,6 +1514,147 @@ def label(body: LabelIn):
 def judge_audit():
     _, runs = _collect_runs(5000)
     return audit.judge_audit(runs, store.read("labels"), store.read("rejudges"))
+
+
+# ---- Assigned judge audit (frozen blind sample, named labelers) --------------------------------
+class AuditDrawIn(BaseModel):
+    name: str
+    labelers: list[str]
+    groups: str = audit_plan.DEFAULT_GROUPS
+    seed: int = 20261112
+    anchors_per_stratum: int = 3
+    max_per_problem: int = 2
+    preview: bool = False
+    by: str = ""
+
+
+class AuditLabelIn(BaseModel):
+    audit_id: str
+    item_id: str
+    labeler: str
+    d1: Optional[bool] = None
+    d2: Optional[bool] = None
+    d3: Optional[bool] = None
+    confidence: Optional[int] = None
+    reason: str = ""
+
+
+def _audit_plan(audit_id: str):
+    return next((p for p in store.read("audit_plans") if p.get("audit_id") == audit_id), None)
+
+
+@app.get("/api/audit/configs")
+def audit_configs():
+    """Eligible runs per configuration, so the owner can see which prefixes to put in the draw."""
+    _, runs = _collect_runs(100000)
+    counts: dict = {}
+    for r in audit_plan.eligible(runs):
+        c = counts.setdefault(r.get("config_label") or "", {"config_label": r.get("config_label") or "", "eligible": 0, "judged_pass": 0})
+        c["eligible"] += 1
+        c["judged_pass"] += 1 if r["diagnosis_pass"] else 0
+    names = sorted({r.get("run_by") for r in runs if r.get("run_by") and r.get("run_by") != "unknown"})
+    return {"configs": sorted(counts.values(), key=lambda c: c["config_label"]), "people": names,
+            "default_groups": audit_plan.DEFAULT_GROUPS}
+
+
+@app.get("/api/audit/plans")
+def audit_plans():
+    out = []
+    for p in store.read("audit_plans"):
+        out.append({"audit_id": p["audit_id"], "name": p.get("name"), "labelers": p.get("labelers"), "created_by": p.get("created_by"),
+                    "created_at": p.get("created_at"), "items": len(p.get("items") or []),
+                    "progress": audit_plan.progress(p, [l for l in store.read("audit_labels") if l.get("audit_id") == p["audit_id"]])})
+    out.sort(key=lambda p: p.get("created_at") or "", reverse=True)
+    return {"plans": out}
+
+
+@app.post("/api/audit/draw")
+def audit_draw(body: AuditDrawIn, x_owner_password: Optional[str] = Header(default=None)):
+    bad = _owner_gate(x_owner_password, "Drawing an audit sample")
+    if bad:
+        return bad
+    audit_id = audit_plan.slug(body.name)
+    if not audit_id:
+        return JSONResponse({"error": "Give the audit a name."}, status_code=400)
+    try:
+        groups = audit_plan.parse_groups(body.groups)
+        _, runs = _collect_runs(100000)
+        items, notes = audit_plan.draw(runs, groups, body.labelers, body.seed, body.anchors_per_stratum, body.max_per_problem)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if body.preview:
+        return {"preview": True, "items": len(items), "notes": notes}
+    existing = _audit_plan(audit_id)
+    if existing and any(l.get("audit_id") == audit_id for l in store.read("audit_labels")):
+        return JSONResponse({"error": "This audit already has labels, so its sample is frozen. Use another name."}, status_code=409)
+    labelers = list(dict.fromkeys(x.strip() for x in body.labelers if x.strip()))
+    plan = store.append("audit_plans", {"audit_id": audit_id, "name": body.name.strip(), "labelers": labelers, "seed": body.seed,
+                                        "groups": body.groups, "anchors_per_stratum": body.anchors_per_stratum,
+                                        "created_by": body.by.strip(),
+                                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "notes": notes, "items": items})
+    return {"ok": True, "audit_id": audit_id, "items": len(items), "notes": notes, "firebase": plan.get("_firebase")}
+
+
+@app.get("/api/audit/mine")
+def audit_mine(audit_id: str, labeler: str):
+    """The labeler's own items: problem, what the card says a correct diagnosis must say, the diagnosis. Nothing else
+    about the run (no configuration, no judge verdict, no other labeler's answer)."""
+    plan = _audit_plan(audit_id)
+    if not plan:
+        return JSONResponse({"error": "No such audit."}, status_code=404)
+    who = next((l for l in plan["labelers"] if l.casefold() == labeler.strip().casefold()), None)
+    if not who:
+        return JSONResponse({"error": f"{labeler!r} is not a labeler of this audit. Labelers: {', '.join(plan['labelers'])}."}, status_code=403)
+    _, runs = _collect_runs(100000)
+    by_run = {r["run_id"]: r for r in runs}
+    mine_labels = {l["item_id"]: l for l in store.read("audit_labels") if l.get("audit_id") == audit_id and l.get("labeler") == who}
+    items = []
+    for it in plan["items"]:
+        if who not in it["labelers"]:
+            continue
+        r = by_run.get(it["run_id"]) or {}
+        card = runner.read_card(r.get("problem_id") or "")
+        lab = mine_labels.get(it["item_id"])
+        items.append({"item_id": it["item_id"], "problem_id": r.get("problem_id"), "diagnosis_text": r.get("diagnosis_text") or "(run not found on this machine)",
+                      "expected": runner.card_section(card, 4), "done": bool(lab),
+                      "mine": ({k: lab.get(k) for k in ("d1", "d2", "d3", "overall_correct", "confidence", "reason")} if lab else None)})
+    return {"audit_id": audit_id, "labeler": who, "items": items, "done": sum(1 for i in items if i["done"]), "total": len(items)}
+
+
+@app.post("/api/audit/label")
+def audit_label(body: AuditLabelIn):
+    plan = _audit_plan(body.audit_id)
+    if not plan:
+        return JSONResponse({"error": "No such audit."}, status_code=404)
+    item = next((i for i in plan["items"] if i["item_id"] == body.item_id), None)
+    if not item:
+        return JSONResponse({"error": "No such item."}, status_code=404)
+    rec, err = audit_plan.validate_label(body.model_dump(), item)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    stored = store.append("audit_labels", {"audit_id": body.audit_id, "item_id": body.item_id, **rec})
+    return {"ok": True, "overall_correct": rec["overall_correct"], "firebase": stored.get("_firebase")}
+
+
+@app.get("/api/audit/progress")
+def audit_progress(audit_id: str):
+    plan = _audit_plan(audit_id)
+    if not plan:
+        return JSONResponse({"error": "No such audit."}, status_code=404)
+    return {"progress": audit_plan.progress(plan, [l for l in store.read("audit_labels") if l.get("audit_id") == audit_id])}
+
+
+@app.get("/api/audit/score")
+def audit_score(audit_id: str, x_owner_password: Optional[str] = Header(default=None)):
+    """Owner only: the scores show the judge's verdicts and the strata, which would unblind a labeler."""
+    bad = _owner_gate(x_owner_password, "The audit score")
+    if bad:
+        return bad
+    plan = _audit_plan(audit_id)
+    if not plan:
+        return JSONResponse({"error": "No such audit."}, status_code=404)
+    _, runs = _collect_runs(100000)
+    return audit_plan.score(plan, runs, [l for l in store.read("audit_labels") if l.get("audit_id") == audit_id])
 
 
 @app.get("/api/rejudge")
