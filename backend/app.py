@@ -1537,6 +1537,7 @@ class AuditLabelIn(BaseModel):
     d3: Optional[bool] = None
     confidence: Optional[int] = None
     reason: str = ""
+    used_story: bool = False
 
 
 def _audit_plan(audit_id: str):
@@ -1634,6 +1635,17 @@ def audit_label(body: AuditLabelIn):
         return JSONResponse({"error": err}, status_code=400)
     stored = store.append("audit_labels", {"audit_id": body.audit_id, "item_id": body.item_id, **rec})
     return {"ok": True, "overall_correct": rec["overall_correct"], "firebase": stored.get("_firebase")}
+
+
+@app.get("/api/audit/story")
+def audit_story(audit_id: str, labeler: str, item_id: str):
+    """The agent's step-by-step story for one of the labeler's own items. Optional help: the judge only saw the diagnosis text,
+    so the label form records when a labeler opened this. Logs are not served here (they print the judge's verdict)."""
+    plan = _audit_plan(audit_id)
+    item = next((i for i in (plan or {}).get("items", []) if i["item_id"] == item_id), None)
+    if not item or not any(l.casefold() == labeler.strip().casefold() for l in item["labelers"]):
+        return PlainTextResponse("This item is not assigned to you.", status_code=403)
+    return story(item["run_id"])
 
 
 @app.get("/api/audit/progress")

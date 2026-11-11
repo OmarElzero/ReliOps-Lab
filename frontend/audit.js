@@ -31,7 +31,7 @@
     d3: "D3 Scope: does it avoid blaming what the card says not to blame, and avoid contradicting claims?",
   };
   const st = { plans: [], audit: store.get("lab_audit_id", ""), labeler: store.get("lab_audit_labeler", ""), mine: null, cur: null,
-               ans: {}, msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
+               ans: {}, story: null, msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
 
   async function ownerCall(method, url, body) {
     const res = await fetch(url, { method, headers: { "Content-Type": "application/json", "x-owner-password": pw.get() }, body: body ? JSON.stringify(body) : undefined });
@@ -67,6 +67,7 @@
     st.cur = id;
     const it = st.mine && st.mine.items.find((i) => i.item_id === id);
     st.ans = it && it.mine ? { ...it.mine } : { d1: null, d2: null, d3: null, confidence: null, reason: "" };
+    st.story = null;
   }
   async function tryUnlock(secret, quiet) {
     const res = await fetch("/api/tasks/unlock", { method: "POST", headers: { "x-owner-password": secret } });
@@ -78,7 +79,7 @@
 
   async function save() {
     const a = st.ans, it = st.mine.items.find((i) => i.item_id === st.cur);
-    const r = await jsonPost("/api/audit/label", { audit_id: st.audit, item_id: st.cur, labeler: st.labeler, d1: a.d1, d2: a.d2, d3: a.d3, confidence: a.confidence, reason: a.reason || "" });
+    const r = await jsonPost("/api/audit/label", { audit_id: st.audit, item_id: st.cur, labeler: st.labeler, d1: a.d1, d2: a.d2, d3: a.d3, confidence: a.confidence, reason: a.reason || "", used_story: !!a.used_story });
     if (!r.ok) { st.msg = r.data.error || "Could not save."; render(); return; }
     st.msg = "";
     const wasDone = it.done;
@@ -95,6 +96,22 @@
       h("div", { class: "row" }, h("button", { type: "button", class: on(true), onclick: () => set(true), text: "Yes" }),
         h("button", { type: "button", class: on(false), onclick: () => set(false), text: "No" })));
   }
+  function storyBox(it) {
+    const open = async () => {
+      st.ans.used_story = true;
+      st.story = "loading…"; render();
+      try {
+        const r = await fetch(`/api/audit/story?audit_id=${encodeURIComponent(st.audit)}&labeler=${encodeURIComponent(st.labeler)}&item_id=${encodeURIComponent(it.item_id)}`);
+        st.story = await r.text();
+      } catch (e) { st.story = "Could not load the story."; }
+      render();
+    };
+    return h("div", { class: "aa-q" },
+      st.story === null
+        ? h("div", { class: "row" }, h("button", { type: "button", class: "secondary", onclick: open, text: "Show the agent's story (optional)" }),
+            h("span", { class: "hint", text: "The judge only saw the diagnosis text above, so judge that first. Opening the story is recorded with your label." }))
+        : h("div", {}, h("div", { class: "hint", text: "Agent story (opened; recorded with your label)" }), h("pre", { class: "detail-body", style: "max-height:420px;overflow:auto", text: st.story })));
+  }
   function itemForm() {
     const it = st.mine.items.find((i) => i.item_id === st.cur);
     if (!it) return h("p", { class: "hint", text: "No items." });
@@ -103,6 +120,7 @@
     return h("div", {},
       h("div", { class: "cfg-label", text: `${it.item_id} · ${it.problem_id || "?"}` }),
       h("div", { class: "label-text", text: it.diagnosis_text }),
+      storyBox(it),
       h("div", { class: "label-expected", text: it.expected || "No problem card for this problem yet. Label against the problem's rubric and say so in the reason." }),
       yn("d1"), yn("d2"), yn("d3"),
       h("p", { class: "hint", text: `Overall (D1 and D2 both Yes): ${overall}` }),

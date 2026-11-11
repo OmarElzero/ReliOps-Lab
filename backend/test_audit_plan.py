@@ -104,6 +104,14 @@ class ApiTests(TmpRepoCase):
         ok = c.post("/api/audit/label", json={"audit_id": "final-audit", "item_id": it["item_id"], "labeler": "Noura", "d1": True, "d2": True, "d3": True, "confidence": 3})
         self.assertTrue(ok.json()["overall_correct"])
         self.assertEqual(self.draw().status_code, 409)
+        story = c.get("/api/audit/story", params={"audit_id": "final-audit", "labeler": "Noura", "item_id": it["item_id"]})
+        self.assertNotEqual(story.status_code, 403)  # allowed; the fake run has no transcript (and its id is not a UUID), so 400 or 404
+        theirs = next((i for i in c.get("/api/audit/mine", params={"audit_id": "final-audit", "labeler": "Omar Betawy"}).json()["items"]
+                       if i["item_id"] not in {x["item_id"] for x in mine["items"]}), None)
+        self.assertEqual(c.get("/api/audit/story", params={"audit_id": "final-audit", "labeler": "Noura", "item_id": theirs["item_id"]}).status_code, 403)
+        c.post("/api/audit/label", json={"audit_id": "final-audit", "item_id": it["item_id"], "labeler": "Noura", "d1": True, "d2": True, "d3": True, "confidence": 3, "used_story": True})
+        sc = c.get("/api/audit/score", params={"audit_id": "final-audit"}, headers=self.H).json()
+        self.assertEqual(sc["story_used"], 1)
 
     def test_cannot_label_someone_elses_item_and_score_is_owner_only(self):
         c = self.client

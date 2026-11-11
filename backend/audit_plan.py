@@ -126,7 +126,7 @@ def validate_label(body: dict, item: dict) -> tuple[dict | None, str | None]:
     if (not overall or conf == 1) and not reason:
         return None, "Write one sentence of reason when the answer is Incorrect or you are unsure."
     return {"labeler": canon, "d1": body["d1"], "d2": body["d2"], "d3": body["d3"], "overall_correct": overall,
-            "confidence": conf, "reason": reason}, None
+            "confidence": conf, "reason": reason, "used_story": bool(body.get("used_story"))}, None
 
 
 def progress(plan: dict, labels: list[dict]) -> list[dict]:
@@ -180,4 +180,5 @@ def score(plan: dict, runs: list[dict], labels: list[dict]) -> dict:
     rows.sort(key=lambda r: (r["group"] != "ALL", r["group"]))
     return {"progress": progress(plan, labels), "labeler_pairs": pairs, "judge_vs_human": rows,
             "disagreements": disagreements, "ties": ties,
+            "story_used": sum(1 for l in labels if l.get("used_story")), "labels": len(labels),
             "note": "Half of every stratum is judge-pass and half judge-fail, so read the two error counts, not only the total."}
