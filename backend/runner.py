@@ -1824,7 +1824,13 @@ def stream_rejudge(judge_model: str, items: list[dict], on_result=None, script: 
     inp, out = work / f"{stamp}_in.jsonl", work / f"{stamp}_out.jsonl"
     inp.write_text("\n".join(json.dumps(i) for i in items) + "\n", encoding="utf-8")
     env = {"JUDGE_MODEL_ID": judge_model, "PYTHONPATH": str(sregym_dir())}
-    for k, v in merged_env_vars().items():
+    merged = merged_env_vars()
+    # A judge key/base set for the usual judge (e.g. a Gemini key) must not be sent to another provider:
+    # with a different provider prefix, leave them out so LiteLLM uses that provider's own key (e.g. OPENAI_API_KEY).
+    same_provider = (merged.get("JUDGE_MODEL_ID") or "").split("/", 1)[0] == judge_model.split("/", 1)[0]
+    for k, v in merged.items():
+        if not same_provider and k in ("JUDGE_API_KEY", "JUDGE_API_BASE"):
+            continue
         env.setdefault(k, v)
     cmd = ["uv", "run", "python", str(script), "--in", str(inp), "--out", str(out)]
     yield from _stream(cmd, cwd=sregym_dir(), env=env)
