@@ -14,6 +14,7 @@ import json
 import os
 import queue
 import threading
+from collections import defaultdict
 import time
 from pathlib import Path
 from typing import Optional
@@ -1791,6 +1792,88 @@ def audit_results(audit_id: str, labeler: str):
     return {"labeler": who, "rows": rows, "same": sum(1 for x in rows if x["same"]), "total": len(rows)}
 
 
+# ---- Re-judging an audit sample in the background ---------------------------------------------
+# Not a jobs.py job: it needs no cluster, so it can run while a queue runs. It lives in a server thread,
+# so closing or refreshing the page does not stop it; the page polls /api/audit/rejudge/status.
+_RJ: dict = {"thread": None, "lines": [], "done": True, "model": "", "audit_id": "", "started": "", "stop": False}
+_RJ_LOCK = threading.Lock()
+
+
+class AuditRejudgeIn(BaseModel):
+    audit_id: str
+    judge_model: str
+
+
+def _rejudge_items(plan: dict, judge_model: str) -> list[dict]:
+    _, runs = _collect_runs(100000)
+    want = {i["run_id"] for i in plan["items"]}
+    have = {r["run_id"] for r in store.read("rejudges") if r.get("judge_model_id") == judge_model and isinstance(r.get("success"), bool)}
+    return [{"run_id": r["run_id"], "problem_id": r["problem_id"], "submission": r["diagnosis_text"]}
+            for r in runs if r.get("run_id") in want and r["run_id"] not in have and (r.get("diagnosis_text") or "").strip()]
+
+
+@app.post("/api/audit/rejudge/start")
+def audit_rejudge_start(body: AuditRejudgeIn, x_owner_password: Optional[str] = Header(default=None)):
+    bad = _owner_gate(x_owner_password, "Re-judging an audit")
+    if bad:
+        return bad
+    plan = _audit_plan(body.audit_id)
+    if not plan:
+        return JSONResponse({"error": "No such audit."}, status_code=404)
+    model = body.judge_model.strip()
+    if not model:
+        return JSONResponse({"error": "Type the judge model first."}, status_code=400)
+    with _RJ_LOCK:
+        if _RJ["thread"] is not None and _RJ["thread"].is_alive():
+            return JSONResponse({"error": f"A re-judge is already running ({_RJ['model']}). Wait for it to finish."}, status_code=409)
+        items = _rejudge_items(plan, model)
+        _RJ.update(lines=[f"{time.strftime('%H:%M:%S')} re-judging {len(items)} diagnoses with {model} "
+                          f"({len(plan['items']) - len(items)} already have a verdict from it)\n"],
+                   done=False, model=model, audit_id=body.audit_id, started=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+        def work():
+            log_path = runner.new_log_file("rejudge")
+            try:
+                with log_path.open("w", encoding="utf-8") as logf:
+                    for line in runner.stream_rejudge(model, items, on_result=lambda rec: store.append("rejudges", rec)):
+                        _RJ["lines"].append(line)
+                        logf.write(line)
+                        logf.flush()
+            except Exception as e:  # noqa: BLE001
+                _RJ["lines"].append(f"re-judge stopped: {type(e).__name__}: {e}\n")
+            finally:
+                _RJ["lines"].append(f"[full log: {log_path}]\n")
+                _RJ["done"] = True
+
+        t = threading.Thread(target=work, daemon=True)
+        _RJ["thread"] = t
+        t.start()
+    return {"ok": True, "items": len(items)}
+
+
+@app.get("/api/audit/rejudge/status")
+def audit_rejudge_status(audit_id: str = "", since: int = 0):
+    """Log lines from `since`, whether the re-judge is still running, and how many sample runs already have a verdict."""
+    lines = _RJ["lines"]
+    out = {"running": not _RJ["done"], "model": _RJ["model"], "audit_id": _RJ["audit_id"], "started": _RJ["started"],
+           "lines": lines[since:], "next": len(lines)}
+    plan = _audit_plan(audit_id) if audit_id else None
+    if plan:
+        want = {i["run_id"] for i in plan["items"]}
+        got: dict = defaultdict(set)
+        errors: dict = defaultdict(int)
+        for r in store.read("rejudges"):
+            if r.get("run_id") in want:
+                if isinstance(r.get("success"), bool):
+                    got[r.get("judge_model_id")].add(r["run_id"])
+                elif r.get("error"):
+                    errors[r.get("judge_model_id")] += 1
+        out["verdicts"] = {m: {"done": len(v), "of": len(want), "errors": errors.get(m, 0)} for m, v in got.items()}
+        for m, n in errors.items():
+            out["verdicts"].setdefault(m, {"done": 0, "of": len(want), "errors": n})
+    return out
+
+
 @app.get("/api/audit/progress")
 def audit_progress(audit_id: str):
     plan = _audit_plan(audit_id)
@@ -1826,7 +1909,7 @@ def rejudge(judge_model: str, scope: str = "labeled", audit_id: str = ""):
         scope = "labeled"
     else:
         labeled = {l["run_id"] for l in store.read("labels")}
-    have = {r["run_id"] for r in store.read("rejudges") if r.get("judge_model_id") == judge_model}
+    have = {r["run_id"] for r in store.read("rejudges") if r.get("judge_model_id") == judge_model and isinstance(r.get("success"), bool)}
     items = [{"run_id": r["run_id"], "problem_id": r["problem_id"], "submission": r["diagnosis_text"]}
              for r in runs if (r.get("diagnosis_text") or "").strip() and r["run_id"] not in have
              and (scope == "all" or r["run_id"] in labeled)]

@@ -243,6 +243,38 @@ class ApiTests(TmpRepoCase):
         sc = c.get("/api/audit/score", params={"audit_id": "final-audit"}, headers=self.H).json()
         self.assertEqual(sc["second_judges"][0]["rows"][0]["n"], 18)
 
+    def test_background_rejudge_saves_each_verdict_and_resumes(self):
+        import time as _t
+        import runner
+        c = self.client
+        self.draw()
+        calls = []
+        def fake(model, items, on_result=None, script=None):
+            calls.append(len(items))
+            for k, it in enumerate(items):
+                ok = k != 0 or len(calls) > 1          # the first item errors on the first pass only
+                on_result({"run_id": it["run_id"], "judge_model_id": model, "success": True if ok else None, "error": None if ok else "boom"})
+                yield f"[{k + 1}/{len(items)}]\n"
+        with mock.patch.object(runner, "stream_rejudge", fake), mock.patch.object(runner, "new_log_file", lambda kind: self.tmp / f"{kind}.log"):
+            self.assertEqual(c.post("/api/audit/rejudge/start", json={"audit_id": "final-audit", "judge_model": "openai/x"}).status_code, 403)
+            r = c.post("/api/audit/rejudge/start", json={"audit_id": "final-audit", "judge_model": "openai/x"}, headers=self.H).json()
+            self.assertEqual(r["items"], 18)
+            for _ in range(50):
+                st = c.get("/api/audit/rejudge/status", params={"audit_id": "final-audit"}).json()
+                if not st["running"]:
+                    break
+                _t.sleep(0.05)
+            self.assertEqual(st["verdicts"]["openai/x"]["done"], 17)
+            self.assertEqual(st["verdicts"]["openai/x"]["errors"], 1)
+            r2 = c.post("/api/audit/rejudge/start", json={"audit_id": "final-audit", "judge_model": "openai/x"}, headers=self.H).json()
+            self.assertEqual(r2["items"], 1)                  # only the errored one is retried
+            for _ in range(50):
+                st = c.get("/api/audit/rejudge/status", params={"audit_id": "final-audit"}).json()
+                if not st["running"]:
+                    break
+                _t.sleep(0.05)
+            self.assertEqual(st["verdicts"]["openai/x"]["done"], 18)
+
     def test_cannot_label_someone_elses_item_and_score_is_owner_only(self):
         c = self.client
         self.draw()

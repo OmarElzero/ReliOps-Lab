@@ -193,7 +193,7 @@
   function labelerPanel() {
     const plan = st.plans.find((p) => p.audit_id === st.audit);
     if (!plan) return h("p", { class: "hint", text: "No audit has been drawn yet. The owner draws one in the panel below, then it shows up here for each assigned person." });
-    const sel = h("select", { onchange: async (e) => { st.audit = e.target.value; store.set("lab_audit_id", st.audit); st.labeler = ""; st.msg = ""; await load(); } },
+    const sel = h("select", { onchange: async (e) => { st.audit = e.target.value; store.set("lab_audit_id", st.audit); st.labeler = ""; st.msg = ""; st.rjNext = undefined; await load(); } },
       st.plans.map((p) => h("option", { value: p.audit_id, selected: p.audit_id === st.audit, text: `${p.name} (${p.items} runs)` })));
     const me = h("select", { onchange: async (e) => { st.labeler = e.target.value; store.set("lab_audit_labeler", st.labeler); st.msg = ""; await loadMine(); render(); } },
       h("option", { value: "", text: "I am…" }), (plan.labelers || []).map((l) => h("option", { value: l, selected: l === st.labeler, text: l })));
@@ -302,29 +302,50 @@
       st.editMsg ? h("p", { class: "hint", text: st.editMsg }) : null,
       m.history.length ? h("details", {}, h("summary", { text: `History (${m.history.length})` }), h("pre", { class: "detail-body", text: m.history.map((e) => `${e.at}  ${e.by || "?"}  ${e.action}: ${e.detail}`).join("\n") })) : null);
   }
+  let rjTimer = null;
+  async function pollRejudge(reset) {
+    if (reset) { st.rjLog = ""; st.rjNext = 0; }
+    try {
+      const d = await jsonGet(`/api/audit/rejudge/status?audit_id=${encodeURIComponent(st.audit)}&since=${st.rjNext || 0}`);
+      st.rjLog = (st.rjLog || "") + d.lines.join("");
+      st.rjNext = d.next;
+      st.rjRunning = d.running;
+      st.rjVerdicts = d.verdicts || {};
+      st.rjModel = d.model;
+    } catch (e) { /* server busy: try again on the next tick */ }
+    const p = document.getElementById("aa-rj-log");
+    if (p) { p.textContent = st.rjLog; p.scrollTop = p.scrollHeight; }
+    const c = document.getElementById("aa-rj-count");
+    if (c) c.textContent = rjCountText();
+    clearTimeout(rjTimer);
+    if (st.rjRunning) rjTimer = setTimeout(() => pollRejudge(false), 2500);
+    else if (st.rjWasRunning) { st.rjWasRunning = false; render(); }
+    if (st.rjRunning) st.rjWasRunning = true;
+  }
+  function rjCountText() {
+    const v = st.rjVerdicts || {};
+    const parts = Object.entries(v).map(([m, x]) => `${m}: ${x.done} of ${x.of} have a verdict${x.errors ? `, ${x.errors} errors (retried next time)` : ""}`);
+    return (st.rjRunning ? `Running (${st.rjModel}). It keeps going if you close or refresh this page. ` : "") + (parts.join(" · ") || "No second-judge verdicts yet.");
+  }
   function secondJudgeBox() {
     if (!st.audit) return h("span");
+    if (st.rjNext === undefined) { st.rjNext = 0; pollRejudge(true); }
     const model = h("input", { placeholder: "judge model, as SREGym's judge takes it (e.g. openai/<model>)", value: store.get("lab_audit_judge2", ""), style: "flex:1 1 360px" });
-    const log = h("pre", { class: "detail-body", style: "max-height:200px;overflow:auto", text: st.rjLog || "" });
-    const go = () => {
+    const go = async () => {
       const m = model.value.trim();
-      if (!m) { st.rjLog = "Type the judge model first."; render(); return; }
       store.set("lab_audit_judge2", m);
-      st.rjLog = "";
-      const es = new EventSource("/api/rejudge?" + new URLSearchParams({ judge_model: m, scope: "audit", audit_id: st.audit }).toString());
-      es.onmessage = (ev) => {
-        if (ev.data === "[[DONE]]") { es.close(); st.rjLog += "\n[done: press Score to see the agreement]\n"; render(); return; }
-        st.rjLog += JSON.parse(ev.data);
-        const p = document.getElementById("aa-rj-log"); if (p) { p.textContent = st.rjLog; p.scrollTop = p.scrollHeight; }
-      };
-      es.onerror = () => { es.close(); st.rjLog += "\n[stream ended]\n"; render(); };
-      render();
+      const r = await ownerCall("POST", "/api/audit/rejudge/start", { audit_id: st.audit, judge_model: m });
+      if (!r.ok) { st.rjLog = (st.rjLog || "") + (r.data.error || "Could not start.") + "\n"; render(); return; }
+      st.rjRunning = true; render(); pollRejudge(false);
     };
+    const log = h("pre", { class: "detail-body", style: "max-height:220px;overflow:auto", text: st.rjLog || "" });
     log.id = "aa-rj-log";
+    const count = h("p", { class: "hint", text: rjCountText() });
+    count.id = "aa-rj-count";
     return h("div", { style: "margin-top:12px" }, h("h3", { text: "Second judge on this sample" }),
-      h("p", { class: "hint", text: "Re-grades the same diagnoses with another model through SREGym's own judge (same reference answer, only the judge model changes). Runs on this machine, inside SREGym's environment, with that model's API key set. Runs already re-judged by the same model are skipped. This measures agreement between two judges, not correctness: it complements a human audit, it does not replace one." }),
-      h("div", { class: "row" }, model, h("button", { type: "button", class: "secondary", text: "Re-judge this sample", onclick: go })),
-      st.rjLog ? log : null);
+      h("p", { class: "hint", text: "Re-grades the same diagnoses with another model through SREGym's own judge (same reference answer, only the judge model changes). Runs in the background on this machine, inside SREGym's environment, with that model's API key set; each verdict is saved as it arrives, and runs that already have a verdict from the same model are skipped, so pressing it again resumes. This measures agreement between two judges, not correctness: it complements a human audit, it does not replace one." }),
+      h("div", { class: "row" }, model, h("button", { type: "button", class: "secondary", disabled: !!st.rjRunning, text: st.rjRunning ? "Re-judging…" : "Re-judge this sample", onclick: go })),
+      count, st.rjLog ? log : null);
   }
   function scoreView() {
     const s = st.score;

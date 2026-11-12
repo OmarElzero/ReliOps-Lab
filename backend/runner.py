@@ -1833,10 +1833,23 @@ def stream_rejudge(judge_model: str, items: list[dict], on_result=None, script: 
             continue
         env.setdefault(k, v)
     cmd = ["uv", "run", "python", str(script), "--in", str(inp), "--out", str(out)]
-    yield from _stream(cmd, cwd=sregym_dir(), env=env)
-    n = 0
-    if out.is_file():
-        for line in out.read_text(encoding="utf-8").splitlines():
+    # Verdicts are stored as soon as the script writes them (one JSON line per item), not only at the end,
+    # so a stopped or interrupted re-judge keeps everything it finished.
+    state = {"pos": 0, "n": 0, "buf": ""}
+
+    def harvest():
+        if not out.is_file():
+            return
+        with out.open("r", encoding="utf-8") as f:
+            f.seek(state["pos"])
+            chunk = f.read()
+            state["pos"] = f.tell()
+        data = state["buf"] + chunk
+        lines = data.split("\n")
+        state["buf"] = lines.pop()  # an unfinished last line waits for the next read
+        for line in lines:
+            if not line.strip():
+                continue
             try:
                 v = json.loads(line)
             except json.JSONDecodeError:
@@ -1852,8 +1865,14 @@ def stream_rejudge(judge_model: str, items: list[dict], on_result=None, script: 
                    "checklist": json.dumps(v.get("checklist") or [], default=str), "error": v.get("error")}
             if on_result:
                 on_result(rec)
-            n += 1
-    yield f"----- stored {n} re-judge verdict(s) from {judge_model} -----\n"
+            state["n"] += 1
+
+    for line in _stream(cmd, cwd=sregym_dir(), env=env):
+        yield line
+        harvest()
+    state["buf"] += "\n"
+    harvest()
+    yield f"----- stored {state['n']} re-judge verdict(s) from {judge_model} -----\n"
 
 
 def render_story(record: dict) -> str:
