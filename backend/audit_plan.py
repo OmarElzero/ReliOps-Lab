@@ -274,7 +274,7 @@ def progress(plan: dict, labels: list[dict]) -> list[dict]:
     return out
 
 
-def score(plan: dict, runs: list[dict], labels: list[dict]) -> dict:
+def score(plan: dict, runs: list[dict], labels: list[dict], rejudges: list[dict] | None = None) -> dict:
     by_run = {r["run_id"]: r for r in runs}
     byitem: dict[str, dict[str, bool]] = defaultdict(dict)
     for l in labels:
@@ -289,6 +289,7 @@ def score(plan: dict, runs: list[dict], labels: list[dict]) -> dict:
             pairs.append({"a": x, "b": y, "n": len(ids), "agree": sum(p == q for p, q in zip(A, B)), "kappa": stats.cohen_kappa(A, B)})
     groups: dict[str, list[tuple[bool, bool]]] = defaultdict(list)
     disagreements, ties = [], []
+    consensus: dict[str, bool] = {}
     for it in plan["items"]:
         votes = list(byitem[it["item_id"]].values())
         if not votes:
@@ -297,6 +298,7 @@ def score(plan: dict, runs: list[dict], labels: list[dict]) -> dict:
             ties.append(it["item_id"])  # the labelers split: left out of judge-versus-human, listed so the owner can settle it
             continue
         human = sum(votes) * 2 > len(votes)
+        consensus[it["item_id"]] = human
         run = by_run.get(it["run_id"]) or {}
         judge = run.get("diagnosis_pass")
         if not isinstance(judge, bool):
@@ -317,4 +319,51 @@ def score(plan: dict, runs: list[dict], labels: list[dict]) -> dict:
     return {"progress": progress(plan, labels), "labeler_pairs": pairs, "judge_vs_human": rows,
             "disagreements": disagreements, "ties": ties,
             "story_used": sum(1 for l in labels if l.get("used_story")), "labels": len(labels),
+            "second_judges": second_judges(plan, runs, rejudges or [], consensus),
             "note": "Half of every stratum is judge-pass and half judge-fail, so read the two error counts, not only the total."}
+
+
+def second_judges(plan: dict, runs: list[dict], rejudges: list[dict], human: dict | None = None) -> list[dict]:
+    """For every other judge model that re-judged runs of this sample: its agreement with the original judge, overall
+    and by stratum, plus (when there are human labels) with the human consensus. Only the judge model changes in a
+    re-judge; the reference answer is SREGym's own."""
+    by_run = {r["run_id"]: r for r in runs}
+    item_of = {i["run_id"]: i for i in plan["items"]}
+    models: dict[str, dict[str, bool]] = defaultdict(dict)
+    for rj in rejudges:
+        if rj.get("run_id") in item_of and isinstance(rj.get("success"), bool) and rj.get("judge_model_id"):
+            models[rj["judge_model_id"]][rj["run_id"]] = rj["success"]
+    out = []
+    for model, verdicts in sorted(models.items()):
+        groups: dict[str, list[tuple[bool, bool]]] = defaultdict(list)
+        diffs = []
+        for rid, second in verdicts.items():
+            orig = (by_run.get(rid) or {}).get("diagnosis_pass")
+            if not isinstance(orig, bool):
+                continue
+            it = item_of[rid]
+            groups["ALL"].append((orig, second))
+            groups[it["stratum"]].append((orig, second))
+            if orig != second:
+                diffs.append({"item_id": it["item_id"], "run_id": rid, "stratum": it["stratum"], "problem_id": it.get("problem_id"),
+                              "original": orig, "second": second})
+        rows = []
+        for g, ps in groups.items():
+            A, B = [p[0] for p in ps], [p[1] for p in ps]
+            n, ag = len(ps), sum(a == b for a, b in ps)
+            rows.append({"group": g, "n": n, "agree": ag, "wilson": stats.wilson(ag, n), "kappa": stats.cohen_kappa(A, B),
+                         "orig_pass_second_fail": sum(1 for a, b in ps if a and not b),
+                         "orig_fail_second_pass": sum(1 for a, b in ps if b and not a),
+                         "orig_pass": sum(A), "second_pass": sum(B)})
+        rows.sort(key=lambda r: (r["group"] != "ALL", r["group"]))
+        vs_human = None
+        if human:
+            ids = [i for i in verdicts if item_of[i]["item_id"] in human]
+            if ids:
+                J = [verdicts[i] for i in ids]
+                H = [human[item_of[i]["item_id"]] for i in ids]
+                ag = sum(a == b for a, b in zip(J, H))
+                vs_human = {"n": len(ids), "agree": ag, "kappa": stats.cohen_kappa(J, H)}
+        out.append({"model": model, "rejudged": len(verdicts), "of": len(plan["items"]), "rows": rows, "vs_human": vs_human,
+                    "disagreements": sorted(diffs, key=lambda d: d["item_id"])})
+    return out

@@ -31,7 +31,7 @@
     d3: "D3 Scope: does it avoid blaming what the card says not to blame, and avoid contradicting claims?",
   };
   const st = { plans: [], audit: store.get("lab_audit_id", ""), labeler: store.get("lab_audit_labeler", ""), mine: null, cur: null,
-               ans: {}, story: null, card: null, results: null, prob: "", cards: {}, manage: null, confirmDelete: false, editMsg: "", msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
+               ans: {}, story: null, card: null, results: null, rjLog: "", prob: "", cards: {}, manage: null, confirmDelete: false, editMsg: "", msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
 
   async function ownerCall(method, url, body) {
     const res = await fetch(url, { method, headers: { "Content-Type": "application/json", "x-owner-password": pw.get() }, body: body ? JSON.stringify(body) : undefined });
@@ -257,6 +257,7 @@
         h("button", { type: "button", class: "primary", text: "Draw and assign", onclick: () => go(false) })), out,
       table(["Configuration", "Eligible runs", "Judge passed"], (cfg.configs || []).map((c) => [c.config_label || "(none)", c.eligible, c.judged_pass])),
       manageView(),
+      secondJudgeBox(),
       h("div", { class: "row", style: "margin-top:12px" },
         h("button", { type: "button", class: "secondary", text: "Score the selected audit", onclick: async () => {
           const r = await ownerCall("GET", `/api/audit/score?audit_id=${encodeURIComponent(st.audit)}`);
@@ -301,6 +302,30 @@
       st.editMsg ? h("p", { class: "hint", text: st.editMsg }) : null,
       m.history.length ? h("details", {}, h("summary", { text: `History (${m.history.length})` }), h("pre", { class: "detail-body", text: m.history.map((e) => `${e.at}  ${e.by || "?"}  ${e.action}: ${e.detail}`).join("\n") })) : null);
   }
+  function secondJudgeBox() {
+    if (!st.audit) return h("span");
+    const model = h("input", { placeholder: "judge model, as SREGym's judge takes it (e.g. openai/<model>)", value: store.get("lab_audit_judge2", ""), style: "flex:1 1 360px" });
+    const log = h("pre", { class: "detail-body", style: "max-height:200px;overflow:auto", text: st.rjLog || "" });
+    const go = () => {
+      const m = model.value.trim();
+      if (!m) { st.rjLog = "Type the judge model first."; render(); return; }
+      store.set("lab_audit_judge2", m);
+      st.rjLog = "";
+      const es = new EventSource("/api/rejudge?" + new URLSearchParams({ judge_model: m, scope: "audit", audit_id: st.audit }).toString());
+      es.onmessage = (ev) => {
+        if (ev.data === "[[DONE]]") { es.close(); st.rjLog += "\n[done: press Score to see the agreement]\n"; render(); return; }
+        st.rjLog += JSON.parse(ev.data);
+        const p = document.getElementById("aa-rj-log"); if (p) { p.textContent = st.rjLog; p.scrollTop = p.scrollHeight; }
+      };
+      es.onerror = () => { es.close(); st.rjLog += "\n[stream ended]\n"; render(); };
+      render();
+    };
+    log.id = "aa-rj-log";
+    return h("div", { style: "margin-top:12px" }, h("h3", { text: "Second judge on this sample" }),
+      h("p", { class: "hint", text: "Re-grades the same diagnoses with another model through SREGym's own judge (same reference answer, only the judge model changes). Runs on this machine, inside SREGym's environment, with that model's API key set. Runs already re-judged by the same model are skipped. This measures agreement between two judges, not correctness: it complements a human audit, it does not replace one." }),
+      h("div", { class: "row" }, model, h("button", { type: "button", class: "secondary", text: "Re-judge this sample", onclick: go })),
+      st.rjLog ? log : null);
+  }
   function scoreView() {
     const s = st.score;
     if (!s) return h("span");
@@ -312,6 +337,11 @@
       table(["Group", "n", "Agree", "95% Wilson", "Kappa", "Judge pass, human wrong", "Judge fail, human right"],
         s.judge_vs_human.map((r) => [r.group, r.n, `${r.agree} (${Math.round(100 * r.agree / r.n)}%)`, lo(r.wilson), kap(r.kappa), `${r.fp}/${r.judge_pass}`, `${r.fn}/${r.judge_fail}`])),
       s.ties.length ? h("p", { class: "hint", text: `Tied labels, left out: ${s.ties.join(", ")}` }) : null,
+      (s.second_judges || []).map((sj) => h("div", {}, h("h3", { text: `Second judge: ${sj.model} (${sj.rejudged} of ${sj.of} re-judged)` }),
+        table(["Group", "n", "Agree", "95% Wilson", "Kappa", "Original pass, second fail", "Original fail, second pass", "Pass rate original / second"],
+          sj.rows.map((r) => [r.group, r.n, `${r.agree} (${Math.round(100 * r.agree / r.n)}%)`, lo(r.wilson), kap(r.kappa), r.orig_pass_second_fail, r.orig_fail_second_pass, `${r.orig_pass}/${r.n} vs ${r.second_pass}/${r.n}`])),
+        sj.vs_human ? h("p", { class: "hint", text: `Against the human labels: ${sj.vs_human.agree} of ${sj.vs_human.n} agree, kappa ${kap(sj.vs_human.kappa)}.` }) : null,
+        sj.disagreements.length ? table(["Item", "Stratum", "Problem", "Original judge", "Second judge"], sj.disagreements.map((d) => [d.item_id, d.stratum, d.problem_id, d.original ? "pass" : "fail", d.second ? "pass" : "fail"])) : null)),
       s.disagreements.length ? table(["Item", "Stratum", "Problem", "Judge", "Human"], s.disagreements.map((d) => [d.item_id, d.stratum, d.problem_id, d.judge ? "pass" : "fail", d.human ? "correct" : "incorrect"])) : null);
   }
 

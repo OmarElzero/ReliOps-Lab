@@ -1809,15 +1809,23 @@ def audit_score(audit_id: str, x_owner_password: Optional[str] = Header(default=
     if not plan:
         return JSONResponse({"error": "No such audit."}, status_code=404)
     _, runs = _collect_runs(100000)
-    return audit_plan.score(plan, runs, [l for l in store.read("audit_labels") if l.get("audit_id") == audit_id])
+    return audit_plan.score(plan, runs, [l for l in store.read("audit_labels") if l.get("audit_id") == audit_id], store.read("rejudges"))
 
 
 @app.get("/api/rejudge")
-def rejudge(judge_model: str, scope: str = "labeled"):
+def rejudge(judge_model: str, scope: str = "labeled", audit_id: str = ""):
     """Re-judge stored diagnoses with another judge. scope=labeled (default) re-judges only runs a person
-    has hand-labelled, which is what the agreement table needs; scope=all re-judges every stored diagnosis."""
-    _, runs = _collect_runs(5000)
-    labeled = {l["run_id"] for l in store.read("labels")}
+    has hand-labelled, which is what the agreement table needs; scope=audit re-judges the runs of one assigned
+    audit sample (audit_id); scope=all re-judges every stored diagnosis."""
+    _, runs = _collect_runs(100000)
+    if scope == "audit":
+        plan = _audit_plan(audit_id)
+        if not plan:
+            return JSONResponse({"error": "No such audit."}, status_code=404)
+        labeled = {i["run_id"] for i in plan["items"]}
+        scope = "labeled"
+    else:
+        labeled = {l["run_id"] for l in store.read("labels")}
     have = {r["run_id"] for r in store.read("rejudges") if r.get("judge_model_id") == judge_model}
     items = [{"run_id": r["run_id"], "problem_id": r["problem_id"], "submission": r["diagnosis_text"]}
              for r in runs if (r.get("diagnosis_text") or "").strip() and r["run_id"] not in have

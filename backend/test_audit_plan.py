@@ -102,6 +102,21 @@ class PureTests(unittest.TestCase):
         removed, refused = audit_plan.remove_items(plan, [{"item_id": keep, "labeler": "Noura"}], [keep, plan["items"][1]["item_id"]])
         self.assertEqual((len(removed), refused), (1, [keep]))
 
+    def test_second_judge_agreement(self):
+        runs = fake_runs(["R3 a", "R2 x"])
+        items, _ = audit_plan.draw(runs, audit_plan.parse_groups("R3 | split | 6\nR2 | pooled | 6"), NAMES, 4)
+        plan = {"labelers": NAMES, "items": items}
+        by = {r["run_id"]: r for r in runs}
+        rej = [{"run_id": i["run_id"], "judge_model_id": "openai/x", "success": by[i["run_id"]]["diagnosis_pass"] if k else not by[i["run_id"]]["diagnosis_pass"]}
+               for k, i in enumerate(items)]  # flips exactly the first item
+        rej.append({"run_id": "not-in-sample", "judge_model_id": "openai/x", "success": True})
+        sj = audit_plan.second_judges(plan, runs, rej)
+        self.assertEqual(len(sj), 1)
+        allrow = sj[0]["rows"][0]
+        self.assertEqual((allrow["group"], allrow["n"], allrow["agree"]), ("ALL", 12, 11))
+        self.assertEqual(len(sj[0]["disagreements"]), 1)
+        self.assertEqual(sj[0]["rejudged"], 12)
+
     def test_validate_label(self):
         item = {"item_id": "I001", "labelers": ["Noura"]}
         ok = {"labeler": "noura", "d1": True, "d2": True, "d3": False, "confidence": 3, "reason": ""}
@@ -209,6 +224,24 @@ class ApiTests(TmpRepoCase):
         self.assertEqual(res["total"], len(mine["items"]))
         self.assertEqual(set(res["rows"][0]), {"item_id", "problem_id", "judge_pass", "judge_reasoning", "you", "your_reason", "same"})
         self.assertEqual(c.get("/api/audit/results", params={"audit_id": "final-audit", "labeler": "Zeinab Mohamed"}).status_code, 403)  # others still blind
+
+    def test_rejudge_scope_audit_reaches_the_score(self):
+        c = self.client
+        self.draw()
+        import runner
+        seen = {}
+        def fake(model, items, on_result=None, script=None):
+            seen["n"] = len(items)
+            for it in items:
+                on_result({"run_id": it["run_id"], "judge_model_id": model, "success": True})
+                yield "ok\n"
+        with mock.patch.object(runner, "stream_rejudge", fake):
+            body = c.get("/api/rejudge", params={"judge_model": "openai/x", "scope": "audit", "audit_id": "final-audit"}).text
+        self.assertIn("[[DONE]]", body)
+        self.assertEqual(seen["n"], 18)
+        self.assertEqual(c.get("/api/rejudge", params={"judge_model": "openai/x", "scope": "audit", "audit_id": "nope"}).status_code, 404)
+        sc = c.get("/api/audit/score", params={"audit_id": "final-audit"}, headers=self.H).json()
+        self.assertEqual(sc["second_judges"][0]["rows"][0]["n"], 18)
 
     def test_cannot_label_someone_elses_item_and_score_is_owner_only(self):
         c = self.client
