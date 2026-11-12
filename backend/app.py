@@ -2019,7 +2019,7 @@ def export_experiment_zip(name: str):
         shared = firebase_sync.read_story(run.get("run_id") or "")
         return (shared, "") if shared else (None, why)
 
-    data, _ = export.experiment_zip(name, mine, read_log, read_story)
+    data, _ = export.experiment_zip(name, mine, read_log, read_story, store.read("rejudges"))
     safe = export._slug(name, 60)
     return Response(data, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=experiment_{safe}.zip"})
 

@@ -105,7 +105,7 @@ def experiment_names(runs: list[dict]) -> list[dict]:
     return [{"name": n, "runs": c} for n, c in sorted(counts.items())]
 
 
-def experiment_zip(name: str, runs: list[dict], read_log, read_story) -> tuple[bytes, dict]:
+def experiment_zip(name: str, runs: list[dict], read_log, read_story, rejudges: list[dict] | None = None) -> tuple[bytes, dict]:
     """`runs` are the flat dashboard rows of ONE experiment. `read_log(run) -> str|None` and
     `read_story(run) -> (str|None, why_not)` are supplied by the caller so this stays testable.
     Never includes keys or .env: only fields already shown in the Results tab are written."""
@@ -155,6 +155,10 @@ def experiment_zip(name: str, runs: list[dict], read_log, read_story) -> tuple[b
             rows.append({**r, "export_folder": folder, "export_notes": "; ".join(notes)})
         z.writestr("runs.csv", _csv(rows, RUN_COLUMNS + ["export_folder", "export_notes"]))
         z.writestr("runs.jsonl", "\n".join(json.dumps(r, default=str) for r in rows) + "\n")
+        ids = {r.get("run_id") for r in rows}
+        rj = [x for x in (rejudges or []) if x.get("run_id") in ids]
+        if rj:  # second-judge verdicts on these runs (same diagnosis, another judge model)
+            z.writestr("rejudges.jsonl", "\n".join(json.dumps(x, default=str) for x in rj) + "\n")
         lines = [f"# Experiment export: {name}", "",
                  f"- runs: {report['runs']}  (logs: {report['with_log']}, stories: {report['with_story']}, "
                  f"incomplete: {report['incomplete']}, possible duplicates: {report['duplicates']})", "",
