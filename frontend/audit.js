@@ -245,7 +245,7 @@
       remember();
       const r = await ownerCall("POST", "/api/audit/draw", { ...body(), preview });
       st.preview = r.ok ? `${preview ? "Preview: " : "Drawn: "}${r.data.items} runs. ${(r.data.notes || []).join(" | ")}` : (r.data.error || "Failed.");
-      if (r.ok && !preview) await load(); else render();
+      if (r.ok && !preview) { st.audit = r.data.audit_id; store.set("lab_audit_id", st.audit); st.labeler = ""; st.rjNext = undefined; st.score = null; await load(); } else render();
     };
     box.append(
       h("p", { class: "hint", text: "Draw once, on the final exports; the sample stores run ids, so later runs cannot change it. Half of every stratum is judge-pass and half judge-fail. With whole problems per person, nobody learns more problems than needed; the overlap problems (labelled by two people) are what measure how far the labelers agree. After labels arrive you can still redistribute, add runs or remove runs below, but not draw the same name again." }),
