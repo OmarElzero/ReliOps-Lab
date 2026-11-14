@@ -910,7 +910,14 @@ class TaskIn(BaseModel):
     queue_id: str = ""
     experiment: str = ""
     due: str = ""
+    urgent: Optional[bool] = None      # None = keep what the task already has
+    state: Optional[str] = None
     run_by: Optional[str] = None
+
+
+class TaskFlagsIn(BaseModel):
+    urgent: Optional[bool] = None
+    state: Optional[str] = None
 
 
 class TaskProgressIn(BaseModel):
@@ -934,7 +941,7 @@ def tasks_unlock(x_owner_password: Optional[str] = Header(default=None)):
 @app.get("/api/tasks")
 def tasks_list():
     tasks = [t for t in store.read("tasks") if not t.get("deleted")]
-    tasks.sort(key=lambda t: (t.get("phase") or "~", t.get("created_at") or t.get("updated_at") or ""))
+    tasks.sort(key=lambda t: (t.get("phase") or "~", not t.get("urgent"), t.get("created_at") or t.get("updated_at") or ""))
     ids = {t["task_id"] for t in tasks}
     return {"tasks": tasks, "progress": [p for p in store.read("task_progress") if p.get("task_id") in ids],
             "locked_off": not _owner_password()}
@@ -962,10 +969,34 @@ def tasks_edit(task_id: str, body: TaskIn, x_owner_password: Optional[str] = Hea
     if old is None:
         return JSONResponse({"error": "unknown task"}, status_code=404)
     try:
-        t = tasks_mod.clean_task(body.model_dump(), task_id=task_id, created_by=old.get("created_by") or body.run_by or "")
+        d = body.model_dump()
+        for k in ("urgent", "state"):       # an edit that does not mention them keeps them
+            if d.get(k) is None:
+                d[k] = old.get(k)
+        t = tasks_mod.clean_task(d, task_id=task_id, created_by=old.get("created_by") or body.run_by or "")
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return {"ok": True, "task": store.append("tasks", {**t, "created_at": old.get("created_at", "")})}
+
+
+@app.post("/api/tasks/{task_id}/flags")
+def tasks_flags(task_id: str, body: TaskFlagsIn, x_owner_password: Optional[str] = Header(default=None)):
+    """Owner only: mark a task urgent or not, and active, on hold or not needed any more. Nothing else on the task changes."""
+    bad = _owner_gate(x_owner_password)
+    if bad:
+        return bad
+    old = next((t for t in store.read("tasks") if t["task_id"] == task_id and not t.get("deleted")), None)
+    if old is None:
+        return JSONResponse({"error": "unknown task"}, status_code=404)
+    new = {**old}
+    if body.urgent is not None:
+        new["urgent"] = bool(body.urgent)
+    if body.state is not None:
+        if body.state not in tasks_mod.STATES:
+            return JSONResponse({"error": f"state must be one of: {', '.join(tasks_mod.STATES)}"}, status_code=400)
+        new["state"] = body.state
+    new.pop("_firebase", None)
+    return {"ok": True, "task": store.append("tasks", new)}
 
 
 @app.delete("/api/tasks/{task_id}")

@@ -10,6 +10,8 @@ from __future__ import annotations
 import uuid
 
 STATUSES = ("todo", "doing", "done", "blocked")
+# Set by the owner on the task itself (not per person): active, on hold for now, or not needed any more.
+STATES = ("active", "on_hold", "not_needed")
 LIMITS = {"title": 200, "detail": 2000, "phase": 80, "experiment": 200, "due": 40, "name": 60, "note": 500}
 MAX_ASSIGNEES = 20
 
@@ -19,7 +21,8 @@ def _text(value, key: str) -> str:
 
 
 def clean_task(d: dict, task_id: str | None = None, created_by: str = "") -> dict:
-    """A task as stored. Raises ValueError with a sentence the page can show."""
+    """A task as stored. Raises ValueError with a sentence the page can show. `urgent` and `state` default to the
+    ordinary values when the caller does not send them, so tasks written before they existed keep working."""
     title = _text(d.get("title"), "title")
     if not title:
         raise ValueError("a task needs a title")
@@ -30,10 +33,18 @@ def clean_task(d: dict, task_id: str | None = None, created_by: str = "") -> dic
             names.append(n)
     if len(names) > MAX_ASSIGNEES:
         raise ValueError(f"at most {MAX_ASSIGNEES} names per task")
-    return {"task_id": task_id or uuid.uuid4().hex[:8], "title": title, "detail": _text(d.get("detail"), "detail"),
+    state = str(d.get("state") or "active")
+    if state not in STATES:
+        raise ValueError(f"state must be one of: {', '.join(STATES)}")
+    return {"task_id": task_id or uuid.uuid4().hex[:8], "title": title, "urgent": bool(d.get("urgent")), "state": state, "detail": _text(d.get("detail"), "detail"),
             "phase": _text(d.get("phase"), "phase"), "assignees": names,
             "queue_id": _text(d.get("queue_id"), "name"), "experiment": _text(d.get("experiment"), "experiment"),
             "due": _text(d.get("due"), "due"), "created_by": created_by, "deleted": False}
+
+
+def is_live(task: dict) -> bool:
+    """A task someone should be working on now: not deleted, not on hold, not marked as not needed."""
+    return not task.get("deleted") and (task.get("state") or "active") == "active"
 
 
 def is_for(task: dict, who: str) -> bool:
@@ -56,4 +67,4 @@ def clean_progress(task: dict, who: str, status: str, note: str = "") -> dict:
 def open_count(tasks: list[dict], progress: list[dict], who: str) -> int:
     """Tasks for `who` that are not done yet."""
     mine = {p["task_id"]: p for p in progress if (p.get("who_key") or "") == (who or "").strip().lower()}
-    return sum(1 for t in tasks if not t.get("deleted") and is_for(t, who) and (mine.get(t["task_id"]) or {}).get("status") != "done")
+    return sum(1 for t in tasks if is_live(t) and is_for(t, who) and (mine.get(t["task_id"]) or {}).get("status") != "done")

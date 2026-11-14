@@ -25,6 +25,7 @@
     return n;
   }
   const STATUS = { todo: "To do", doing: "Doing", done: "Done", blocked: "Blocked" };
+  const STATE = { active: "Active", on_hold: "On hold", not_needed: "Not needed any more" };
   let data = { tasks: [], progress: [], locked_off: true };
   let mode = pref.get("lab_tasks_mode", "mine");       // "mine" | "all"
   let showDone = pref.get("lab_tasks_done", "0") === "1";
@@ -36,12 +37,14 @@
   const isFor = (t, name) => !(t.assignees || []).length || (t.assignees || []).some((n) => n.toLowerCase() === (name || "").toLowerCase());
   const progressOf = (t) => data.progress.filter((p) => p.task_id === t.task_id);
   const myStatus = (t) => { const p = progressOf(t).find((x) => (x.who_key || "") === me().toLowerCase()); return p ? p.status : "todo"; };
-  const openFor = (t) => isFor(t, me()) && me() && myStatus(t) !== "done";
+  const stateOf = (t) => t.state || "active";
+  const openFor = (t) => stateOf(t) === "active" && isFor(t, me()) && me() && myStatus(t) !== "done";
 
   function badge() {
     const n = data.tasks.filter(openFor).length;
     const b = document.getElementById("tasks-badge");
-    if (b) { b.hidden = !n; b.textContent = String(n); b.title = `${n} open task${n === 1 ? "" : "s"} for ${me()}`; }
+    const hot = data.tasks.some((t) => t.urgent && openFor(t));
+    if (b) { b.hidden = !n; b.textContent = String(n); b.classList.toggle("urgent", hot); b.title = `${n} open task${n === 1 ? "" : "s"} for ${me()}` + (hot ? ", at least one urgent" : ""); }
   }
   async function load() {
     try {
@@ -65,6 +68,11 @@
     try { out = await res.json(); } catch (e) { /* not JSON */ }
     if (res.status === 403) { owner = false; pw.set(""); }
     return { ok: res.ok, data: out };
+  }
+  async function setFlags(t, flags) {
+    const r = await ownerCall("POST", `/api/tasks/${encodeURIComponent(t.task_id)}/flags`, flags);
+    msg = r.ok ? "" : (r.data.error || "Could not save.");
+    await load();
   }
   async function setStatus(t, status, note) {
     if (!me()) { msg = "Type your name in the box at the top first."; render(); return; }
@@ -99,6 +107,8 @@
       queue: h("select", { "aria-label": "Queue" }, h("option", { value: "", text: "No queue" }), ...queues.map((q) => h("option", { value: q.queue_id, text: q.name, selected: !!t && t.queue_id === q.queue_id }))),
       exp: h("input", { type: "text", value: t ? t.experiment : "", placeholder: "Experiment name the runs go under", "aria-label": "Experiment name" }),
       due: h("input", { type: "text", value: t ? t.due : "", placeholder: "e.g. 9 Nov evening", "aria-label": "Due" }),
+      urgent: h("input", { type: "checkbox", checked: !!(t && t.urgent) }),
+      state: h("select", { "aria-label": "State" }, ...Object.entries(STATE).map(([k, v]) => h("option", { value: k, text: v, selected: !!t && stateOf(t) === k }))),
     };
     f.detail.value = t ? t.detail : "";
     const err = h("p", { class: "step-issue", hidden: true });
@@ -108,14 +118,15 @@
       row("Title", f.title), row("Details", f.detail), row("Phase", f.phase),
       h("div", { class: "tk-field" }, h("span", { text: "For (leave all empty = everyone)" }), h("div", { class: "pick-list" }, boxes.length ? boxes : h("span", { class: "hint", text: "No names yet: type them below." })), f.extra),
       h("div", { class: "tk-two" }, row("Saved queue (optional)", f.queue), row("Experiment name (optional)", f.exp)),
-      row("Due (optional, free text)", f.due), err,
+      row("Due (optional, free text)", f.due),
+      h("div", { class: "tk-two" }, h("label", { class: "tk-field" }, h("span", { text: "Urgent" }), h("span", {}, f.urgent, " do this first")), row("State", f.state)), err,
       h("div", { class: "row-end" }, h("button", { class: "secondary", type: "button", text: "Cancel", onclick: () => d.close() }),
         h("button", { class: "primary", type: "button", text: t ? "Save" : "Add task", onclick: save })));
     d.showModal();
     async function save() {
       const sel = [...d.querySelectorAll('.pick-list input:checked')].map((x) => x.value);
       f.extra.value.split(",").map((x) => x.trim()).filter(Boolean).forEach((x) => { if (!sel.some((y) => y.toLowerCase() === x.toLowerCase())) sel.push(x); });
-      const body = { title: f.title.value, detail: f.detail.value, phase: f.phase.value, assignees: sel, queue_id: f.queue.value, experiment: f.exp.value, due: f.due.value, run_by: me() || null };
+      const body = { title: f.title.value, detail: f.detail.value, phase: f.phase.value, assignees: sel, queue_id: f.queue.value, experiment: f.exp.value, due: f.due.value, urgent: f.urgent.checked, state: f.state.value, run_by: me() || null };
       const r = await ownerCall(t ? "PUT" : "POST", t ? `/api/tasks/${encodeURIComponent(t.task_id)}` : "/api/tasks", body);
       if (!r.ok) { err.hidden = false; err.textContent = r.data.error || "Could not save."; if (!owner) { d.close(); msg = r.data.error || ""; load(); } return; }
       d.close(); msg = ""; load();
@@ -141,11 +152,20 @@
     const noteIn = h("input", { type: "text", placeholder: "Note (optional): what you did, what blocks you", "aria-label": "Your note", value: (prog.find((x) => (x.who_key || "") === me().toLowerCase()) || {}).note || "" });
     const mineRow = mine ? h("div", { class: "tk-mine" }, h("span", { class: "hint", text: "Your status" }),
       ...Object.keys(STATUS).map((k) => h("button", { class: "small " + (st === k ? "primary" : "secondary"), type: "button", text: STATUS[k], onclick: () => setStatus(t, k, noteIn.value) })), noteIn) : null;
+    const state = stateOf(t);
     const ownerRow = owner ? h("div", { class: "tk-owner-row" },
+      h("button", { class: "ghost small", type: "button", text: t.urgent ? "Not urgent" : "Mark urgent", onclick: () => setFlags(t, { urgent: !t.urgent }) }),
+      state === "active" ? h("button", { class: "ghost small", type: "button", text: "Put on hold", onclick: () => setFlags(t, { state: "on_hold" }) }) : null,
+      state === "active" ? h("button", { class: "ghost small", type: "button", text: "Not needed any more", onclick: () => setFlags(t, { state: "not_needed" }) })
+        : h("button", { class: "ghost small", type: "button", text: state === "on_hold" ? "Resume" : "Bring back", onclick: () => setFlags(t, { state: "active" }) }),
       h("button", { class: "ghost small", type: "button", text: "Edit", onclick: () => openForm(t) }),
       h("button", { class: "ghost small bad", type: "button", text: sure === t.task_id ? "Press again to delete" : "Delete", onclick: () => remove(t) })) : null;
-    return h("article", { class: "tk-card" + (mine && st === "done" ? " done" : "") },
-      h("div", { class: "tk-top" }, h("h3", { text: t.title }), t.due ? h("span", { class: "tk-due", text: "Due " + t.due }) : null),
+    return h("article", { class: "tk-card" + (mine && st === "done" ? " done" : "") + (t.urgent && state === "active" ? " urgent" : "") + (state === "on_hold" ? " hold" : "") + (state === "not_needed" ? " not-needed" : "") },
+      h("div", { class: "tk-top" }, h("h3", { text: t.title }),
+        t.urgent && state === "active" ? h("span", { class: "tk-flag", text: "Urgent" }) : null,
+        state === "on_hold" ? h("span", { class: "tk-flag hold", text: "On hold" }) : null,
+        state === "not_needed" ? h("span", { class: "tk-flag gone", text: "Not needed any more" }) : null,
+        t.due ? h("span", { class: "tk-due", text: "Due " + t.due }) : null),
       t.detail ? h("p", { class: "tk-detail", text: t.detail }) : null,
       h("div", { class: "tk-meta" }, h("span", { class: "hint", text: who.length ? "For" : "For everyone" }), ...chips, ...others,
         t.queue_id ? h("button", { class: "secondary small", type: "button", text: "Open queue", title: t.experiment ? `Opens the queue with the experiment name "${t.experiment}"` : "Opens the queue", onclick: () => openQueueOf(t) }) : null),
@@ -154,7 +174,11 @@
   function render() {
     const name = me();
     drawnFor = name;
-    const list = data.tasks.filter((t) => (mode === "all" || (name && isFor(t, name))) && (showDone || mode === "all" || myStatus(t) !== "done" || !name));
+    const audience = (t) => mode === "all" || (name && isFor(t, name));
+    const list = data.tasks.filter((t) => stateOf(t) !== "not_needed" && audience(t) && (showDone || mode === "all" || myStatus(t) !== "done" || !name))
+      .sort((a, b) => (b.urgent && stateOf(b) === "active" ? 1 : 0) - (a.urgent && stateOf(a) === "active" ? 1 : 0));
+    const gone = data.tasks.filter((t) => stateOf(t) === "not_needed" && audience(t));
+    const hot = list.filter((t) => t.urgent && stateOf(t) === "active" && (mode === "all" || myStatus(t) !== "done")).length;
     const groups = new Map();
     list.forEach((t) => { const k = t.phase || "No phase"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(t); });
     const seg = (k, text) => h("button", { class: "seg-b" + (mode === k ? " on" : ""), type: "button", text, onclick: () => { mode = k; pref.set("lab_tasks_mode", k); render(); } });
@@ -167,12 +191,14 @@
     root.replaceChildren(...[
       h("div", { class: "tk-head" },
         h("div", { class: "tk-seg" }, seg("mine", name ? `My tasks (${data.tasks.filter(openFor).length} open)` : "My tasks"), seg("all", "Everyone's")),
+        hot ? h("span", { class: "tk-flag", text: `${hot} urgent` }) : null,
         mode === "mine" ? h("label", { class: "hint" }, h("input", { type: "checkbox", checked: showDone, onchange: (e) => { showDone = e.target.checked; pref.set("lab_tasks_done", showDone ? "1" : "0"); render(); } }), " show the ones I finished") : null,
         h("div", { class: "tk-ownerbox" }, ownerBox)),
       msg ? h("div", { class: "warn-box tk-msg", text: msg }) : null,
       mode === "mine" && !name ? h("div", { class: "warn-box tk-msg", text: "Type your name in the box at the top right to see the tasks that are yours. Until then, \"Everyone's\" shows all of them." }) : null,
       !list.length ? h("p", { class: "hint tk-empty", text: data.tasks.length ? (mode === "mine" ? "Nothing open for you. Everyone's shows the whole list." : "No tasks.") : "No tasks yet. The owner adds them here." }) : null,
-      ...[...groups].map(([phase, ts]) => h("section", { class: "tk-phase" }, h("h2", {}, phase, h("span", { class: "hint", text: ` · ${ts.length} task${ts.length === 1 ? "" : "s"}` })), ...ts.map(card)))].filter((x) => x != null && x !== false));
+      ...[...groups].map(([phase, ts]) => h("section", { class: "tk-phase" }, h("h2", {}, phase, h("span", { class: "hint", text: ` · ${ts.length} task${ts.length === 1 ? "" : "s"}` })), ...ts.map(card))),
+      gone.length ? h("details", { class: "tk-gone" }, h("summary", { text: `Not needed any more (${gone.length})` }), ...gone.map(card)) : null].filter((x) => x != null && x !== false));
   }
 
   TAB_LOADERS.tasks = () => load();

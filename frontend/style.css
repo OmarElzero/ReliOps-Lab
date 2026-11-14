@@ -685,6 +685,15 @@ dialog.q-modal table.rd-table select { max-width: 100%; }
 .tk-meta, .tk-mine, .tk-owner-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .tk-meta .hint, .tk-mine .hint { margin: 0; }
 .tk-mine input[type="text"] { flex: 1 1 220px; min-width: 0; }
+.tk-card.urgent { border-color: var(--bad); border-left-width: 4px; }
+.tk-card.hold { opacity: .8; border-style: dashed; }
+.tk-card.not-needed { opacity: .6; }
+.tk-card.not-needed h3 { text-decoration: line-through; }
+.tk-flag { font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 999px; background: var(--bad-soft); color: var(--bad); white-space: nowrap; }
+.tk-flag.hold { background: var(--warn-soft); color: var(--warn); }
+.tk-flag.gone { background: var(--sunken); color: var(--muted, inherit); }
+.tab-badge.urgent { background: var(--bad); }
+.tk-gone > summary { cursor: pointer; margin: 14px 0 6px; font-size: 13px; opacity: .8; }
 .tk-chip { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--sunken); border: 1px solid var(--border); }
 .tk-chip.s-done { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
 .tk-chip.s-doing { background: var(--accent-soft); border-color: transparent; }

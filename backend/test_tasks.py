@@ -37,6 +37,25 @@ class TaskLogicTests(unittest.TestCase):
         self.assertEqual(tasks.open_count([a, b], prog, "Omar"), 1)           # only B is for Omar, and he has not started it
 
 
+class TaskFlagsLogicTests(unittest.TestCase):
+    def test_urgent_and_state_defaults_and_validation(self):
+        t = tasks.clean_task({"title": "A"})
+        self.assertEqual((t["urgent"], t["state"]), (False, "active"))                 # tasks written before the fields existed
+        t = tasks.clean_task({"title": "A", "urgent": True, "state": "on_hold"})
+        self.assertEqual((t["urgent"], t["state"]), (True, "on_hold"))
+        with self.assertRaises(ValueError):
+            tasks.clean_task({"title": "A", "state": "someday"})
+
+    def test_tasks_not_needed_or_on_hold_are_not_open(self):
+        live = tasks.clean_task({"title": "L"}, task_id="l")
+        hold = tasks.clean_task({"title": "H", "state": "on_hold"}, task_id="h")
+        gone = tasks.clean_task({"title": "G", "state": "not_needed"}, task_id="g")
+        old = {"task_id": "o", "title": "no fields at all", "assignees": []}         # a record from before this change
+        self.assertEqual(tasks.open_count([live, hold, gone, old], [], "Omar"), 2)    # live + old
+        self.assertTrue(tasks.is_live(old))
+        self.assertFalse(tasks.is_live(gone))
+
+
 class TaskApiTests(TmpRepoCase):
     def setUp(self):
         super().setUp()
@@ -90,6 +109,32 @@ class TaskApiTests(TmpRepoCase):
             self.assertEqual(c.delete(f"/api/tasks/{tid}", headers=ok).status_code, 200)
             self.assertEqual(c.get("/api/tasks").json()["tasks"], [])
             self.assertEqual(c.put("/api/tasks/zzz", json={"title": "x"}, headers=ok).status_code, 404)
+
+    def test_only_the_owner_sets_urgent_and_state_and_edits_keep_them(self):
+        c = self.client
+        ok = {"x-owner-password": "boss"}
+        with self.env():
+            tid = c.post("/api/tasks", json={"title": "T", "phase": "P"}, headers=ok).json()["task"]["task_id"]
+            other = c.post("/api/tasks", json={"title": "U", "phase": "P"}, headers=ok).json()["task"]["task_id"]
+            url = f"/api/tasks/{tid}/flags"
+            self.assertEqual(c.post(url, json={"urgent": True}).status_code, 403)                                  # no password
+            self.assertEqual(c.post("/api/tasks/zzz/flags", json={"urgent": True}, headers=ok).status_code, 404)
+            self.assertEqual(c.post(url, json={"state": "someday"}, headers=ok).status_code, 400)
+            self.assertEqual(c.post(url, json={"urgent": True}, headers=ok).status_code, 200)
+            self.assertEqual(c.post(url, json={"state": "on_hold"}, headers=ok).status_code, 200)                  # urgent stays
+            t = next(x for x in c.get("/api/tasks").json()["tasks"] if x["task_id"] == tid)
+            self.assertEqual((t["urgent"], t["state"], t["title"], t["phase"]), (True, "on_hold", "T", "P"))
+            # an edit that does not mention the fields keeps them; one that does changes them
+            self.assertEqual(c.put(f"/api/tasks/{tid}", json={"title": "T2", "phase": "P"}, headers=ok).status_code, 200)
+            t = next(x for x in c.get("/api/tasks").json()["tasks"] if x["task_id"] == tid)
+            self.assertEqual((t["urgent"], t["state"], t["title"]), (True, "on_hold", "T2"))
+            self.assertEqual(c.put(f"/api/tasks/{tid}", json={"title": "T2", "urgent": False, "state": "not_needed"}, headers=ok).status_code, 200)
+            t = next(x for x in c.get("/api/tasks").json()["tasks"] if x["task_id"] == tid)
+            self.assertEqual((t["urgent"], t["state"]), (False, "not_needed"))
+            # an urgent task is listed before the others in its phase
+            self.assertEqual(c.post(f"/api/tasks/{other}/flags", json={"urgent": True}, headers=ok).status_code, 200)
+            order = [x["task_id"] for x in c.get("/api/tasks").json()["tasks"]]
+            self.assertEqual(order[0], other)
 
     def test_the_page_serves_the_tab_and_its_script(self):
         c = self.client
