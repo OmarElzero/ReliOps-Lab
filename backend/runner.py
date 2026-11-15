@@ -35,7 +35,7 @@ AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AW
                   "SELFCHECK", "SOAK", "CATALOGUE_V2", "K8S_KNOWLEDGE",
                   "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "ROUTE_REVIEW", "ROUTE_MULTI", "FLAT_ARGS", "PROC_V2", "REF", "EXCAP", "FLOW", "NULL_AGENT",
                   # agent/react_v3 only (ReliOps plan 22); reliops_v2 ignores them
-                  "EVIDENCE_FIRST", "TRANSACTIONAL_FIX", "FINAL_MODEL", "DIAG_VOTE")
+                  "EVIDENCE_FIRST", "TRANSACTIONAL_FIX", "T1_DRIVER", "FINAL_MODEL", "DIAG_VOTE")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
@@ -63,6 +63,7 @@ AGENT_SWITCH_HELP = {
     "NULL_AGENT": "calibration: a do-nothing agent (no model call); a problem it passes has a check that passes without a fix",
     "EVIDENCE_FIRST": "C-027 (reliops_v3): a fixed read-only collector runs before the first diagnosis turn; its evidence cards open the conversation",
     "TRANSACTIONAL_FIX": "C-029 T1 (reliops_v3): a fix must be proven by re-running the read that showed the fault; restore and retry if not",
+    "T1_DRIVER": "C-033 T1 v2 (reliops_v3, needs TRANSACTIONAL_FIX): the driver checks the namespace health after a fix and restores it if worse or no effect",
     "FINAL_MODEL": "C-030 M1 (reliops_v3, exploratory): one call to a stronger model writes the final diagnosis",
     "DIAG_VOTE": "C-031 S1 (reliops_v3): three independent diagnosis drafts, one call picks the best supported",
 }
