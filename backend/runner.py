@@ -33,7 +33,9 @@ RELIOPS_BRANCH = os.environ.get("RELIOPS_BRANCH", "claude/determined-einstein-mj
 # every switch not chosen for a step is passed as "off", so a stray line in a .env cannot turn one on.
 AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AWARE", "FAULT_EXISTS", "SURVEY", "LEDGER",
                   "SELFCHECK", "SOAK", "CATALOGUE_V2", "K8S_KNOWLEDGE",
-                  "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "ROUTE_REVIEW", "ROUTE_MULTI", "FLAT_ARGS", "PROC_V2", "REF", "EXCAP", "FLOW", "NULL_AGENT")
+                  "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "ROUTE_REVIEW", "ROUTE_MULTI", "FLAT_ARGS", "PROC_V2", "REF", "EXCAP", "FLOW", "NULL_AGENT",
+                  # agent/react_v3 only (ReliOps plan 22); reliops_v2 ignores them
+                  "EVIDENCE_FIRST", "TRANSACTIONAL_FIX", "FINAL_MODEL", "DIAG_VOTE")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
@@ -59,9 +61,14 @@ AGENT_SWITCH_HELP = {
     "ROUTE_MULTI": "R3: needs ROUTING; one procedure when the abnormal things are in one place, up to two (max three) when scattered or none",
     "ROUTING": "R3: triage, pick a problem category, follow its general procedure (needs knowledge/procedures.md); writes wait for it",
     "NULL_AGENT": "calibration: a do-nothing agent (no model call); a problem it passes has a check that passes without a fix",
+    "EVIDENCE_FIRST": "C-027 (reliops_v3): a fixed read-only collector runs before the first diagnosis turn; its evidence cards open the conversation",
+    "TRANSACTIONAL_FIX": "C-029 T1 (reliops_v3): a fix must be proven by re-running the read that showed the fault; restore and retry if not",
+    "FINAL_MODEL": "C-030 M1 (reliops_v3, exploratory): one call to a stronger model writes the final diagnosis",
+    "DIAG_VOTE": "C-031 S1 (reliops_v3): three independent diagnosis drafts, one call picks the best supported",
 }
-SWITCH_AGENT = "reliops_v2"
-OUR_AGENTS = ("reliops_v1", "reliops_v2")
+SWITCH_AGENT = "reliops_v2"                       # the default agent with switches (UI)
+SWITCH_AGENTS = ("reliops_v2", "reliops_v3")      # every agent that reads REACT_V1_* switches (reliops_v3: ReliOps plan 22)
+OUR_AGENTS = ("reliops_v1", "reliops_v2", "reliops_v3")
 
 
 def clean_switches(raw) -> list[str]:
@@ -607,14 +614,14 @@ def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops
         out.append(f"[check] GEMINI_API_KEY contains a space, a quote or a '#' (it starts with {gk[:4]}... and has {len(gk)} characters). "
                    f"A key never contains those, so the line in the .env probably carries extra text. Google will reject it.")
     try:
-        pkg = "react_v2" if agent == "reliops_v2" else "react_v1"
+        pkg = {"reliops_v2": "react_v2", "reliops_v3": "react_v3"}.get(agent, "react_v1")
         driver = (reliops or reliops_dir()) / "agent" / pkg / "driver.py"
         if agent in OUR_AGENTS and not rebuilding and driver.exists() and shutil.which("docker"):
             r = subprocess.run(["docker", "image", "inspect", "-f", "{{.Created}}", "sregym-agent-base:latest"],
                                capture_output=True, text=True, timeout=10)
             if r.returncode == 0 and r.stdout.strip():
                 from datetime import datetime
-                created = datetime.fromisoformat(r.stdout.strip().replace("Z", "+00:00")[:26].rstrip(".") + "+00:00")
+                created = docker_created(r.stdout)
                 if driver.stat().st_mtime > created.timestamp():
                     out.append(f"[check] the agent image looks older than agent/{pkg}/driver.py. Run scripts/sync_agent.sh and tick "
                                "'Force-build the agent image' for the next run, or the old driver code runs.")
@@ -1308,6 +1315,19 @@ def machine_versions() -> str:
     return "; ".join(parts)
 
 
+def docker_created(text: str):
+    """`docker image inspect -f {{.Created}}` as an aware datetime. Docker may print local time with its offset
+    (2026-11-15T01:24:14.523199249+02:00); the offset was dropped before, so on a machine east of UTC an old image
+    looked newer than the agent code and was not rebuilt (15 Nov 2026)."""
+    from datetime import datetime
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)?", text.strip())
+    if not m:
+        raise ValueError(text)
+    frac = "." + (m.group(2) or ".0")[1:7].ljust(6, "0")     # Python 3.10 accepts exactly 6 digits
+    off = m.group(3) or "Z"
+    return datetime.fromisoformat(m.group(1) + frac + ("+00:00" if off == "Z" else off))
+
+
 def agent_image_stale(agent: str) -> str | None:
     """Why the agent image must be rebuilt before this run, or None. The image is built from the agent copy in the SREGym
     clone (clients/<agent>, written by scripts/sync_agent.sh). If any file there is newer than the image, the image holds
@@ -1326,7 +1346,7 @@ def agent_image_stale(agent: str) -> str | None:
         return "there is no agent image yet"
     try:
         from datetime import datetime
-        created = datetime.fromisoformat(r.stdout.strip().replace("Z", "+00:00")[:26].rstrip(".") + "+00:00").timestamp()
+        created = docker_created(r.stdout).timestamp()
     except ValueError:
         return None
     newest = max((f.stat().st_mtime for f in copy.rglob("*") if f.is_file() and "__pycache__" not in f.parts), default=0.0)
@@ -1340,7 +1360,7 @@ def agent_switch_problem(agent: str, switches: list[str]) -> str | None:
     does not know is silently ignored by the agent, so the run would record the switch and not apply it. Checked in the
     Lab's ReliOps clone (agent/react_v2/features.py) and in the copy the agent image is built from
     (clients/reliops_v2/features.py in the SREGym clone)."""
-    if not switches or agent != SWITCH_AGENT:
+    if not switches or agent not in SWITCH_AGENTS:
         return None
     def missing(path: Path) -> list[str] | None:
         try:
@@ -1349,13 +1369,14 @@ def agent_switch_problem(agent: str, switches: list[str]) -> str | None:
             return None
         return [n for n in switches if f'"{n}"' not in text]
     src = reliops_dir() / "agent" / "react_v2" / "features.py"
-    gone = missing(src)
+    # reliops_v3 is synced into the SREGym clone from the development repo, not from this clone: check only that copy
+    gone = missing(src) if agent == "reliops_v2" else None
     if gone:
         commit = (_git_commit_safe() or "?")[:8]
         return (f"The agent code in this machine's ReliOps clone (commit {commit}) does not know {', '.join(gone)}, so the agent would "
                 "ignore it and still record it. Press Run setup (it pulls the latest ReliOps), then run bash scripts/sync_agent.sh "
                 "and tick 'Force-build the agent image' for the next run.")
-    gone = missing(sregym_dir() / "clients" / "reliops_v2" / "features.py")
+    gone = missing(sregym_dir() / "clients" / agent / "features.py")
     if gone:
         return (f"The agent copy in the SREGym clone does not know {', '.join(gone)}. In the ReliOps folder run: bash scripts/sync_agent.sh, "
                 "then tick 'Force-build the agent image' for the next run.")
@@ -1933,10 +1954,10 @@ def stream_campaign(
     if action_space:
         base_env["REACT_V1_ACTION_SPACE"] = action_space
     switches = clean_switches(agent_switches)
-    if switches and agent != SWITCH_AGENT:
-        yield f"Agent switches only exist in {SWITCH_AGENT}; {agent} would ignore {', '.join(switches)}. Nothing was run.\n"
+    if switches and agent not in SWITCH_AGENTS:
+        yield f"Agent switches only exist in {', '.join(SWITCH_AGENTS)}; {agent} would ignore {', '.join(switches)}. Nothing was run.\n"
         return
-    if agent == SWITCH_AGENT:
+    if agent in SWITCH_AGENTS:
         for name in AGENT_SWITCHES:
             base_env[f"REACT_V1_{name}"] = "on" if name in switches else "off"
         base_env["REACT_V1_VARIANT"] = (config_label or "").strip()

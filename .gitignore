@@ -1,10 +1,16 @@
 __pycache__/
 *.pyc
 .venv/
-*.env
+
+
 # Any Firebase/service-account key, whatever it's named (people don't always use the suggested
 # name — e.g. "SAK.json", or the console's own default like "reliops-75ba9-firebase-adminsdk-....json"):
 *.json
 
 # Windows download markers that appear next to files copied from Windows into WSL
 *:Zone.Identifier
+
+# keys: never commit (restored 15 Nov 2026; the *.env line had been removed locally)
+.env
+.env.*
+*.env

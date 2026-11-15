@@ -45,8 +45,8 @@ def clean_step(raw: dict) -> dict:
         raise ValueError("a frozen step needs a frozen campaign (manifest): freeze one in the Campaigns tab")
     import runner  # local import: runner does not import this module, but keep the dependency one-way
     switches = runner.clean_switches(raw.get("agent_switches"))
-    if switches and agent_id != runner.SWITCH_AGENT:
-        raise ValueError(f"agent switches only exist in {runner.SWITCH_AGENT}; pick that agent or untick the switches")
+    if switches and agent_id not in runner.SWITCH_AGENTS:
+        raise ValueError(f"agent switches only exist in {', '.join(runner.SWITCH_AGENTS)}; pick one of them or untick the switches")
     try:
         repeat_n = max(1, int(raw.get("repeat_n") or 1))
     except (TypeError, ValueError):
