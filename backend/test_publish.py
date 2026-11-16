@@ -102,6 +102,65 @@ class PublisherTests(unittest.TestCase):
         self.assertNotIn("diagnosis", " ".join(shown))
 
 
+
+class TeamTests(unittest.TestCase):
+    NOW = 1_800_000_000.0
+
+    def iso(self, ago_s):
+        import time as _t
+        return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(self.NOW - ago_s))
+
+    def claim(self, ago_s, **kw):
+        c = {"experiment": "E", "share": 1, "machines": 2, "queue_name": "Q", "run_by": "omar", "machine": "vm",
+             "status": "running", "now_problem": "p1", "run_k": 3, "run_total": 9, "repeat": 2, "repeat_n": 3,
+             "problem_started_at": self.iso(ago_s), "started_at": self.iso(3600), "updated_at": self.iso(ago_s)}
+        c.update(kw)
+        return c
+
+    def test_each_machine_shows_its_current_run_and_its_count(self):
+        team = publish.build_team([self.claim(60), self.claim(120, machine="laptop", run_by="noura", now_problem="p2")],
+                                  [run(1), run(2, run_by="noura")], now=self.NOW, include_final=False, names=True)
+        self.assertEqual([m["machine"] for m in team], ["vm", "laptop"])
+        vm = team[0]
+        self.assertEqual((vm["state"], vm["problem"], vm["run_k"], vm["repeat"], vm["recorded"]), ("running", "p1", 3, 2, 1))
+        self.assertAlmostEqual(vm["problem_started_at"], self.NOW - 60, delta=1)
+        self.assertEqual(vm["last_run"]["outcome"], "pass")
+
+    def test_long_silence_is_silent_and_old_machines_are_left_out(self):
+        team = publish.build_team([self.claim(50 * 60), self.claim(2 * 86400, machine="old")], [], now=self.NOW,
+                                  include_final=False, names=True)
+        self.assertEqual([(m["machine"], m["state"]) for m in team], [("vm", "silent")])
+
+    def test_latest_claim_per_machine_wins_and_a_paused_machine_has_no_current_problem(self):
+        team = publish.build_team([self.claim(600), self.claim(30, status="paused", experiment="E2")], [], now=self.NOW,
+                                  include_final=False, names=True)
+        self.assertEqual(len(team), 1)
+        self.assertEqual((team[0]["state"], team[0]["problem"], team[0]["experiment"]), ("paused", None, "E2"))
+
+    def test_frozen_outcomes_stay_hidden_but_the_run_shows(self):
+        runs = [run(1, purpose="final", e2e_pass=False), run(2, purpose="final", e2e_pass=None, incomplete_reason="quota (429)")]
+        team = publish.build_team([self.claim(60)], runs, now=self.NOW, include_final=False, names=True)
+        self.assertEqual(team[0]["last_run"]["outcome"], "unfinished")
+        recent = publish.build_recent(runs, include_final=False, names=True)
+        self.assertEqual([r["outcome"] for r in recent], ["unfinished", "recorded"])
+        self.assertTrue(all(r["why"] == "" for r in recent))
+        self.assertNotIn("fail", json.dumps(recent))
+
+    def test_a_frozen_set_problem_stays_hidden_whatever_its_label(self):
+        runs = [run(1, purpose="experiment", run_class="exploration", problem_role="frozen", e2e_pass=False), run(2)]
+        snap = publish.build_snapshot(runs, "local", include_final=False, names=True)
+        self.assertEqual(([r["run_id"] for r in snap["runs"]], snap["hidden_final_runs"]), (["r2"], 1))
+        self.assertEqual([r["outcome"] for r in publish.build_recent(runs, include_final=False, names=True)], ["pass", "recorded"])
+
+    def test_names_off_hides_people_and_machine_names(self):
+        team = publish.build_team([self.claim(60)], [], now=self.NOW, include_final=False, names=False)
+        self.assertEqual((team[0]["name"], team[0]["machine"]), ("", "machine 1"))
+        self.assertEqual(publish.build_recent([run(1)], include_final=False, names=False)[0]["by"], "")
+
+    def test_live_file_carries_team_and_recent(self):
+        live = publish.build_live(None, None, team=[{"machine": "vm"}], recent=[{"at": "x"}])
+        self.assertEqual((live["team"], live["recent"]), ([{"machine": "vm"}], [{"at": "x"}]))
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -92,6 +92,7 @@ class Tracker:
         self.started_at = _now()
         self.problem = ""
         self.step_name = ""
+        self.run = {}               # position of the current run, for the shared page: k, n, repeat, repeat_n, started_at
         self._last = 0.0
 
     def _write(self, status: str, reason: str = "") -> None:
@@ -100,7 +101,9 @@ class Tracker:
                 "experiment": self.label, "share": self.share, "machines": int(self.queue.get("machines") or 1),
                 "queue_id": self.queue.get("queue_id"), "queue_name": self.queue.get("name"),
                 "run_by": self.run_by, "machine": machine_name(), "status": status, "reason": reason,
-                "started_at": self.started_at, "now_problem": self.problem, "step_name": self.step_name})
+                "started_at": self.started_at, "now_problem": self.problem, "step_name": self.step_name,
+                "run_k": self.run.get("k"), "run_total": self.run.get("n"), "repeat": self.run.get("repeat"),
+                "repeat_n": self.run.get("repeat_n"), "problem_started_at": self.run.get("started_at")})
             self._last = time.time()
         except Exception:  # noqa: BLE001
             pass
@@ -128,6 +131,8 @@ class Tracker:
         r = _RUN_RE.search(line)
         if r:
             self.problem = r.group(3)
+            self.run = {"k": int(r.group(1)), "n": int(r.group(2)), "repeat": int(r.group(4)) if r.group(4) else None,
+                        "repeat_n": int(r.group(5)) if r.group(5) else None, "started_at": _now()}
             self._write("running")
             return
         if m or "recorded result for" in line:
@@ -138,5 +143,6 @@ class Tracker:
         """How the queue ended: paused, halted, finished, or interrupted (nothing said how it ended)."""
         if not self.label:
             return
-        self.problem = "" if outcome.get("status") in ("finished", "paused", "halted") else self.problem
+        if outcome.get("status") in ("finished", "paused", "halted"):
+            self.problem, self.run = "", {}
         self._write(outcome.get("status") or "interrupted", outcome.get("reason") or "")

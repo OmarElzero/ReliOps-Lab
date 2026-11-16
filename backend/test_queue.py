@@ -890,6 +890,17 @@ class QueueBoardTests(TmpRepoCase):
         self.assertIsNone(self.claims.claim_for(self.claims.for_label("E"), 2))   # nobody took share 2
         self.assertEqual(self.claims.for_label("another experiment"), [])
 
+    def test_the_claim_carries_the_current_run_position_for_the_shared_page(self):
+        t = self.claims.Tracker(self.q, "Omar", 1)
+        t.start("E")
+        t.beat("===== [3/9] problem=p2 repeat=2/3 agent=a action_space=- =====\n")
+        c = self.claims.claim_for(self.claims.for_label("E"), 1)
+        self.assertEqual((c["now_problem"], c["run_k"], c["run_total"], c["repeat"], c["repeat_n"]), ("p2", 3, 9, 2, 3))
+        self.assertTrue(c["problem_started_at"])
+        t.finish({"status": "paused"})
+        c = self.claims.claim_for(self.claims.for_label("E"), 1)
+        self.assertEqual((c["now_problem"], c["run_k"], c["problem_started_at"]), ("", None, None))
+
     def test_a_paused_queue_says_paused(self):
         def fake_run_lines(**kw):
             yield "===== [1/1] problem=p1 agent=a action_space=- =====\n"

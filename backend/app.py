@@ -384,6 +384,7 @@ def _enrich(runs: list[dict]) -> None:
         r["app"] = info.get("app") or ""
         mark = marks.get(r.get("run_id"))
         r["purpose"], r["purpose_source"] = dashboard.purpose_of(r, mark, roles)
+        r["problem_role"] = roles.get(r.get("problem_id") or "", "")   # used by the shared page to keep frozen-set outcomes private
         r["mark_note"] = (mark or {}).get("note") or ""
 
 
@@ -2314,7 +2315,12 @@ def _share_live() -> dict:
         queue = _find_queue(qstate.get("queue_id") or "")
         if queue is not None:
             left = _runs_left(queue, qstate.get("experiment") or queue.get("name", ""), _share_runs()[1])
-    return publish.build_live(desc, qstate, left)
+    runs = _share_runs()[1]
+    try:   # every machine's current run, from the claims every Lab already shares; best effort, never breaks the page
+        team = publish.build_team(store.read("claims"), runs)
+    except Exception:  # noqa: BLE001
+        team = []
+    return publish.build_live(desc, qstate, left, team=team, recent=publish.build_recent(runs))
 
 
 @app.get("/share/data/snapshot.json")

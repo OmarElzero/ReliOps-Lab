@@ -22,6 +22,7 @@ Where it goes
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import re
@@ -61,10 +62,16 @@ def env_on(name: str, default: bool = False) -> bool:
     return default if v is None else v.strip().lower() in ("1", "on", "true", "yes")
 
 
+def is_frozen(r: dict) -> bool:
+    """A run whose outcome stays private: marked final, run as a frozen campaign, or a run of a problem pinned in the frozen
+    set, whatever its label (a frozen queue started with another run class is still the frozen set)."""
+    return r.get("purpose") == "final" or r.get("run_class") == "frozen" or r.get("problem_role") == "frozen"
+
+
 def sanitize_runs(runs: list[dict], include_final: bool = False, names: bool = True) -> list[dict]:
     out = []
     for r in runs:
-        if r.get("purpose") == "final" and not include_final:
+        if is_frozen(r) and not include_final:
             continue
         row = {k: _clean_text(r.get(k)) for k in RUN_FIELDS}
         if not names:
@@ -91,12 +98,13 @@ def build_snapshot(runs: list[dict], source: str, include_final: bool = None, na
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source": source,
         "n_runs": len(kept),
-        "hidden_final_runs": sum(1 for r in runs if r.get("purpose") == "final") if not include_final else 0,
+        "hidden_final_runs": sum(1 for r in runs if is_frozen(r)) if not include_final else 0,
         "runs": kept,
     }
 
 
-def build_live(job: dict | None, qstate: dict | None, left: int | None = None, now: float | None = None) -> dict:
+def build_live(job: dict | None, qstate: dict | None, left: int | None = None, now: float | None = None,
+               team: list[dict] | None = None, recent: list[dict] | None = None) -> dict:
     """What the queue is doing now, from `jobs.Job.describe()` and `queuestate.describe()`. Times are epoch seconds so
     the page can tick the elapsed time itself between updates."""
     now = time.time() if now is None else now
@@ -125,7 +133,96 @@ def build_live(job: dict | None, qstate: dict | None, left: int | None = None, n
         "runs_left": left,
         "eta_s": eta,
         "started_at": (job or {}).get("started_at"),
+        "team": team or [],                     # every machine's current run (build_team)
+        "recent": recent or [],                 # the team's newest runs (build_recent)
     }
+
+
+TEAM_WINDOW_S = 24 * 3600   # machines heard from within this long are shown on the page
+STALE_S = 40 * 60           # same rule as the Queue tab (claims.STALE_S): longer silence than this is "silent"
+RECENT_N = 15
+
+
+def _epoch(iso) -> float | None:
+    if isinstance(iso, (int, float)):
+        return float(iso)
+    try:
+        return float(calendar.timegm(time.strptime(str(iso)[:19], "%Y-%m-%dT%H:%M:%S")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _outcome(r: dict, include_final: bool) -> str:
+    """pass | fail | unfinished, or "recorded" for a finished frozen-set run when its outcome must stay hidden."""
+    if not isinstance(r.get("e2e_pass"), bool):
+        return "unfinished"
+    if is_frozen(r) and not include_final:
+        return "recorded"
+    return "pass" if r["e2e_pass"] else "fail"
+
+
+def build_team(claims: list[dict], runs: list[dict], now: float | None = None, include_final: bool = None,
+               names: bool = None) -> list[dict]:
+    """One entry per machine heard from in the last day: what it is running now, from the claims every Lab already writes
+    to the shared store (see claims.py), plus how many runs it recorded in that experiment and its last one. A frozen-set
+    run's outcome is never shown unless RELIOPS_PUBLISH_FINAL is on; that the run happened is."""
+    now = time.time() if now is None else now
+    include_final = env_on("RELIOPS_PUBLISH_FINAL") if include_final is None else include_final
+    names = env_on("RELIOPS_PUBLISH_NAMES", True) if names is None else names
+    latest: dict[tuple, dict] = {}
+    for c in claims or []:
+        k = (c.get("machine") or "", c.get("run_by") or "")
+        if k not in latest or str(c.get("updated_at") or "") >= str(latest[k].get("updated_at") or ""):
+            latest[k] = c
+    out = []
+    for (machine, run_by), c in latest.items():
+        seen = _epoch(c.get("updated_at"))
+        if seen is None or now - seen > TEAM_WINDOW_S:
+            continue
+        st = c.get("status") or ""
+        state = {"running": "running" if now - seen < STALE_S else "silent", "paused": "paused", "halted": "stopped",
+                 "interrupted": "stopped", "finished": "finished"}.get(st, st or "idle")
+        exp = c.get("experiment") or ""
+        mine = [r for r in runs or [] if (r.get("experiment") or "") == exp and (r.get("run_by") or "") == run_by] if exp else []
+        last = max(mine, key=lambda r: str(r.get("timestamp_utc") or ""), default=None)
+        busy = state in ("running", "silent")
+        out.append({
+            "name": run_by if names else "", "machine": machine if names else "",
+            "state": state, "reason": _clean_text(c.get("reason") or "")[:200],
+            "queue": _clean_text(c.get("queue_name") or ""), "experiment": _clean_text(exp),
+            "share": c.get("share"), "shares": c.get("machines"),
+            "step_name": _clean_text(c.get("step_name") or ""),
+            "problem": (c.get("now_problem") or None) if busy else None,
+            "run_k": c.get("run_k") if busy else None, "run_total": c.get("run_total") if busy else None,
+            "repeat": c.get("repeat") if busy else None, "repeat_n": c.get("repeat_n") if busy else None,
+            "problem_started_at": _epoch(c.get("problem_started_at")) if busy else None,
+            "started_at": _epoch(c.get("started_at")), "seen_at": seen,
+            "recorded": len(mine), "finished": sum(1 for r in mine if isinstance(r.get("e2e_pass"), bool)),
+            "last_run": None if last is None else {"at": last.get("timestamp_utc"), "problem": last.get("problem_id"),
+                                                   "outcome": _outcome(last, include_final)},
+        })
+    order = {"running": 0, "silent": 1, "paused": 2, "stopped": 3}
+    out.sort(key=lambda m: (order.get(m["state"], 4), -(m["seen_at"] or 0)))
+    if not names:
+        for i, m in enumerate(out, 1):
+            m["machine"] = f"machine {i}"
+    return out
+
+
+def build_recent(runs: list[dict], n: int = RECENT_N, include_final: bool = None, names: bool = None) -> list[dict]:
+    """The newest runs of the whole team. Frozen-set runs appear with their outcome hidden."""
+    include_final = env_on("RELIOPS_PUBLISH_FINAL") if include_final is None else include_final
+    names = env_on("RELIOPS_PUBLISH_NAMES", True) if names is None else names
+    newest = sorted(runs or [], key=lambda r: str(r.get("timestamp_utc") or ""), reverse=True)[:n]
+    out = []
+    for r in newest:
+        o = _outcome(r, include_final)
+        hidden = is_frozen(r) and not include_final
+        out.append({"at": r.get("timestamp_utc"), "by": (r.get("run_by") or "") if names else "", "problem": r.get("problem_id"),
+                    "variant": _clean_text(r.get("config_label") or r.get("agent_id") or ""), "experiment": _clean_text(r.get("experiment") or ""),
+                    "outcome": o, "frozen": is_frozen(r),
+                    "why": "" if (o != "unfinished" or hidden) else _clean_text(r.get("incomplete_reason") or "")[:160]})
+    return out
 
 
 def write_files(out_dir: Path, snapshot: dict, live: dict) -> None:
@@ -240,7 +337,10 @@ class Publisher:
         source, runs = self.get_runs()
         # signature = what the page would show differently, not the clock
         sig = (len(runs), max((str(r.get("timestamp_utc") or "") for r in runs), default=""),
-               live["status"], live.get("step"), live.get("problem"), live.get("repeat"), live.get("runs_left"))
+               live["status"], live.get("step"), live.get("problem"), live.get("repeat"), live.get("runs_left"),
+               tuple((m.get("machine"), m.get("state"), m.get("problem"), m.get("repeat"), m.get("recorded"))
+                     for m in live.get("team") or []),
+               tuple(r.get("at") for r in live.get("recent") or []))
         wrote = False
         if sig != self._sig:
             write_files(self.out_dir, build_snapshot(runs, source), live)

@@ -179,6 +179,17 @@ A static page that shows the experiment results and the queue's progress to peop
   the data repository to Vercel. The Lab must be running for the page to update; when it is not, the page keeps the last data and says
   how old it is. With another repository or branch, edit the address in `site/config.js`.
 - Data from teammates appears when the Lab reads it from Firestore (it uses the same saved copy and read budget as the Results tab).
+- **Following runs from outside:** the page opens on *Machines right now*: one card per machine heard from in the last day, with
+  its queue, the problem it is running, the repeat, and a timer from the moment the run started. The cards come from the
+  claims every Lab already writes (the same data as the Queue tab), so the publishing Lab shows every machine, not only itself.
+  A machine with no report for 40 minutes is marked silent. Below it, *Latest runs* lists the team's newest runs. The run
+  timer needs the teammate's Lab to be up to date (`git pull`); an older Lab still appears, without the timer.
+- **Freshness:** `raw.githubusercontent.com` keeps a copy for 5 minutes whatever the query string says, so the page reads the
+  small live file through the GitHub API instead (fresh, and an unchanged file costs nothing against the 60 calls an hour a
+  browser may make without a login). When those calls run out it falls back to the raw address until the hour resets. The
+  big results file always comes from the raw address and may lag by up to 5 minutes.
+- **Frozen set:** outcomes of any run of a problem pinned in the frozen set are left out (results file) or shown as
+  "result hidden" (live cards and feed), whatever the run's purpose or run class, unless `RELIOPS_PUBLISH_FINAL=on`.
 
 ## Results
 

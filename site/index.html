@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ReliOps results</title>
+<title>ReliOps live</title>
 <style>
 :root{
   --bg:#f6f5f1; --panel:#ffffff; --fg:#1d2230; --muted:#667085; --line:#e3e1d9; --soft:#efede6;
@@ -68,6 +68,23 @@ td.num,th.num{text-align:right}
 .empty{color:var(--muted);padding:8px 0}
 footer{color:var(--muted);font-size:12px}
 .reasons{display:grid;gap:4px;margin:0;padding:0;list-style:none}
+.team{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:12px}
+.mcard{border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:grid;gap:8px;align-content:start;min-width:0;background:var(--panel)}
+.mcard.running{border-color:var(--live)}
+.mcard.silent{border-color:var(--warn)}
+.mhead{display:flex;gap:8px;align-items:flex-start;justify-content:space-between}
+.mname{font-weight:650;overflow-wrap:anywhere}
+.mmach{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.mnow{font-size:15px;font-weight:600;overflow-wrap:anywhere}
+.mclock{font-variant-numeric:tabular-nums;font-size:22px;font-weight:650;letter-spacing:-.01em}
+.mrow{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.mwarn{background:var(--fail-bg);color:var(--fail);border-radius:6px;padding:6px 8px;font-size:12px}
+.pill.silent,.pill.stopped{background:var(--fail-bg);color:var(--warn)}
+.pill.finished{background:var(--soft);color:var(--muted)}
+.sumline{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;color:var(--muted)}
+.sumline b{color:var(--fg)}
+.cell.rec{background:var(--soft);color:var(--muted)}
+.feed td.why{color:var(--muted);white-space:normal;min-width:160px;max-width:360px}
 .reasons li{display:flex;gap:10px}
 .reasons b{min-width:28px;text-align:right}
 </style>
@@ -76,16 +93,26 @@ footer{color:var(--muted);font-size:12px}
 <main>
   <div class="top">
     <div>
-      <h1>ReliOps results</h1>
-      <div class="sub">Read-only view of the experiment runs. Nothing on this page can start or change a run.</div>
+      <h1>ReliOps live</h1>
+      <div class="sub">What every machine is running now, and the results so far. Read-only: nothing here can start or change a run.</div>
     </div>
     <div class="sub" id="fresh">loading…</div>
   </div>
 
-  <div id="notice" hidden></div>
+  <section class="card">
+    <div class="cardhead"><h2>Machines right now</h2><div class="sumline" id="teamsum"></div></div>
+    <div class="team" id="team" aria-live="polite"></div>
+    <div class="sub" style="margin-top:8px">Each Lab reports when a run starts and when it ends. A machine with no report for 40 minutes is marked silent:
+      its Lab or the machine may have stopped. The run timer counts from the moment the run started.</div>
+  </section>
 
-  <section class="card live" aria-live="polite">
-    <h2>Right now</h2>
+  <section class="card">
+    <h2>Latest runs, whole team</h2>
+    <div class="scroll"><table id="feed" class="feed"></table></div>
+  </section>
+
+  <section class="card live">
+    <h2>Queue on the publishing machine</h2>
     <div><span class="pill" id="status">idle</span></div>
     <div class="facts" id="facts"></div>
     <div id="progress" hidden>
@@ -93,6 +120,8 @@ footer{color:var(--muted);font-size:12px}
       <div class="sub" id="progtext"></div>
     </div>
   </section>
+
+  <div id="notice" hidden></div>
 
   <section class="card">
     <div class="filters">
@@ -177,16 +206,38 @@ footer{color:var(--muted);font-size:12px}
   // Where the two data files live: next to the page by default (the local /share/ preview and GitHub Pages), or at the
   // address in config.js (a page hosted somewhere that is not redeployed for every update, such as Vercel).
   var BASE = (typeof window.RELIOPS_DATA_BASE === "string" && window.RELIOPS_DATA_BASE) || "data/";
-  function get(name){
-    return fetch(BASE + name + "?t=" + Date.now(), {cache:"no-store"}).then(function(r){ if (!r.ok) throw new Error(name+" "+r.status); return r.json(); });
+  // raw.githubusercontent.com keeps a copy for 5 minutes whatever the query string says, which is too slow to follow a run.
+  // The GitHub API serves the same file as it is now. Without a login a browser may make 60 API calls an hour, but asking
+  // "has it changed?" with the copy's ETag costs nothing when it has not, so the live file is read through the API and
+  // falls back to the raw address when the hour's calls run out. The big results file always uses the raw address.
+  var RAW = /^https:\/\/raw\.githubusercontent\.com\/([^\/]+)\/([^\/]+)\/([^\/]+)\/(.*)$/.exec(BASE);
+  var API = RAW ? "https://api.github.com/repos/" + RAW[1] + "/" + RAW[2] + "/contents/" + RAW[4] : null;
+  var apiBlockedUntil = 0, lastVia = "";
+  function viaRaw(name){
+    return fetch(BASE + name + (RAW ? "" : "?t=" + Date.now()), {cache:"no-store"}).then(function(r){
+      if (!r.ok) throw new Error(name+" "+r.status); lastVia = RAW ? "cache" : "direct"; return r.json(); });
+  }
+  function get(name){ return viaRaw(name); }
+  function getLiveFile(){
+    if (!API || Date.now() < apiBlockedUntil) return viaRaw("live.json");
+    return fetch(API + "live.json?ref=" + encodeURIComponent(RAW[3]), {cache:"no-cache", headers:{"Accept":"application/vnd.github.raw"}})
+      .then(function(r){
+        if (r.status === 403 || r.status === 429){
+          var reset = parseInt(r.headers.get("X-RateLimit-Reset") || "0", 10);
+          apiBlockedUntil = reset ? reset * 1000 : Date.now() + 10*60*1000;
+          return viaRaw("live.json");
+        }
+        if (!r.ok) throw new Error("live.json " + r.status);
+        lastVia = "api"; return r.json();
+      }).catch(function(){ return viaRaw("live.json"); });
   }
   // Requests: the small live file every 20 s while the tab is visible; the big results file only when the live file shows that the
   // Lab published something new (both are written together), plus a 5-minute safety refresh. Paging and filters never fetch.
   var snapFetchedAt = 0, snapRetries = 0;
   function loadLive(){
-    return get("live.json").then(function(d){
+    return getLiveFile().then(function(d){
       var changed = !!live && d.generated_at !== live.generated_at;
-      live = d; liveAt = Date.now(); renderLive();
+      live = d; liveAt = Date.now(); renderLive(); renderTeam(); renderFeed();
       if (changed) snapRetries = 0;
       var age = Date.now() - snapFetchedAt;
       if (snap ? (changed || age > 300000) : age > 60000) loadSnap();
@@ -196,9 +247,9 @@ footer{color:var(--muted);font-size:12px}
     snapFetchedAt = Date.now();
     return get("snapshot.json").then(function(d){
       snap = d; buildFilters(); renderAll();
-      // The two files are cached separately by the host. If the results file is older than the live file, look again shortly (at most 3 times).
+      // The results file comes through the 5-minute cache. If it is older than the live file, look again every minute (at most 6 times).
       var t = Date.parse(d.generated_at);
-      if (live && live.generated_at && isFinite(t) && t/1000 < live.generated_at - 5 && snapRetries < 3){ snapRetries++; setTimeout(loadSnap, 15000); }
+      if (live && live.generated_at && isFinite(t) && t/1000 < live.generated_at - 5 && snapRetries < 6){ snapRetries++; setTimeout(loadSnap, 60000); }
     }).catch(function(e){
       var n = $("notice"); n.hidden = false; n.className = "notice err"; n.textContent = "Could not load the results data. It may not have been published yet.";
     });
@@ -231,7 +282,78 @@ footer{color:var(--muted);font-size:12px}
     } else if (left != null && status !== "running"){
       prog.hidden = false; $("bar").style.width = "0"; $("progtext").textContent = left + " runs left in this experiment.";
     } else prog.hidden = true;
-    $("fresh").textContent = "live data " + ago(live.generated_at) + (snap ? " · results " + ago(snap.generated_at) : "");
+    $("fresh").textContent = "live data " + ago(live.generated_at) + (lastVia === "cache" ? " (through a 5-minute cache)" : "") + (snap ? " · results " + ago(snap.generated_at) : "");
+  }
+
+  // ---- every machine ---------------------------------------------------------------------
+  var STATE_TEXT = {running:"running", silent:"silent", paused:"paused", stopped:"stopped", finished:"queue finished", idle:"idle"};
+  function chip(outcome){
+    var t = {pass:"pass", fail:"fail", unfinished:"unfinished", recorded:"result hidden"}[outcome] || outcome || "–";
+    var c = {pass:"pass", fail:"fail", unfinished:"inc", recorded:"rec"}[outcome] || "inc";
+    var s = el("span",{cls:"cell " + c, text:t});
+    if (outcome === "recorded") s.title = "A run on the frozen evaluation set finished; its outcome is not published before the freeze ends.";
+    if (outcome === "unfinished") s.title = "No result: lost to the model key, quota, judge or setup. Rerun, never counted as a failure.";
+    return s;
+  }
+  function renderTeam(){
+    var box = $("team"), sum = $("teamsum");
+    if (!box) return;
+    clear(box); clear(sum);
+    var team = (live && live.team) || [];
+    if (!live){ box.appendChild(el("div",{cls:"empty", text:"Loading…"})); return; }
+    if (!team.length){ box.appendChild(el("div",{cls:"empty", text:"No machine has reported in the last 24 hours, or the publishing Lab is older than this page."})); return; }
+    var now = Date.now()/1000, count = {};
+    team.forEach(function(m){ count[m.state] = (count[m.state]||0) + 1; });
+    ["running","silent","paused","stopped","finished"].forEach(function(k){
+      if (count[k]) sum.appendChild(el("span",{},[el("b",{text:String(count[k])}), " " + STATE_TEXT[k]])); });
+    team.forEach(function(m){
+      var card = el("article",{cls:"mcard " + m.state});
+      var who = el("div",{},[el("div",{cls:"mname", text: m.name || m.machine || "machine"}), el("div",{cls:"mmach", text: m.name ? m.machine : ""})]);
+      card.appendChild(el("div",{cls:"mhead"},[who, el("span",{cls:"pill " + m.state, text: STATE_TEXT[m.state] || m.state})]));
+      var q = [m.queue, m.experiment && m.experiment !== m.queue ? m.experiment : ""].filter(Boolean).join(" · ");
+      if (m.shares > 1 && m.share) q += " · share " + m.share + " of " + m.shares;
+      if (q) card.appendChild(el("div",{cls:"mrow", text:q}));
+      if (m.problem){
+        var pos = [];
+        if (m.repeat_n > 1 && m.repeat) pos.push("repeat " + m.repeat + "/" + m.repeat_n);
+        if (m.run_k && m.run_total) pos.push("run " + m.run_k + " of " + m.run_total + " in this step");
+        card.appendChild(el("div",{},[el("div",{cls:"mnow", text:m.problem}), el("div",{cls:"mrow", text:pos.join(" · ")})]));
+        if (m.problem_started_at){
+          card.appendChild(el("div",{},[el("span",{cls:"mclock", text:fmtDur(now - m.problem_started_at)}), el("span",{cls:"mrow", text:"  on this run"})]));
+        } else {
+          card.appendChild(el("div",{cls:"mrow", text:"Run start time not reported (that Lab is older than this page); last report " + ago(m.seen_at) + "."}));
+        }
+      }
+      if (m.state === "silent") card.appendChild(el("div",{cls:"mwarn", text:"Nothing heard for " + fmtDur(now - m.seen_at) + ". The Lab or the machine may have stopped; check it before reassigning its share."}));
+      if ((m.state === "paused" || m.state === "stopped") && m.reason) card.appendChild(el("div",{cls:"mrow", text:"Why: " + m.reason}));
+      var foot = [];
+      if (m.recorded) foot.push(m.finished + " finished of " + m.recorded + " recorded in this experiment");
+      foot.push("last report " + ago(m.seen_at));
+      card.appendChild(el("div",{cls:"mrow", text:foot.join(" · ")}));
+      if (m.last_run){
+        card.appendChild(el("div",{cls:"mrow"},["Last run: ", chip(m.last_run.outcome), " " + (m.last_run.problem || "") + " · " + ago(m.last_run.at)]));
+      }
+      box.appendChild(card);
+    });
+  }
+  function renderFeed(){
+    var t = $("feed"); if (!t) return; clear(t);
+    var rows = (live && live.recent) || [];
+    if (!rows.length){ t.appendChild(el("tr",{},[el("td",{cls:"empty", text:"No runs yet."})])); return; }
+    var head = el("tr"); ["When","Run by","Problem","Variant","Outcome","Why it did not finish"].forEach(function(h){ head.appendChild(el("th",{text:h})); });
+    t.appendChild(el("thead",{},[head]));
+    var body = el("tbody");
+    rows.forEach(function(r){
+      var tr = el("tr");
+      tr.appendChild(el("td",{text:ago(r.at), title:r.at || ""}));
+      tr.appendChild(el("td",{text:r.by || "–"}));
+      tr.appendChild(el("td",{text:r.problem || "–"}));
+      tr.appendChild(el("td",{text:(r.variant || "–") + (r.frozen ? " · frozen set" : ""), title:r.experiment || ""}));
+      var o = el("td"); o.appendChild(chip(r.outcome)); tr.appendChild(o);
+      tr.appendChild(el("td",{cls:"why", text:r.why || ""}));
+      body.appendChild(tr);
+    });
+    t.appendChild(body);
   }
 
   // ---- filters ---------------------------------------------------------------------------
@@ -427,8 +549,8 @@ footer{color:var(--muted);font-size:12px}
   $("f-exp").addEventListener("change", filterChanged);
   $("f-purpose").addEventListener("change", filterChanged);
   $("f-by").addEventListener("change", filterChanged);
-  setInterval(function(){ if (!document.hidden) renderLive(); }, 1000);
-  setInterval(function(){ if (!document.hidden) loadLive(); }, 20000);
+  setInterval(function(){ if (!document.hidden){ renderLive(); renderTeam(); } }, 1000);
+  setInterval(function(){ if (!document.hidden) loadLive(); }, 15000);
   document.addEventListener("visibilitychange", function(){ if (!document.hidden) loadLive(); });   // catch up when the tab comes back
   loadSnap(); loadLive();
 })();
