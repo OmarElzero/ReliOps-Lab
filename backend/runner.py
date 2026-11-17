@@ -35,7 +35,9 @@ AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AW
                   "SELFCHECK", "SOAK", "CATALOGUE_V2", "K8S_KNOWLEDGE",
                   "HEALTH_SWEEP", "CHANGE_DIFF", "OUTPUT_TRIM", "VERIFY_UNDO", "ROUTING", "ROUTE_REVIEW", "ROUTE_MULTI", "FLAT_ARGS", "PROC_V2", "REF", "EXCAP", "FLOW", "NULL_AGENT",
                   # agent/react_v3 only (ReliOps plan 22); reliops_v2 ignores them
-                  "EVIDENCE_FIRST", "TRANSACTIONAL_FIX", "T1_DRIVER", "FINAL_MODEL", "DIAG_VOTE")
+                  "EVIDENCE_FIRST", "TRANSACTIONAL_FIX", "T1_DRIVER", "FINAL_MODEL", "DIAG_VOTE",
+                  # agent/react_v3_r5 = reliops_v5 only (ReliOps plan 27)
+                  "D1_PREDICT", "FIX_FAMILIES", "ADAPTIVE_WAIT")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
