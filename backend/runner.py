@@ -66,10 +66,13 @@ AGENT_SWITCH_HELP = {
     "T1_DRIVER": "C-033 T1 v2 (reliops_v3, needs TRANSACTIONAL_FIX): the driver checks the namespace health after a fix and restores it if worse or no effect",
     "FINAL_MODEL": "C-030 M1 (reliops_v3, exploratory): one call to a stronger model writes the final diagnosis",
     "DIAG_VOTE": "C-031 S1 (reliops_v3): three independent diagnosis drafts, one call picks the best supported",
+    "D1_PREDICT": "C-036 (reliops_v5): before the diagnosis is submitted, one prediction is checked by a read the driver runs; keep or revise",
+    "FIX_FAMILIES": "C-037 (reliops_v5, needs TRANSACTIONAL_FIX): every restore names the routed procedure's ordered fix families; try the next one",
+    "ADAPTIVE_WAIT": "C-038 (reliops_v5, with TRANSACTIONAL_FIX): wait for rollouts to settle (30-180 s) before a proof read or driver verdict",
 }
 SWITCH_AGENT = "reliops_v2"                       # the default agent with switches (UI)
-SWITCH_AGENTS = ("reliops_v2", "reliops_v3")      # every agent that reads REACT_V1_* switches (reliops_v3: ReliOps plan 22)
-OUR_AGENTS = ("reliops_v1", "reliops_v2", "reliops_v3")
+SWITCH_AGENTS = ("reliops_v2", "reliops_v3", "reliops_v5")   # every agent that reads REACT_V1_* switches (v3: ReliOps plan 22; v5: plan 27)
+OUR_AGENTS = ("reliops_v1", "reliops_v2", "reliops_v3", "reliops_v5")
 
 
 def clean_switches(raw) -> list[str]:
@@ -615,7 +618,7 @@ def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops
         out.append(f"[check] GEMINI_API_KEY contains a space, a quote or a '#' (it starts with {gk[:4]}... and has {len(gk)} characters). "
                    f"A key never contains those, so the line in the .env probably carries extra text. Google will reject it.")
     try:
-        pkg = {"reliops_v2": "react_v2", "reliops_v3": "react_v3"}.get(agent, "react_v1")
+        pkg = {"reliops_v2": "react_v2", "reliops_v3": "react_v3", "reliops_v5": "react_v3_r5"}.get(agent, "react_v1")
         driver = (reliops or reliops_dir()) / "agent" / pkg / "driver.py"
         if agent in OUR_AGENTS and not rebuilding and driver.exists() and shutil.which("docker"):
             r = subprocess.run(["docker", "image", "inspect", "-f", "{{.Created}}", "sregym-agent-base:latest"],
