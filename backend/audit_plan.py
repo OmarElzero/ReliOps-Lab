@@ -61,9 +61,12 @@ def _pick(rows, k, rng, cap, used):
     return chosen
 
 
-def _draw_stratum(rows, n, rng, cap):
-    """n runs, half the judge passed and half it failed, so a lenient or a harsh judge cannot hide."""
+def _draw_stratum(rows, n, rng, cap, balance=True):
+    """n runs, half the judge passed and half it failed, so a lenient or a harsh judge cannot hide. With balance off,
+    n runs at random (used for disputed diagnoses, where the pre-registered rule is a plain random draw)."""
     used = defaultdict(int)
+    if not balance:
+        return _pick(rows, n, rng, cap, used)
     passed = [r for r in rows if r["diagnosis_pass"]]
     failed = [r for r in rows if not r["diagnosis_pass"]]
     chosen = _pick(passed, n // 2, rng, cap, used) + _pick(failed, n - n // 2, rng, cap, used)
@@ -73,9 +76,12 @@ def _draw_stratum(rows, n, rng, cap):
     return chosen
 
 
-def _sample(runs, groups, rng, cap, exclude=frozenset()):
-    """Items (run_id, problem_id, stratum) for every stratum of `groups`, half judge-pass and half judge-fail each."""
+def _sample(runs, groups, rng, cap, exclude=frozenset(), disputed=None):
+    """Items (run_id, problem_id, stratum) for every stratum of `groups`, half judge-pass and half judge-fail each.
+    `disputed` ({run_id: second judge's verdict}): keep only runs the second judge decided differently, drawn at random."""
     pool = [r for r in eligible(runs) if r["run_id"] not in exclude]
+    if disputed is not None:
+        pool = [r for r in pool if isinstance(disputed.get(r["run_id"]), bool) and disputed[r["run_id"]] != r["diagnosis_pass"]]
     strata: list[tuple[str, list[dict], int]] = []
     for g in groups:
         sel = [r for r in pool if (r.get("config_label") or "").startswith(g["prefix"])]
@@ -89,7 +95,7 @@ def _sample(runs, groups, rng, cap, exclude=frozenset()):
         if not rows:
             notes.append(f"{name}: no eligible runs, skipped")
             continue
-        got = _draw_stratum(rows, min(n, len(rows)), rng, cap)
+        got = _draw_stratum(rows, min(n, len(rows)), rng, cap, balance=disputed is None)
         npass = sum(1 for r in got if r["diagnosis_pass"])
         notes.append(f"{name}: {len(got)} drawn from {len(rows)} eligible ({npass} judged pass, {len(got) - npass} judged fail)")
         rng.shuffle(got)
@@ -140,12 +146,17 @@ def _clean_labelers(labelers):
 
 
 def draw(runs: list[dict], groups: list[dict], labelers: list[str], seed: int, anchors_per_stratum: int = 3,
-         max_per_problem: int = 2, assign: str = "by_problem", overlap_problems: int = 1) -> tuple[list[dict], list[str]]:
-    """Returns (items, notes). Each item: item_id, run_id, problem_id, stratum, anchor, labelers."""
+         max_per_problem: int = 2, assign: str = "by_problem", overlap_problems: int = 1,
+         disputed: dict | None = None) -> tuple[list[dict], list[str]]:
+    """Returns (items, notes). Each item: item_id, run_id, problem_id, stratum, anchor, labelers.
+    assign: by_problem (whole problems per person), spread (round-robin), or all (every labeler labels every item)."""
     labelers = _clean_labelers(labelers)
     rng = random.Random(seed)
-    items, notes = _sample(runs, groups, rng, max_per_problem)
-    if assign == "spread":
+    items, notes = _sample(runs, groups, rng, max_per_problem, disputed=disputed)
+    if assign == "all":
+        for it in items:
+            it["labelers"], it["anchor"] = list(labelers), True
+    elif assign == "spread":
         _spread(items, labelers, rng, anchors_per_stratum)
     else:
         assign_by_problem(items, labelers, overlap_problems)

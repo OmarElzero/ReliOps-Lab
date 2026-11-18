@@ -1561,6 +1561,7 @@ class AuditDrawIn(BaseModel):
     by: str = ""
     assign: str = "by_problem"          # by_problem: whole problems per person; spread: round-robin
     overlap_problems: int = 1           # by_problem only: problems each person also labels from the previous person's set
+    disputed_with: str = ""             # a second judge model: draw only diagnoses it decided differently, at random
 
 
 class AuditEditIn(BaseModel):
@@ -1650,8 +1651,14 @@ def audit_draw(body: AuditDrawIn, x_owner_password: Optional[str] = Header(defau
     try:
         groups = audit_plan.parse_groups(body.groups)
         _, runs = _collect_runs(100000)
+        disputed = None
+        if body.disputed_with.strip():
+            disputed = {r["run_id"]: r["success"] for r in store.read("rejudges")
+                        if r.get("judge_model_id") == body.disputed_with.strip() and isinstance(r.get("success"), bool)}
+            if not disputed:
+                raise ValueError(f"No stored verdicts from {body.disputed_with.strip()}: run the second judge first.")
         items, notes = audit_plan.draw(runs, groups, body.labelers, body.seed, body.anchors_per_stratum, body.max_per_problem,
-                                       body.assign, body.overlap_problems)
+                                       body.assign, body.overlap_problems, disputed)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     if body.preview:
@@ -1663,6 +1670,7 @@ def audit_draw(body: AuditDrawIn, x_owner_password: Optional[str] = Header(defau
     labelers = list(dict.fromkeys(x.strip() for x in body.labelers if x.strip()))
     plan = store.append("audit_plans", {"audit_id": audit_id, "name": body.name.strip(), "labelers": labelers, "seed": body.seed,
                                         "groups": body.groups, "anchors_per_stratum": body.anchors_per_stratum, "assign": body.assign,
+                                        "disputed_with": body.disputed_with.strip(),
                                         "overlap_problems": body.overlap_problems,
                                         "created_by": body.by.strip(),
                                         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "notes": notes, "items": items})
@@ -1691,7 +1699,8 @@ def audit_mine(audit_id: str, labeler: str):
         card = runner.read_card(r.get("problem_id") or "")
         lab = mine_labels.get(it["item_id"])
         items.append({"item_id": it["item_id"], "problem_id": r.get("problem_id") or it.get("problem_id"), "diagnosis_text": r.get("diagnosis_text") or "(run not found on this machine)",
-                      "expected": runner.card_section(card, 4), "done": bool(lab),
+                      "expected": runner.card_section(card, 4) or runner.reference_answer(r.get("problem_id") or it.get("problem_id") or ""),
+                      "done": bool(lab),
                       "locked": bool(lab and fin and (lab.get("updated_at") or "") <= fin),
                       "mine": ({k: lab.get(k) for k in ("d1", "d2", "d3", "overall_correct", "confidence", "reason")} if lab else None)})
     items.sort(key=lambda i: (i["problem_id"] or "", i["item_id"]))

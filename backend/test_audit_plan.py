@@ -27,6 +27,29 @@ class PureTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 audit_plan.parse_groups(bad)
 
+    def test_disputed_draw_keeps_only_disagreements_and_everyone_labels_everything(self):
+        runs = fake_runs(["F30 A", "F30 V5"], per=30)
+        # second judge disagrees on every third run
+        second = {r["run_id"]: (not r["diagnosis_pass"]) if i % 3 == 0 else r["diagnosis_pass"] for i, r in enumerate(runs)}
+        groups = audit_plan.parse_groups("F30 | pooled | 40")
+        items, notes = audit_plan.draw(runs, groups, ["Omar", "Noura"], 20261118, max_per_problem=99, assign="all",
+                                       disputed=second)
+        by = {r["run_id"]: r for r in runs}
+        self.assertEqual(len(items), 20)                      # only 20 disputed runs exist, all are taken
+        self.assertTrue(all(second[it["run_id"]] != by[it["run_id"]]["diagnosis_pass"] for it in items))
+        self.assertTrue(all(it["labelers"] == ["Omar", "Noura"] and it["anchor"] for it in items))
+        again, _ = audit_plan.draw(runs, groups, ["Omar", "Noura"], 20261118, max_per_problem=99, assign="all", disputed=second)
+        self.assertEqual([i["run_id"] for i in items], [i["run_id"] for i in again])
+
+    def test_disputed_draw_is_random_not_balanced(self):
+        runs = fake_runs(["F30 A"], per=200, seed=3)
+        second = {r["run_id"]: (not r["diagnosis_pass"]) for r in runs}       # every run disputed
+        items, _ = audit_plan.draw(runs, audit_plan.parse_groups("F30 | pooled | 40"), ["A", "B"], 7, max_per_problem=99,
+                                   assign="all", disputed=second)
+        npass = sum(next(r for r in runs if r["run_id"] == it["run_id"])["diagnosis_pass"] for it in items)
+        self.assertEqual(len(items), 40)
+        self.assertNotEqual(npass, 20)                         # a balanced draw would force exactly 20
+
     def test_draw_shape_and_determinism(self):
         runs = fake_runs(["R3 a", "R3 b", "R3 c", "R3 d", "R2 x", "R2 y"]) + [
             {"run_id": "f", "problem_id": "p1", "config_label": "R3 dumb-baseline", "judge_model_id": "j", "diagnosis_pass": False, "diagnosis_text": "t"}]

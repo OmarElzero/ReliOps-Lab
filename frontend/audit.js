@@ -236,11 +236,13 @@
     const name = h("input", { placeholder: "audit name, e.g. Final audit", value: store.get("lab_audit_name", "Final audit") });
     const people = h("input", { placeholder: "labelers, comma separated", value: store.get("lab_audit_people", "Omar Betawy, Noura, Zeinab Mohamed"), style: "flex:1 1 320px" });
     const groups = h("textarea", { rows: "3", style: "width:100%" , value: store.get("lab_audit_groups", cfg.default_groups) });
-    const assign = h("select", { style: "width:auto" }, h("option", { value: "by_problem", text: "Whole problems per person (recommended)" }), h("option", { value: "spread", text: "Spread runs round-robin" }));
+    const assign = h("select", { style: "width:auto" }, h("option", { value: "by_problem", text: "Whole problems per person (recommended)" }), h("option", { value: "spread", text: "Spread runs round-robin" }), h("option", { value: "all", text: "Everyone labels every item" }));
+    const disputed = h("input", { placeholder: "only runs this second judge disputes, e.g. openai/gpt-5.4 (empty = all)", value: store.get("lab_audit_disputed", ""), style: "flex:1 1 320px", title: "Keeps only diagnoses where this second judge's stored verdict differs from the first judge's, and draws them at random instead of half pass / half fail." });
+    const seed = h("input", { type: "number", value: store.get("lab_audit_seed", "20261112"), style: "width:130px", title: "random seed; write it in the pre-registration before drawing" });
     const overlap = h("input", { type: "number", min: "0", max: "5", value: store.get("lab_audit_overlap", "1"), style: "width:80px", title: "problems each person also labels from the previous person's set" });
     const out = h("p", { class: "hint", text: st.preview || "" });
-    const body = () => ({ name: name.value, labelers: people.value.split(",").map((s) => s.trim()).filter(Boolean), groups: groups.value, by: (typeof who === "function" ? who() : ""), assign: assign.value, overlap_problems: parseInt(overlap.value || "0", 10) || 0 });
-    const remember = () => { store.set("lab_audit_name", name.value); store.set("lab_audit_people", people.value); store.set("lab_audit_groups", groups.value); store.set("lab_audit_overlap", overlap.value); };
+    const body = () => ({ name: name.value, labelers: people.value.split(",").map((s) => s.trim()).filter(Boolean), groups: groups.value, by: (typeof who === "function" ? who() : ""), assign: assign.value, overlap_problems: parseInt(overlap.value || "0", 10) || 0, seed: parseInt(seed.value || "20261112", 10) || 20261112, disputed_with: disputed.value.trim(), ...(disputed.value.trim() ? { max_per_problem: 99 } : {}) });
+    const remember = () => { store.set("lab_audit_name", name.value); store.set("lab_audit_people", people.value); store.set("lab_audit_groups", groups.value); store.set("lab_audit_overlap", overlap.value); store.set("lab_audit_disputed", disputed.value); store.set("lab_audit_seed", seed.value); };
     const go = async (preview) => {
       remember();
       const r = await ownerCall("POST", "/api/audit/draw", { ...body(), preview });
@@ -251,7 +253,8 @@
       h("p", { class: "hint", text: "Draw once, on the final exports; the sample stores run ids, so later runs cannot change it. Half of every stratum is judge-pass and half judge-fail. With whole problems per person, nobody learns more problems than needed; the overlap problems (labelled by two people) are what measure how far the labelers agree. After labels arrive you can still redistribute, add runs or remove runs below, but not draw the same name again." }),
       h("div", { class: "row" }, name, people), h("p", { class: "hint", text: `Known names on this Lab: ${(cfg.people || []).join(", ") || "none yet"}. Type the names exactly as each person should appear.` }),
       h("div", { class: "hint", text: "Groups: one line per `prefix | split or pooled | runs`. split = one stratum per configuration starting with the prefix." }), groups,
-      h("div", { class: "row", style: "margin-top:8px" }, assign, h("span", { class: "hint", text: "Overlap problems per person:" }), overlap),
+      h("div", { class: "row", style: "margin-top:8px" }, assign, h("span", { class: "hint", text: "Overlap problems per person:" }), overlap, h("span", { class: "hint", text: "Seed:" }), seed),
+      h("div", { class: "row", style: "margin-top:8px" }, disputed),
       h("div", { class: "row", style: "margin-top:8px" },
         h("button", { type: "button", class: "secondary", text: "Preview", onclick: () => go(true) }),
         h("button", { type: "button", class: "primary", text: "Draw and assign", onclick: () => go(false) })), out,

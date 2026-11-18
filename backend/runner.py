@@ -1825,6 +1825,19 @@ def read_card(problem_id: str) -> str | None:
     return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
 
 
+def reference_answer(problem_id: str) -> str | None:
+    """SREGym's own reference answer for a problem, from experiments/*reference-answers.json in the ReliOps clone
+    (written by scripts/dump_root_causes.py). Used as the answer key when a problem has no card."""
+    for p in sorted((reliops_dir() / "experiments").glob("*reference-answers.json")):
+        try:
+            ans = json.loads(p.read_text(encoding="utf-8")).get("answers") or {}
+        except (OSError, ValueError):
+            continue
+        if problem_id in ans:
+            return "SREGym reference answer (the text both judges compare against):\n" + str(ans[problem_id])
+    return None
+
+
 def card_section(card: str | None, number: int) -> str | None:
     """Text of '## <number>. ...' up to the next '## ' heading; used to show 'what a correct diagnosis
     must say' next to a diagnosis a person is hand-labelling."""
