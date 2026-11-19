@@ -1,0 +1,275 @@
+{
+ "_source": "Plain-language summaries of SREGym's reference answers (experiments/frozen30-reference-answers.json) for hand labelling. Written from the reference text only; where a summary and the reference seem to differ, the reference wins.",
+ "briefs": {
+  "revoke_auth_mongodb-1": {
+   "app": "Hotel Reservation",
+   "name": "Database access revoked",
+   "what": "The geo service's database, `mongodb-geo`, had the service's access revoked. The service still starts, but every operation that reads or writes the database fails with authorization errors from MongoDB.",
+   "like": "Your key card still opens the building, but your access to the records room was removed.",
+   "place": "The `mongodb-geo` database (the access granted to the geo service).",
+   "cause": "Database access was explicitly revoked, so database-backed operations fail with MongoDB authorization errors.",
+   "notblame": "A crash at startup: the service starts normally."
+  },
+  "search_rate_retry_collapse_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "Retry storm keeps the rate service overloaded",
+   "what": "The `search` service calls the `rate` service with up to three attempts and a short deadline per attempt. A short burst of traffic filled `rate`'s bounded queue; calls then exceed their deadline but still use `rate`'s capacity, and `search` retries them. Internal load stays above capacity even after outside traffic is back to normal.",
+   "like": "A busy call centre where every caller who waits ten seconds hangs up and calls back three times: the queue never clears, even after the rush.",
+   "place": "The search-to-rate call path: search's retry and timeout policy together with rate's bounded queue.",
+   "cause": "A timeout/retry/queue feedback loop keeps the overload going after the burst has ended.",
+   "notblame": "Only \"the rate limit is too low\" (normal traffic is below it), or only the burst (it has ended). The reference counts this as incomplete."
+  },
+  "service_dns_resolution_failure_social_network": {
+   "app": "Social Network",
+   "name": "DNS refuses one service name",
+   "what": "The cluster's DNS server, CoreDNS, has a rule in its ConfigMap that answers \"no such name\" (NXDOMAIN) for `user-service.social-network.svc.cluster.local`. Other services cannot find `user-service` by name, even though its pods are healthy and listening.",
+   "like": "The office directory lists a colleague as \"no such person\" while they sit at their desk.",
+   "place": "The CoreDNS ConfigMap (`coredns`, namespace `kube-system`).",
+   "cause": "An NXDOMAIN template for user-service's name makes in-cluster lookups of it fail.",
+   "notblame": "The `user-service` pods: they are healthy and listening."
+  },
+  "configmap_drift_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "ConfigMap lost required keys",
+   "what": "The `geo` service's ConfigMap `geo-config` has drifted and is missing required keys, for example `GeoMongoAddress`. The `geo` deployment starts with incomplete settings, so it fails to connect to its dependencies and to handle requests that need those settings.",
+   "like": "A courier handed instructions with the delivery-address page torn out.",
+   "place": "ConfigMap `geo-config` (used by the `geo` deployment).",
+   "cause": "Required keys such as `GeoMongoAddress` are missing, so geo starts with incomplete configuration.",
+   "notblame": "Describing only the errors in geo without the missing keys."
+  },
+  "duplicate_pvc_mounts_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "Replicas share a one-machine volume",
+   "what": "The `frontend` deployment was scaled to several replicas that all use one ReadWriteOnce volume claim, while a required anti-affinity rule forces the replicas onto different machines. The volume can be used on one machine only, so one replica runs and another stays Pending.",
+   "like": "Two people told to sit in different rooms while sharing one pair of headphones on a short cord.",
+   "place": "The `frontend` deployment (its replicas, the shared ReadWriteOnce claim and the hostname anti-affinity).",
+   "cause": "Several replicas reference one ReadWriteOnce, topology-bound claim while anti-affinity separates them, so only one can use it and the others stay Pending.",
+   "notblame": "A plain lack of nodes or resources: the conflict is between the shared volume and the anti-affinity."
+  },
+  "node_conntrack_exhaustion_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "One machine's connection table is full",
+   "what": "A deployment, `edge-traffic-client`, is pinned to one worker machine and holds many TCP connections open to `rpc-gateway`. They fill that machine's Linux connection-tracking table (`nf_conntrack`), so new connections from that machine time out, even though Deployments, Pods, Services and Endpoints all look healthy.",
+   "like": "One guest keeps every outside line of a hotel switchboard busy: the phones work, but nobody else can place a call.",
+   "place": "The victim node's `nf_conntrack` table, filled by `edge-traffic-client`'s connections to `rpc-gateway`.",
+   "cause": "Held connections saturate the node's conntrack table, so new connections from that node time out.",
+   "notblame": "The Kubernetes objects (pods, services, endpoints): they look healthy."
+  },
+  "network_policy_block": {
+   "app": "Hotel Reservation",
+   "name": "Network policy isolates a service",
+   "what": "A NetworkPolicy named `deny-all-recommendation` blocks all incoming and outgoing traffic for the `recommendation` pods. The pods keep running, but nothing can reach them and they reach nothing, so requests that need `recommendation` fail.",
+   "like": "A room locked from both sides: the person inside is fine, but nobody gets in or out.",
+   "place": "NetworkPolicy `deny-all-recommendation` (applied to the recommendation pods).",
+   "cause": "The policy denies all ingress and egress for recommendation, isolating it.",
+   "notblame": "The recommendation pods themselves: they remain Running."
+  },
+  "namespace_memory_limit": {
+   "app": "Hotel Reservation",
+   "name": "Namespace quota rejects new pods",
+   "what": "A ResourceQuota, `memory-limit-quota`, on the `hotel-reservation` namespace requires every pod to declare memory, but the existing workloads do not. When the `search` deployment is recreated, its replacement pod is rejected with `must specify memory`. Pods that were already running keep running.",
+   "like": "A new rule at the door: no entry without a declared weight limit. People inside stay; anyone who steps out cannot come back in.",
+   "place": "ResourceQuota `memory-limit-quota` in `hotel-reservation` (`search` is the affected deployment).",
+   "cause": "The quota enforces memory declarations the workloads lack, so admission rejects search's replacement pod.",
+   "notblame": "A shortage of node memory: this is a policy rejection at admission."
+  },
+  "service_wrong_pod_selection_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "Service also selects the wrong pods",
+   "what": "The `frontend` Service's selector was broadened to `service-route=frontend`, a label that both the frontend pods and the `search` pods carry. Its endpoint list now includes a search pod, which listens on port 8082 instead of frontend's 5000, so some requests through the frontend Service land on a pod that cannot serve them.",
+   "like": "A mail sorter that sends some of the shop's letters to the warehouse next door.",
+   "place": "The `frontend` Service (its selector).",
+   "cause": "The broadened selector adds a search pod to frontend's endpoints, so traffic intermittently reaches a pod that cannot serve it.",
+   "notblame": "The frontend or search pods themselves."
+  },
+  "mutating_webhook_resource_limits_social_network": {
+   "app": "Social Network",
+   "name": "A webhook shrinks pod memory",
+   "what": "A cluster-wide MutatingWebhookConfiguration, `gatekeeper-mutating-webhook-configuration`, intercepts every pod creation in `social-network` and rewrites the first container's memory request and limit to 16Mi. The Deployment still says 128Mi / 256Mi, but the running pods get 16Mi and are OOMKilled on start.",
+   "like": "A clerk who quietly rewrites every order form to the smallest size before it reaches the warehouse.",
+   "place": "MutatingWebhookConfiguration `gatekeeper-mutating-webhook-configuration`.",
+   "cause": "It patches the pods' memory to 16Mi at creation, so they are OOMKilled.",
+   "notblame": "The webhook backend server (it works as configured), the Deployment spec (its values are right), or the four inert companion webhooks."
+  },
+  "finalizer_deadlock_controller_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "Controller lost the right to finish a delete",
+   "what": "ConfigMap `reservation-cleanup-token` is stuck in Terminating because of a finalizer owned by the `cleanup-controller` deployment. The ClusterRole `configmap-cleanup-controller` was made read-only, so the controller cannot patch ConfigMaps to remove the finalizer; its logs show HTTP 403 Forbidden.",
+   "like": "A clerk must stamp a form before it can be shredded, but the stamp was taken away.",
+   "place": "ClusterRole `configmap-cleanup-controller` (with the stuck ConfigMap `reservation-cleanup-token`).",
+   "cause": "The role lost permission to patch ConfigMaps, so the controller cannot remove the finalizer (403).",
+   "notblame": "The controller's code: its normal loop works once its permissions are back."
+  },
+  "cronjob_sidecar_blocks_completion_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "A sidecar keeps every job running",
+   "what": "The CronJob `audit-log-archiver` starts a pod every minute with two regular containers: `archiver`, which finishes quickly, and `fluent-bit-sidecar`, a log shipper that never exits. A Job completes only when every container ends, so each Job stays active forever and they pile up.",
+   "like": "A meeting that cannot end because the note-taker never leaves the room.",
+   "place": "CronJob `audit-log-archiver` (its `fluent-bit-sidecar` container).",
+   "cause": "The sidecar is a regular container that never terminates, so the pods stay Running and the Jobs never complete and accumulate.",
+   "notblame": "The `archiver` container: it exits cleanly."
+  },
+  "duplicate_pvc_mounts_social_network": {
+   "app": "Social Network",
+   "name": "Replicas share a one-machine volume (jaeger)",
+   "what": "The `jaeger` deployment was scaled to several replicas that all use one ReadWriteOnce volume claim, while a required anti-affinity rule forces the replicas onto different machines. The volume can be used on one machine only, so one replica runs and another stays Pending.",
+   "like": "Two people told to sit in different rooms while sharing one pair of headphones on a short cord.",
+   "place": "The `jaeger` deployment (its replicas, the shared ReadWriteOnce claim and the hostname anti-affinity).",
+   "cause": "Several replicas reference one ReadWriteOnce, topology-bound claim while anti-affinity separates them, so only one can use it and the others stay Pending.",
+   "notblame": "A plain lack of nodes or resources: the conflict is between the shared volume and the anti-affinity."
+  },
+  "rolling_update_misconfigured_social_network": {
+   "app": "Social Network",
+   "name": "A rollout removes all old pods first",
+   "what": "`custom-service`'s rollout strategy is `maxUnavailable=100%` with `maxSurge=0`, and the new pods' init container hangs. An update removes all old replicas before any new one is Ready, so the service stays unavailable.",
+   "like": "Closing every checkout lane to retrain the cashiers, while the trainees are stuck at the door.",
+   "place": "Deployment `custom-service` (its rollout strategy, together with the hanging init container).",
+   "cause": "maxUnavailable=100% and maxSurge=0 drain every old pod while the new pods' init container hangs, so nothing is Ready.",
+   "notblame": "Naming only one of the two parts: the reference names both the rollout settings and the hanging init container."
+  },
+  "storage_user_unregistered-1": {
+   "app": "Hotel Reservation",
+   "name": "The database lost its user",
+   "what": "The service logs in to `mongodb-geo` with the credentials it always used, but the expected database user is missing inside MongoDB, so it cannot authenticate and every storage operation fails.",
+   "like": "Your gym card is fine, but the gym deleted your membership from its system.",
+   "place": "The `mongodb-geo` database (the reference names the database, not the client service).",
+   "cause": "The expected database user credentials are missing from MongoDB, so the dependent service cannot authenticate.",
+   "notblame": "The client service's settings: the change is inside the database."
+  },
+  "auth_miss_mongodb": {
+   "app": "Social Network",
+   "name": "Database TLS setup is broken",
+   "what": "`url-shorten-mongodb` requires TLS authentication, but its certificate setup is invalid, so clients cannot complete the TLS handshake and requests that need the database fail.",
+   "like": "A door that opens only with a badge, while the badge printer produces unreadable badges.",
+   "place": "`url-shorten-mongodb` (its TLS certificate setup).",
+   "cause": "The certificate setup of a TLS-required MongoDB is invalid, so clients' TLS handshakes fail.",
+   "notblame": "The calling services: they fail because of the database's certificates."
+  },
+  "missing_service_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "A database's Service was deleted",
+   "what": "The Kubernetes Service `mongodb-rate` was deleted, so other workloads cannot find or reach that database by name, even if its pods still exist.",
+   "like": "A shop that is still open, but its listing was removed from the map.",
+   "place": "The Service `mongodb-rate`.",
+   "cause": "The Service is gone, so service discovery and routing to mongodb-rate fail.",
+   "notblame": "The mongodb-rate pods: they may still be running."
+  },
+  "scale_pod_zero_social_net": {
+   "app": "Social Network",
+   "name": "A service scaled to zero",
+   "what": "Deployment `user-service` in `social-network` was scaled to zero replicas, so no pod serves it and every request that needs it fails at once.",
+   "like": "A shop with the lights on and the sign up, but no staff.",
+   "place": "Deployment `user-service`.",
+   "cause": "Replicas set to 0: there are no serving pods.",
+   "notblame": "Crashes or scheduling problems: there are simply no pods."
+  },
+  "wrong_service_selector_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "Service selector matches no pods",
+   "what": "The `frontend` Service's selector has an extra, wrong label, so it no longer matches the frontend pods. The Service has no or too few endpoints, although the deployments look healthy.",
+   "like": "A receptionist told to send visitors to a desk number that does not exist.",
+   "place": "The `frontend` Service (its selector).",
+   "cause": "A wrong label in the selector leaves the Service without matching endpoints.",
+   "notblame": "The frontend pods or deployment: they look healthy."
+  },
+  "readiness_probe_misconfiguration_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "Readiness check points at a missing page",
+   "what": "The `frontend` deployment's readiness probe checks `/healthz` on port `8080`, which does not exist. The pods never pass readiness, so Kubernetes keeps them out of the Service's endpoints even though the containers run.",
+   "like": "An inspector who checks for a certificate on a wall that does not exist, so the shop is never cleared to open.",
+   "place": "Deployment `frontend` (its readiness probe).",
+   "cause": "The probe targets a non-existent endpoint (`/healthz` on 8080), so pods stay NotReady and get no traffic.",
+   "notblame": "The frontend program itself: the containers may be running fine."
+  },
+  "missing_configmap_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "A required ConfigMap was deleted",
+   "what": "A ConfigMap that the `mongodb-geo` deployment needs was deleted, so its pods start without required settings and fail to initialize or run with invalid defaults.",
+   "like": "Starting a machine after someone removed its settings card.",
+   "place": "`mongodb-geo` (its required ConfigMap).",
+   "cause": "The ConfigMap is missing, so the pods lose required runtime configuration.",
+   "notblame": ""
+  },
+  "taint_no_toleration_social_network": {
+   "app": "Social Network",
+   "name": "The machines refuse the pods",
+   "what": "The cluster's machines carry the taint `sre-fault=blocked:NoSchedule`, but `user-service` only tolerates a different key (`dummy-key`), so its new pods cannot be placed anywhere and stay Pending.",
+   "like": "Every building has a \"members only\" sign, and the visitor's pass is for a different club.",
+   "place": "Deployment `user-service` (its tolerations) against the node taint.",
+   "cause": "Taint/toleration mismatch: the pods have no toleration for `sre-fault=blocked:NoSchedule`.",
+   "notblame": "A lack of capacity on the machines."
+  },
+  "sidecar_port_conflict_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "A sidecar takes the app's port",
+   "what": "A sidecar container in the `frontend` pods listens on the same port as the main application, so the ports collide at startup and the pods do not become Ready.",
+   "like": "Two shops given the same street address.",
+   "place": "Deployment `frontend` (its sidecar container).",
+   "cause": "The sidecar binds the same listening port as the primary container, causing a port conflict at startup.",
+   "notblame": ""
+  },
+  "init_container_dependency_hang_social_network": {
+   "app": "Social Network",
+   "name": "An init container waits forever",
+   "what": "`user-service` has an init container, `wait-for-legacy-config`, that loops on `nslookup legacy-config-service...` until it resolves. That Service no longer exists, so the loop never ends: new pods stay in `Init:0/1` and the rollout stalls, while the old pods keep serving.",
+   "like": "Waiting at the door for a colleague who left the company months ago.",
+   "place": "Deployment `user-service` (its init container `wait-for-legacy-config`).",
+   "cause": "The init container waits for `legacy-config-service`, which does not exist, so new pods never start.",
+   "notblame": "The old pods: they still serve traffic."
+  },
+  "misconfig_app_hotel_res": {
+   "app": "Hotel Reservation",
+   "name": "App configured with the wrong database port",
+   "what": "The `geo` deployment runs an image whose configuration connects to `mongodb-geo` on port 27777 instead of 27017. Geo panics when the connection fails and restarts again and again.",
+   "like": "Dialling the right person with the wrong extension.",
+   "place": "Deployment `geo` (the configuration in its image).",
+   "cause": "Geo connects to mongodb-geo:27777 instead of 27017, so the database connection fails and geo panics.",
+   "notblame": ""
+  },
+  "wrong_bin_usage": {
+   "app": "Hotel Reservation",
+   "name": "The container starts the wrong program",
+   "what": "The `profile` deployment's container entrypoint points to the wrong service binary, so an unintended program runs and profile's APIs misbehave or fail.",
+   "like": "A vending machine wired so the coffee button dispenses soup.",
+   "place": "Deployment `profile` (its container entrypoint).",
+   "cause": "The entrypoint starts the wrong service binary.",
+   "notblame": ""
+  },
+  "update_incompatible_correlated": {
+   "app": "Hotel Reservation",
+   "name": "All databases upgraded to a bad version",
+   "what": "Six MongoDB deployments (`mongodb-geo`, `-profile`, `-rate`, `-recommendation`, `-reservation`, `-user`) were upgraded to an incompatible image, `mongo:8.0.14-rc0`, causing database failures across services.",
+   "like": "Every office replaced its filing cabinets with a model the clerks' keys do not fit.",
+   "place": "The six MongoDB deployments.",
+   "cause": "An upgrade to an incompatible image version (`mongo:8.0.14-rc0`).",
+   "notblame": "A problem in one database only: the change hit all of them together."
+  },
+  "ephemeral_port_range_hotel_reservation": {
+   "app": "Hotel Reservation",
+   "name": "Pods have only four outgoing ports",
+   "what": "Every hotel-reservation pod sets `net.ipv4.ip_local_port_range` to `32000 32003`, which leaves four ports for outgoing connections. The frontend cannot open connections to all its gRPC backends; at least one is always unreachable (`EADDRNOTAVAIL`), while pods keep running.",
+   "like": "A switchboard with only four outside lines for a whole office.",
+   "place": "All hotel-reservation deployments (their port-range setting).",
+   "cause": "The ephemeral port range is narrowed to 4 ports, so outbound connections fail with EADDRNOTAVAIL.",
+   "notblame": "The backends: they are running."
+  },
+  "file_descriptor_exhaustion": {
+   "app": "Hotel Reservation",
+   "name": "Too many connections for the open-file limit",
+   "what": "An outside load generator opens about 1,100 simultaneous TCP connections to `frontend`, whose container allows only 1,024 open files (`ulimit -n`). The frontend drops connections and logs \"too many open files\".",
+   "like": "A restaurant with 1,024 seats and 1,100 guests at the door.",
+   "place": "Deployment `frontend` (its open-file limit).",
+   "cause": "A `ulimit -n` of 1024 is too low for the ~1,100 connections. The reference names the limit as the root cause.",
+   "notblame": ""
+  },
+  "latent_sector_error": {
+   "app": "Hotel Reservation",
+   "name": "Unreadable sectors under the database",
+   "what": "The storage under `mongodb-geo` developed unreadable regions in its data files. WiredTiger's reads of those blocks fail, and `mongod` aborts on every start, so the database stays in CrashLoopBackOff until its data is restored.",
+   "like": "A book with some pages glued shut: the reader stops at the first one it cannot open.",
+   "place": "Deployment `mongodb-geo` (the data on its storage).",
+   "cause": "Latent sector errors: data blocks cannot be read, so mongod aborts at start.",
+   "notblame": ""
+  }
+ }
+}

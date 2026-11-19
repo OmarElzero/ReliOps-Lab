@@ -50,6 +50,8 @@
       const me = (typeof who === "function" ? who() : "").toLowerCase();
       st.labeler = (plan.labelers || []).find((l) => l.toLowerCase() === me) || "";
     }
+    st.loadingMine = !!(st.audit && st.labeler && !st.mine);
+    render();
     if (!st.audit) { st.mine = null; st.manage = null; }
     else if (keep && st.mine) {
       try {
@@ -58,6 +60,8 @@
         pickProblem();
       } catch (e) { /* keep the old list */ }
     } else await loadMine();
+    st.loadingMine = false;
+    render();
     if (pw.get() && !st.owner) await tryUnlock(pw.get(), true);
     if (st.owner && st.audit) await loadManage();
     render();
@@ -255,7 +259,14 @@
       others ? h("span", { class: "aa-small", text: `Everyone: ${others}` }) : null);
     const body = [top];
     if (!st.labeler) { body.push(h("p", { class: "hint", text: "Choose your name to see your diagnoses." })); return h("div", {}, body); }
-    if (!m) { if (st.msg) body.push(h("p", { class: "aa-err", text: st.msg })); return h("div", {}, body); }
+    if (!m) { body.push(st.msg ? h("p", { class: "aa-err", text: st.msg }) : h("p", { class: "hint", text: "Loading your diagnoses (the first load reads every run, so it can take a few seconds)…" })); return h("div", {}, body); }
+    const allMine = plan.items && m.total < plan.items;
+    if (allMine) body.push(h("div", { class: "aa-how" }, h("b", { text: `You hold ${m.total} of the ${plan.items} diagnoses in this audit.` }),
+      h("p", { class: "hint", text: "For the frozen-30 hand label each labeler labels all of them. The same items and any labels already given are kept." }),
+      st.owner ? h("button", { type: "button", class: "primary", text: "Give every labeler all items", onclick: async () => {
+          const r = await ownerCall("POST", "/api/audit/edit", { audit_id: st.audit, by: (typeof who === "function" ? who() : ""), action: "assign_all" });
+          st.msg = r.ok ? "" : (r.data.error || "Failed."); await load(true); } })
+        : h("p", { class: "hint", text: "Owner: unlock the owner panel at the bottom of this tab with the owner password; a button to fix this appears here." })));
     pickProblem();
     if (m.items.length && !("brief" in m.items[0])) body.push(h("div", { class: "aa-how" }, h("b", { text: "The Lab's server is still running older code." }),
       h("p", { class: "hint", text: "The page updated but the server did not, so the problem briefs are missing. Stop the Lab completely (close its window or press Ctrl+C where it runs), start it again, then refresh this page." })));
