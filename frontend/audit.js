@@ -293,17 +293,21 @@
     const name = h("input", { placeholder: "audit name, e.g. Final audit", value: store.get("lab_audit_name", "Final audit") });
     const people = h("input", { placeholder: "labelers, comma separated", value: store.get("lab_audit_people", "Omar Betawy, Noura, Zeinab Mohamed"), style: "flex:1 1 320px" });
     const groups = h("textarea", { rows: "3", style: "width:100%" , value: store.get("lab_audit_groups", cfg.default_groups) });
-    const assign = h("select", { style: "width:auto" }, h("option", { value: "by_problem", text: "Whole problems per person (recommended)" }), h("option", { value: "spread", text: "Spread runs round-robin" }), h("option", { value: "all", text: "Everyone labels every item" }));
+    const asg = store.get("lab_audit_assign", "all");
+    const assign = h("select", { style: "width:auto", title: "Everyone labels every item: what the frozen-30 hand label needs (two labelers, each on all items)" },
+      h("option", { value: "all", text: "Everyone labels every item (frozen-30 hand label)", selected: asg === "all" }),
+      h("option", { value: "by_problem", text: "Whole problems per person", selected: asg === "by_problem" }),
+      h("option", { value: "spread", text: "Spread runs round-robin", selected: asg === "spread" }));
     const disputed = h("input", { placeholder: "only runs this second judge disputes, e.g. openai/gpt-5.4 (empty = all)", value: store.get("lab_audit_disputed", ""), style: "flex:1 1 320px", title: "Keeps only diagnoses where this second judge's stored verdict differs from the first judge's, and draws them at random instead of half pass / half fail." });
     const seed = h("input", { type: "number", value: store.get("lab_audit_seed", "20261112"), style: "width:130px", title: "random seed; write it in the pre-registration before drawing" });
     const overlap = h("input", { type: "number", min: "0", max: "5", value: store.get("lab_audit_overlap", "1"), style: "width:80px", title: "problems each person also labels from the previous person's set" });
     const out = h("p", { class: "hint", text: st.preview || "" });
     const body = () => ({ name: name.value, labelers: people.value.split(",").map((s) => s.trim()).filter(Boolean), groups: groups.value, by: (typeof who === "function" ? who() : ""), assign: assign.value, overlap_problems: parseInt(overlap.value || "0", 10) || 0, seed: parseInt(seed.value || "20261112", 10) || 20261112, disputed_with: disputed.value.trim(), ...(disputed.value.trim() ? { max_per_problem: 99 } : {}) });
-    const remember = () => { store.set("lab_audit_name", name.value); store.set("lab_audit_people", people.value); store.set("lab_audit_groups", groups.value); store.set("lab_audit_overlap", overlap.value); store.set("lab_audit_disputed", disputed.value); store.set("lab_audit_seed", seed.value); };
+    const remember = () => { store.set("lab_audit_name", name.value); store.set("lab_audit_people", people.value); store.set("lab_audit_groups", groups.value); store.set("lab_audit_overlap", overlap.value); store.set("lab_audit_disputed", disputed.value); store.set("lab_audit_seed", seed.value); store.set("lab_audit_assign", assign.value); };
     const go = async (preview) => {
       remember();
       const r = await ownerCall("POST", "/api/audit/draw", { ...body(), preview });
-      st.preview = r.ok ? `${preview ? "Preview: " : "Drawn: "}${r.data.items} runs. ${(r.data.notes || []).join(" | ")}` : (r.data.error || "Failed.");
+      st.preview = r.ok ? `${preview ? "Preview: " : "Drawn: "}${r.data.items} runs; ${assign.value === "all" ? "every labeler gets all of them" : "split between the labelers"}. ${(r.data.notes || []).join(" | ")}` : (r.data.error || "Failed.");
       if (r.ok && !preview) { st.audit = r.data.audit_id; store.set("lab_audit_id", st.audit); st.labeler = ""; st.rjNext = undefined; st.score = null; await load(); } else render();
     };
     box.append(
