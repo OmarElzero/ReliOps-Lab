@@ -223,7 +223,8 @@
   }
   function labelerPanel() {
     const plan = st.plans.find((p) => p.audit_id === st.audit);
-    if (!plan) return h("p", { class: "hint", text: "No audit has been drawn yet. The owner draws one in the panel below; then it shows up here for each named labeler." });
+    if (!plan) return h("div", { class: "aa-how" }, h("b", { text: "No audit has been drawn yet." }),
+      h("p", { class: "hint", text: "The owner draws it once, in the panel below: unlock with the owner password, type the labelers' names, choose \"Everyone labels every item\", set the groups line to \"F30 | pooled | 40\", the second judge to openai/gpt-5.4 and the seed to 20261118, press Preview, then Draw and assign. After that, each labeler pulls the Lab, restarts it, opens this tab and picks their name." }));
     const sel = h("select", { "aria-label": "Audit", onchange: async (e) => { st.audit = e.target.value; store.set("lab_audit_id", st.audit); st.labeler = ""; st.drafts = {}; st.msg = ""; st.rjNext = undefined; await load(); } },
       st.plans.map((p) => h("option", { value: p.audit_id, selected: p.audit_id === st.audit, text: `${p.name} (${p.items} diagnoses)` })));
     const me = h("select", { "aria-label": "Your name", onchange: async (e) => { st.labeler = e.target.value; store.set("lab_audit_labeler", st.labeler); st.drafts = {}; st.msg = ""; await loadMine(); render(); } },
@@ -264,12 +265,12 @@
   }
   const kap = (x) => (typeof x === "number" ? x.toFixed(2) : "—");
   function ownerPanel() {
-    const box = h("details", { class: "card", style: "margin-top:12px", open: st.ownerOpen, ontoggle: (e) => { st.ownerOpen = e.currentTarget.open; } }, h("summary", { text: "Owner: draw the sample and read the score" }));
+    const box = h("details", { class: "card", style: "margin-top:12px", open: st.ownerOpen || !st.plans.length, ontoggle: (e) => { st.ownerOpen = e.currentTarget.open; } }, h("summary", { text: "Owner: draw the sample and read the score" }));
     if (!st.owner) {
       const inp = h("input", { type: "password", placeholder: "owner password", value: pw.get() });
       box.append(h("div", { class: "row", style: "margin-top:8px" }, inp,
         h("button", { type: "button", class: "secondary", text: "Unlock", onclick: async () => { st.ownerMsg = ""; await tryUnlock(inp.value, false); render(); } })),
-        st.ownerMsg ? h("p", { class: "hint", text: st.ownerMsg }) : null);
+        ...(st.ownerMsg ? [h("p", { class: "hint", text: st.ownerMsg })] : []));
       return box;
     }
     const cfg = st.cfg || { configs: [], people: [], default_groups: "R3 | split | 12\nR2 | pooled | 12" };

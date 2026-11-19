@@ -587,7 +587,9 @@
 
   <div id="tab-audit" class="tab-panel" hidden>
     <div id="aa-root"></div>
-    <section class="card">
+    <details class="card aa-more">
+      <summary>Other tools: quick labels outside the audit, judge agreement, re-judge</summary>
+    <section class="aa-more-sec">
       <h2>Quick hand labels (outside the assigned audit)</h2>
       <p class="hint">Is the diagnosis below correct against what the problem's card says a correct diagnosis must
         say? The original judge's verdict is hidden so it does not bias you. About 30 labels are needed before a
@@ -595,7 +597,7 @@
       <div id="label-box"></div>
     </section>
 
-    <section class="card">
+    <section class="aa-more-sec">
       <h2>Judge agreement</h2>
       <div class="results-table-wrap">
         <table class="results-table">
@@ -613,7 +615,7 @@
       <p class="hint" id="judge-notes"></p>
     </section>
 
-    <section class="card">
+    <section class="aa-more-sec">
       <h2>Re-judge with another model</h2>
       <p class="hint">Grades the stored diagnosis text again with a different judge, using SREGym's own judge and
         reference answers (only the judge model changes). Run it with a stronger model and with a model from a
@@ -629,6 +631,7 @@
       </div>
       <pre id="rejudge-log" class="detail-body" style="margin-top:10px;max-height:240px"></pre>
     </section>
+    </details>
   </div>
 
   <div id="tab-problems" class="tab-panel" hidden>

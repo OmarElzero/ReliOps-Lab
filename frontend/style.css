@@ -727,6 +727,10 @@ dialog.q-modal table.rd-table select { max-width: 100%; }
 .camp-row .camp-sum.bad { color: var(--bad); }
 
 .aa-q { margin-top: 10px; }
+.aa-more { margin-top: 14px; }
+.aa-more > summary { cursor: pointer; font-weight: 600; }
+.aa-more-sec { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
+.aa-more-sec h2 { font-size: 16px; }
 .aa-chips { flex-wrap: wrap; margin-bottom: 10px; }
 
 /* Hand-label view: a sticky progress strip, a problem navigator, then one working area per problem with the brief
