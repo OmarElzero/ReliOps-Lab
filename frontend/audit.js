@@ -196,6 +196,22 @@
         h("li", { text: "Say how sure you are, and write one line of reason for every No or Unsure." }),
         h("li", { text: "Work alone. You never see the configuration or either judge's verdict. Do not discuss any item until everyone has finished." })));
   }
+  function cardBox(it) {
+    const id = it.problem_id;
+    const toggle = async () => {
+      if (st.card !== null) { st.card = null; render(); return; }
+      st.card = "loading…"; render();
+      if (!(id in st.cards)) {
+        try { const r = await fetch("/api/card/" + encodeURIComponent(id)); st.cards[id] = await r.text(); } catch (e) { st.cards[id] = "Could not load the card."; }
+      }
+      st.card = st.cards[id]; render();
+    };
+    return h("div", { class: "aa-q" },
+      h("div", { class: "row" },
+        h("button", { type: "button", class: "secondary", onclick: toggle, text: st.card === null ? "Show the full problem card" : "Hide the problem card" }),
+        h("button", { type: "button", class: "secondary", onclick: () => window.openProblem && window.openProblem(id), text: "Open in the Problems tab" })),
+      st.card === null ? null : h("pre", { class: "detail-body", style: "max-height:420px;overflow:auto", text: st.card }));
+  }
   async function finish() {
     const r = await jsonPost("/api/audit/finish", { audit_id: st.audit, labeler: st.labeler });
     if (!r.ok) { st.msg = r.data.error || "Could not finish."; render(); return; }
@@ -416,5 +432,9 @@
       labelerPanel()), ownerPanel());
   }
   const previous = TAB_LOADERS.audit;
-  TAB_LOADERS.audit = () => { if (previous) previous(); load(true); };
+  TAB_LOADERS.audit = () => {
+    if (previous) previous();
+    load(true).catch((e) => root.replaceChildren(h("section", { class: "card" }, h("h2", { text: "Hand label" }),
+      h("p", { class: "aa-err", text: "This tab hit an error: " + (e && e.message ? e.message : e) + ". Pull the Lab, restart it and refresh with Ctrl+Shift+R; if it stays, send a screenshot of this message." }))));
+  };
 })();
