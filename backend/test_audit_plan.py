@@ -320,3 +320,15 @@ class ApiTests(TmpRepoCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AssignAllTest(unittest.TestCase):
+    def test_assign_all_gives_everyone_every_item(self):
+        plan = {"labelers": ["A", "B"], "items": [{"item_id": "I001", "labelers": ["A"]}, {"item_id": "I002", "labelers": ["B"]}]}
+        self.assertEqual(audit_plan.assign_all(plan), 2)
+        self.assertTrue(all(sorted(i["labelers"]) == ["A", "B"] for i in plan["items"]))
+        self.assertEqual(audit_plan.assign_all(plan), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -229,6 +229,18 @@ def extend(plan: dict, runs: list[dict], labels: list[dict], groups: list[dict],
     return notes + [f"added {len(new)} runs"]
 
 
+def assign_all(plan: dict) -> int:
+    """Every labeler of the audit labels every item (keeps every label already given). Returns items changed."""
+    names = list(plan["labelers"])
+    changed = 0
+    for it in plan["items"]:
+        if sorted(it.get("labelers") or []) != sorted(names):
+            it["labelers"], it["anchor"] = list(names), True
+            changed += 1
+    plan["assign"] = "all"
+    return changed
+
+
 def remove_items(plan: dict, labels: list[dict], item_ids: list[str]) -> tuple[list[str], list[str]]:
     """Drops items nobody has labelled. Returns (removed, refused)."""
     done = _done_map(labels)

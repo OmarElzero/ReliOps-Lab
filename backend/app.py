@@ -1773,6 +1773,10 @@ def audit_edit(body: AuditEditIn, x_owner_password: Optional[str] = Header(defau
             res = audit_plan.redistribute(plan, labels, body.labelers, body.overlap_problems)
             _audit_save(plan, "redistribute", f"labelers {', '.join(plan['labelers'])}; re-dealt {res['re_dealt']}, kept {res['kept']}", by)
             return {"ok": True, **res}
+        if body.action == "assign_all":
+            n = audit_plan.assign_all(plan)
+            _audit_save(plan, "assign_all", f"every labeler now holds all {len(plan['items'])} items ({n} changed); labels kept", by)
+            return {"ok": True, "changed": n, "items": len(plan["items"])}
         if body.action == "extend":
             _, runs = _collect_runs(100000)
             notes = audit_plan.extend(plan, runs, labels, audit_plan.parse_groups(body.groups), body.seed, body.max_per_problem, 0)

@@ -257,6 +257,8 @@
     if (!st.labeler) { body.push(h("p", { class: "hint", text: "Choose your name to see your diagnoses." })); return h("div", {}, body); }
     if (!m) { if (st.msg) body.push(h("p", { class: "aa-err", text: st.msg })); return h("div", {}, body); }
     pickProblem();
+    if (m.items.length && !("brief" in m.items[0])) body.push(h("div", { class: "aa-how" }, h("b", { text: "The Lab's server is still running older code." }),
+      h("p", { class: "hint", text: "The page updated but the server did not, so the problem briefs are missing. Stop the Lab completely (close its window or press Ctrl+C where it runs), start it again, then refresh this page." })));
     const ps = problems(), cur = ps.find((p) => p.id === st.prob);
     body.push(howTo(), finishBox());
     body.push(h("nav", { class: "aa-probs", "aria-label": "Problems" }, ps.map((p, i) => h("button", { type: "button",
@@ -349,6 +351,10 @@
       table(["Labeler", "Items", "Done", "Problems (items, done, shared with another labeler)"],
         m.labelers.map((l) => [l.labeler, l.items, l.done, l.problems.map((p) => `${p.problem_id} (${p.items}, ${p.done}${p.overlap ? `, ${p.overlap} shared` : ""})`).join("; ")])),
       h("p", { class: "hint", text: `${m.items} items, ${m.unlabeled.length} with no label yet.` }),
+      m.labelers.some((l) => l.items < m.items) ? h("div", { class: "aa-how" },
+        h("b", { text: `Each labeler holds only part of the ${m.items} items.` }),
+        h("p", { class: "hint", text: "For the frozen-30 hand label every labeler must label every item. This keeps the same items and every label already given." }),
+        h("button", { type: "button", class: "primary", text: "Give every labeler all items", onclick: () => edit({ action: "assign_all" }, (d) => `Done: every labeler now holds all ${d.items} items.`) })) : null,
       h("div", { class: "hint", text: "Redistribute: re-deal the items nobody has labelled yet among these people (whole problems stay together; every label already given is kept). Use it to add a person, drop a person or even out the load." }),
       h("div", { class: "row" }, people, h("span", { class: "hint", text: "Overlap problems:" }), ov,
         h("button", { type: "button", class: "secondary", text: "Redistribute", onclick: () => { store.set("lab_audit_redeal", people.value); edit({ action: "redistribute", labelers: asList(people.value), overlap_problems: parseInt(ov.value || "0", 10) || 0 }, (d) => `Re-dealt ${d.re_dealt} items, kept ${d.kept} that already have labels.`); } })),
