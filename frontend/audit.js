@@ -26,12 +26,13 @@
     return n;
   }
   const Q = {
-    d1: "D1 Localization: does it name the faulty component(s) listed under D1 in the card?",
-    d2: "D2 Characterization: does it state the mechanism listed under D2 (not just a symptom)?",
-    d3: "D3 Scope: does it avoid blaming what the card says not to blame, and avoid contradicting claims?",
+    d1: ["Right place?", "Does it name the broken component given under Place?"],
+    d2: ["Right cause?", "Does it state the mechanism given under Cause, not only a symptom?"],
+    d3: ["Nothing wrongly blamed?", "Does it avoid blaming what Not to blame lists, and avoid claims that contradict the key?"],
   };
+  const CONF = [[1, "Unsure"], [2, "Fairly sure"], [3, "Sure"]];
   const st = { plans: [], audit: store.get("lab_audit_id", ""), labeler: store.get("lab_audit_labeler", ""), mine: null, cur: null,
-               ans: {}, story: null, card: null, results: null, rjLog: "", prob: "", cards: {}, manage: null, confirmDelete: false, editMsg: "", msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
+               drafts: {}, stories: {}, itemMsg: {}, saving: "", howOpen: store.get("lab_audit_how", "1") === "1", card: null, results: null, rjLog: "", prob: "", cards: {}, manage: null, confirmDelete: false, editMsg: "", msg: "", owner: false, ownerOpen: false, ownerMsg: "", cfg: null, score: null, preview: "" };
 
   async function ownerCall(method, url, body) {
     const res = await fetch(url, { method, headers: { "Content-Type": "application/json", "x-owner-password": pw.get() }, body: body ? JSON.stringify(body) : undefined });
@@ -54,7 +55,7 @@
       try {
         const d = await (await fetch(`/api/audit/mine?audit_id=${encodeURIComponent(st.audit)}&labeler=${encodeURIComponent(st.labeler)}`)).json();
         st.mine = d.items ? d : null;
-        if (st.mine && !st.mine.items.find((i) => i.item_id === st.cur)) { const f = st.mine.items.find((i) => !i.done) || st.mine.items[0]; select(f ? f.item_id : null); }
+        pickProblem();
       } catch (e) { /* keep the old list */ }
     } else await loadMine();
     if (pw.get() && !st.owner) await tryUnlock(pw.get(), true);
@@ -72,16 +73,26 @@
     const d = await r.json();
     if (!r.ok) { st.msg = d.error || "Could not load your items."; return; }
     st.mine = d;
-    const open = d.items.find((i) => i.item_id === st.cur) || d.items.find((i) => !i.done) || d.items[0] || null;
-    if (!(open && open.item_id === st.cur)) select(open ? open.item_id : null);
+    pickProblem();
   }
-  function select(id) {
-    st.cur = id;
+  const probOf = (i) => i.problem_id || "?";
+  function problems() {
+    if (!st.mine) return [];
+    const order = [];
+    for (const i of st.mine.items) if (!order.includes(probOf(i))) order.push(probOf(i));
+    return order.map((p) => { const its = st.mine.items.filter((i) => probOf(i) === p); return { id: p, items: its, done: its.filter((i) => i.done).length, brief: its[0].brief }; });
+  }
+  function pickProblem() {
+    const ps = problems();
+    if (!ps.find((p) => p.id === st.prob)) { const open = ps.find((p) => p.done < p.items.length) || ps[0]; st.prob = open ? open.id : ""; }
+  }
+  function select(id) {  // kept for older callers: jump to the item's problem
     const it = st.mine && st.mine.items.find((i) => i.item_id === id);
-    if (it) st.prob = it.problem_id || "";
-    st.card = null;
-    st.ans = it && it.mine ? { ...it.mine } : { d1: null, d2: null, d3: null, confidence: null, reason: "" };
-    st.story = null;
+    if (it) st.prob = probOf(it);
+  }
+  function draft(it) {
+    if (!st.drafts[it.item_id]) st.drafts[it.item_id] = it.mine ? { ...it.mine, dirty: false } : { d1: null, d2: null, d3: null, confidence: null, reason: "", dirty: false };
+    return st.drafts[it.item_id];
   }
   async function tryUnlock(secret, quiet) {
     const res = await fetch("/api/tasks/unlock", { method: "POST", headers: { "x-owner-password": secret } });
@@ -91,57 +102,99 @@
     return res.ok;
   }
 
-  async function save() {
-    const a = st.ans, it = st.mine.items.find((i) => i.item_id === st.cur);
-    const r = await jsonPost("/api/audit/label", { audit_id: st.audit, item_id: st.cur, labeler: st.labeler, d1: a.d1, d2: a.d2, d3: a.d3, confidence: a.confidence, reason: a.reason || "", used_story: !!a.used_story });
-    if (!r.ok) { st.msg = r.data.error || "Could not save."; render(); return; }
-    st.msg = "";
-    const wasDone = it.done;
+  function missing(d) {
+    const m = [];
+    if (d.d1 === null) m.push("right place"); if (d.d2 === null) m.push("right cause"); if (d.d3 === null) m.push("nothing wrongly blamed");
+    if (!d.confidence) m.push("how sure");
+    if ((d.d1 === false || d.d2 === false || d.confidence === 1) && !(d.reason || "").trim()) m.push("a one-line reason (needed for Incorrect or Unsure)");
+    return m;
+  }
+  async function save(it) {
+    const d = draft(it), miss = missing(d);
+    if (miss.length) { st.itemMsg[it.item_id] = "Still needed: " + miss.join(", ") + "."; render(); return; }
+    st.saving = it.item_id; st.itemMsg[it.item_id] = ""; render();
+    const r = await jsonPost("/api/audit/label", { audit_id: st.audit, item_id: it.item_id, labeler: st.labeler, d1: d.d1, d2: d.d2, d3: d.d3, confidence: d.confidence, reason: d.reason || "", used_story: !!d.used_story });
+    st.saving = "";
+    if (!r.ok) { st.itemMsg[it.item_id] = r.data.error || "Could not save. Try again."; render(); return; }
+    d.dirty = false;
+    if (st.howOpen) { st.howOpen = false; store.set("lab_audit_how", "0"); }
     await loadMine();
-    if (!wasDone) { const next = st.mine.items.find((i) => !i.done && (i.problem_id || "?") === st.prob) || st.mine.items.find((i) => !i.done); if (next) select(next.item_id); }
     try { st.plans = (await jsonGet("/api/audit/plans")).plans || []; } catch (e) { /* ignore */ }
     render();
   }
-
-  function yn(key) {
-    const set = (v) => { st.ans[key] = v; render(); };
-    const on = (v) => (st.ans[key] === v ? "primary" : "secondary");
-    return h("div", { class: "aa-q" }, h("div", { class: "hint", text: Q[key] }),
-      h("div", { class: "row" }, h("button", { type: "button", class: on(true), onclick: () => set(true), text: "Yes" }),
-        h("button", { type: "button", class: on(false), onclick: () => set(false), text: "No" })));
+  function seg(label, options, value, onPick, disabled) {
+    return h("div", { class: "aa-seg", role: "group", "aria-label": label },
+      options.map(([v, t, tone]) => h("button", { type: "button", class: value === v ? `on ${tone || ""}` : "", "aria-pressed": value === v ? "true" : "false", disabled, onclick: () => onPick(v), text: t })));
   }
-  function storyBox(it) {
-    const open = async () => {
-      st.ans.used_story = true;
-      st.story = "loading…"; render();
+  const fmt = (t) => { const out = []; String(t || "").split(/(`[^`]+`)/).forEach((x) => out.push(x.startsWith("`") && x.endsWith("`") && x.length > 1 ? h("code", { text: x.slice(1, -1) }) : x)); return out; };
+  function briefPanel(p) {
+    const b = p.brief, it0 = p.items[0];
+    const key = it0.reference ? h("details", { class: "aa-key", open: !b },
+        h("summary", { text: "Answer key: SREGym's reference text, word for word" }),
+        h("p", { class: "aa-small", text: "This is exactly what both judges graded against. The summary above is written from it; where they seem to differ, this text wins." }),
+        h("pre", { text: it0.reference }))
+      : it0.expected ? h("div", { class: "aa-key" }, h("div", { class: "aa-label", text: "What a correct diagnosis must say (problem card)" }), h("pre", { text: it0.expected }))
+      : h("p", { class: "aa-small", text: "No answer key for this problem on this machine. Pull the Lab and restart, then reload." });
+    if (!b) return h("aside", { class: "aa-brief" }, h("div", { class: "aa-label", text: `${p.items.length} ${p.items.length === 1 ? "diagnosis" : "diagnoses"}` }), h("h3", { class: "aa-pname", text: p.id }), key, cardBox(it0));
+    return h("aside", { class: "aa-brief" },
+      h("div", { class: "aa-label", text: `${b.app} · ${p.items.length} ${p.items.length === 1 ? "diagnosis" : "diagnoses"}` }),
+      h("h3", { class: "aa-pname", text: b.name }),
+      h("div", { class: "aa-pid", text: p.id }),
+      h("p", {}, fmt(b.what)),
+      b.like ? h("p", { class: "aa-like" }, fmt(b.like)) : null,
+      h("div", { class: "aa-label", text: "A correct diagnosis says" }),
+      h("dl", { class: "aa-must" },
+        h("dt", { text: "Place" }), h("dd", {}, fmt(b.place)),
+        h("dt", { text: "Cause" }), h("dd", {}, fmt(b.cause)),
+        b.notblame ? [h("dt", { text: "Not to blame" }), h("dd", {}, fmt(b.notblame))] : null),
+      key);
+  }
+  function storyLink(it) {
+    const d = draft(it), open = st.stories[it.item_id];
+    const go = async () => {
+      d.used_story = true; d.dirty = true; st.stories[it.item_id] = "Loading…"; render();
       try {
         const r = await fetch(`/api/audit/story?audit_id=${encodeURIComponent(st.audit)}&labeler=${encodeURIComponent(st.labeler)}&item_id=${encodeURIComponent(it.item_id)}`);
-        st.story = await r.text();
-      } catch (e) { st.story = "Could not load the story."; }
+        st.stories[it.item_id] = await r.text();
+      } catch (e) { st.stories[it.item_id] = "Could not load the run."; }
       render();
     };
-    return h("div", { class: "aa-q" },
-      st.story === null
-        ? h("div", { class: "row" }, h("button", { type: "button", class: "secondary", onclick: open, text: "Show the agent's story (optional)" }),
-            h("span", { class: "hint", text: "The judge only saw the diagnosis text above, so judge that first. Opening the story is recorded with your label." }))
-        : h("div", {}, h("div", { class: "hint", text: "Agent story (opened; recorded with your label)" }), h("pre", { class: "detail-body", style: "max-height:420px;overflow:auto", text: st.story })));
+    if (open) return h("details", { class: "aa-story", open: true }, h("summary", { text: "The agent's run (opened; noted with your label)" }), h("pre", { text: open }));
+    return h("button", { type: "button", class: "ghost aa-storybtn", onclick: go, text: "Open the agent's run (only if you cannot decide; it is noted)" });
   }
-  function cardBox(it) {
-    const id = it.problem_id;
-    const toggle = async () => {
-      if (st.card !== null) { st.card = null; render(); return; }
-      st.card = "loading…"; render();
-      if (!(id in st.cards)) {
-        try { const r = await fetch("/api/card/" + encodeURIComponent(id)); st.cards[id] = await r.text(); } catch (e) { st.cards[id] = "Could not load the card."; }
-      }
-      st.card = st.cards[id]; render();
-    };
-    return h("div", { class: "aa-q" },
-      h("div", { class: "row" },
-        h("button", { type: "button", class: "secondary", onclick: toggle, text: st.card === null ? "Show the full problem card" : "Hide the problem card" }),
-        h("button", { type: "button", class: "secondary", onclick: () => window.openProblem && window.openProblem(id), text: "Open in the Problems tab" }),
-        h("span", { class: "hint", text: "Your answers stay here when you come back." })),
-      st.card === null ? null : h("pre", { class: "detail-body", style: "max-height:420px;overflow:auto", text: st.card }));
+  function itemCard(it) {
+    const d = draft(it), locked = it.locked;
+    const set = (k) => (v) => { d[k] = v; d.dirty = true; st.itemMsg[it.item_id] = ""; render(); };
+    const verdict = d.d1 === null || d.d2 === null ? null : d.d1 && d.d2;
+    const chip = d.dirty && it.done ? ["Changed, not saved", "warn"] : it.done ? [verdict ? "Saved · Correct" : "Saved · Incorrect", verdict ? "ok" : "bad"]
+      : verdict === null ? ["Not labelled", ""] : [`${verdict ? "Correct" : "Incorrect"} · not saved`, "warn"];
+    const needReason = (d.d1 === false || d.d2 === false || d.confidence === 1) && !(d.reason || "").trim();
+    return h("article", { class: `aa-item${it.done && !d.dirty ? " done" : ""}`, id: `aa-${it.item_id}` },
+      h("div", { class: "aa-itemtop" }, h("span", { class: "aa-iid", text: it.item_id }), h("span", { class: `aa-chip ${chip[1]}`, text: chip[0] })),
+      h("p", { class: "aa-diag", text: it.diagnosis_text }),
+      h("div", { class: "aa-qs" }, ["d1", "d2", "d3"].map((k) => h("div", { class: "aa-qrow", title: Q[k][1] },
+        h("span", { class: "aa-qt" }, h("b", { text: Q[k][0] }), h("span", { class: "aa-small", text: " " + Q[k][1] })),
+        seg(Q[k][0], [[true, "Yes", "yes"], [false, "No", "no"]], d[k], set(k), locked)))),
+      h("div", { class: "aa-qrow" }, h("span", { class: "aa-qt" }, h("b", { text: "How sure?" })), seg("How sure", CONF.map(([v, t]) => [v, t, "acc"]), d.confidence, set("confidence"), locked)),
+      h("input", { type: "text", class: `aa-reason${needReason ? " need" : ""}`, placeholder: needReason ? "Why? One line (needed for Incorrect or Unsure)" : "Why? One line (optional when Correct and sure)", value: d.reason || "", disabled: locked,
+        oninput: (e) => { d.reason = e.target.value; d.dirty = true; e.target.classList.toggle("need", (d.d1 === false || d.d2 === false || d.confidence === 1) && !e.target.value.trim()); } }),
+      h("div", { class: "aa-itembar" },
+        h("button", { type: "button", class: "primary", disabled: locked || st.saving === it.item_id || (it.done && !d.dirty), onclick: () => save(it),
+          text: locked ? "Locked (you finished)" : st.saving === it.item_id ? "Saving…" : it.done ? (d.dirty ? "Save change" : "Saved") : "Save" }),
+        verdict === null ? null : h("span", { class: "aa-small", text: `Overall: ${verdict ? "Correct" : "Incorrect"} (correct only when place and cause are both Yes)` }),
+        storyLink(it)),
+      st.itemMsg[it.item_id] ? h("p", { class: "aa-err", text: st.itemMsg[it.item_id] }) : null);
+  }
+  function howTo() {
+    return h("details", { class: "aa-how", open: st.howOpen, ontoggle: (e) => { st.howOpen = e.currentTarget.open; store.set("lab_audit_how", st.howOpen ? "1" : "0"); } },
+      h("summary", { text: "How to label (read once)" }),
+      h("ol", {},
+        h("li", { text: "Pick a problem below. Read its brief on the left once: what broke, and what a correct diagnosis has to say." }),
+        h("li", { text: "For each diagnosis on the right, answer three questions. It counts as correct only when Right place and Right cause are both Yes." }),
+        h("li", { text: "Judge only what the text says. Do not credit what the agent may have meant, and do not diagnose the fault yourself." }),
+        h("li", { text: "If a problem leaves room for two readings, decide your rule on its first diagnosis and keep to it for the rest of that problem." }),
+        h("li", { text: "Say how sure you are, and write one line of reason for every No or Unsure." }),
+        h("li", { text: "Work alone. You never see the configuration or either judge's verdict. Do not discuss any item until everyone has finished." })));
   }
   async function finish() {
     const r = await jsonPost("/api/audit/finish", { audit_id: st.audit, labeler: st.labeler });
@@ -168,52 +221,39 @@
         h("div", { class: "hint", text: "Judge's reasoning" }), h("pre", { class: "detail-body", text: x.judge_reasoning || "(none stored)" }),
         x.your_reason ? h("div", { class: "hint", text: `Your reason: ${x.your_reason}` }) : null)));
   }
-  function itemForm() {
-    const it = st.mine.items.find((i) => i.item_id === st.cur);
-    if (!it) return h("p", { class: "hint", text: "No items." });
-    const a = st.ans;
-    const overall = a.d1 === null || a.d2 === null ? "—" : (a.d1 && a.d2 ? "Correct" : "Incorrect");
-    return h("div", {},
-      h("div", { class: "cfg-label", text: `${it.item_id} · ${it.problem_id || "?"}` }),
-      h("div", { class: "label-text", text: it.diagnosis_text }),
-      cardBox(it),
-      storyBox(it),
-      h("div", { class: "label-expected", text: it.expected || "No problem card for this problem yet. Label against the problem's rubric and say so in the reason." }),
-      yn("d1"), yn("d2"), yn("d3"),
-      h("p", { class: "hint", text: `Overall (D1 and D2 both Yes): ${overall}` }),
-      h("div", { class: "aa-q" }, h("div", { class: "hint", text: "Confidence" }),
-        h("div", { class: "row" }, [[1, "1 unsure"], [2, "2 fairly sure"], [3, "3 sure"]].map(([v, t]) =>
-          h("button", { type: "button", class: a.confidence === v ? "primary" : "secondary", onclick: () => { a.confidence = v; render(); }, text: t })))),
-      h("textarea", { rows: "2", placeholder: "Reason, one sentence (needed when Incorrect or unsure)", value: a.reason || "", style: "width:100%;margin-top:8px",
-        oninput: (e) => { a.reason = e.target.value; } }),
-      h("div", { class: "row", style: "margin-top:10px" },
-        h("button", { type: "button", class: "primary", onclick: save, disabled: it.locked || a.d1 === null || a.d2 === null || a.d3 === null || !a.confidence, text: it.locked ? "Locked (you finished)" : it.done ? "Update" : "Save and next" })),
-      st.msg ? h("p", { class: "hint", style: "color:var(--bad)", text: st.msg }) : null);
-  }
   function labelerPanel() {
     const plan = st.plans.find((p) => p.audit_id === st.audit);
-    if (!plan) return h("p", { class: "hint", text: "No audit has been drawn yet. The owner draws one in the panel below, then it shows up here for each assigned person." });
-    const sel = h("select", { onchange: async (e) => { st.audit = e.target.value; store.set("lab_audit_id", st.audit); st.labeler = ""; st.msg = ""; st.rjNext = undefined; await load(); } },
-      st.plans.map((p) => h("option", { value: p.audit_id, selected: p.audit_id === st.audit, text: `${p.name} (${p.items} runs)` })));
-    const me = h("select", { onchange: async (e) => { st.labeler = e.target.value; store.set("lab_audit_labeler", st.labeler); st.msg = ""; await loadMine(); render(); } },
-      h("option", { value: "", text: "I am…" }), (plan.labelers || []).map((l) => h("option", { value: l, selected: l === st.labeler, text: l })));
-    const prog = (plan.progress || []).map((p) => `${p.labeler} ${p.done}/${p.total}`).join(" · ");
-    const body = [h("div", { class: "row" }, sel, me), h("p", { class: "hint", text: prog })];
-    if (!st.labeler) body.push(h("p", { class: "hint", text: "Pick your name to see your items." }));
-    else if (st.mine) {
-      body.push(h("p", { class: "hint", text: `${st.mine.done} of ${st.mine.total} done. Each problem below is yours to learn once: read its card, then label all its runs. Work alone; do not discuss items until everyone has finished.` }));
-      const probs = [...new Set(st.mine.items.map((i) => i.problem_id || "?"))];
-      body.push(h("div", { class: "row aa-chips" }, probs.map((p) => {
-        const its = st.mine.items.filter((i) => (i.problem_id || "?") === p);
-        const dn = its.filter((i) => i.done).length;
-        return h("button", { type: "button", class: p === st.prob ? "primary" : "secondary", title: p,
-          onclick: () => { const first = its.find((i) => !i.done) || its[0]; select(first.item_id); st.msg = ""; render(); }, text: `${p} ${dn}/${its.length}` });
-      })));
-      body.push(h("div", { class: "row aa-chips" }, st.mine.items.filter((i) => (i.problem_id || "?") === st.prob).map((i) =>
-        h("button", { type: "button", class: i.item_id === st.cur ? "primary" : "secondary", onclick: () => { select(i.item_id); st.msg = ""; render(); }, text: `${i.done ? "✓ " : ""}${i.item_id}` }))));
-      body.push(finishBox());
-      body.push(itemForm());
-    } else if (st.msg) body.push(h("p", { class: "hint", style: "color:var(--bad)", text: st.msg }));
+    if (!plan) return h("p", { class: "hint", text: "No audit has been drawn yet. The owner draws one in the panel below; then it shows up here for each named labeler." });
+    const sel = h("select", { "aria-label": "Audit", onchange: async (e) => { st.audit = e.target.value; store.set("lab_audit_id", st.audit); st.labeler = ""; st.drafts = {}; st.msg = ""; st.rjNext = undefined; await load(); } },
+      st.plans.map((p) => h("option", { value: p.audit_id, selected: p.audit_id === st.audit, text: `${p.name} (${p.items} diagnoses)` })));
+    const me = h("select", { "aria-label": "Your name", onchange: async (e) => { st.labeler = e.target.value; store.set("lab_audit_labeler", st.labeler); st.drafts = {}; st.msg = ""; await loadMine(); render(); } },
+      h("option", { value: "", text: "Choose your name…" }), (plan.labelers || []).map((l) => h("option", { value: l, selected: l === st.labeler, text: l })));
+    const others = (plan.progress || []).map((p) => `${p.labeler} ${p.done}/${p.total}`).join(" · ");
+    const m = st.mine;
+    const pct = m && m.total ? Math.round(100 * m.done / m.total) : 0;
+    const top = h("div", { class: "aa-top" },
+      h("div", { class: "row" }, sel, me),
+      m ? h("div", { class: "aa-prog" }, h("span", { class: "aa-count", text: `${m.done} of ${m.total} labelled` }),
+        h("span", { class: "aa-meter", "aria-hidden": "true" }, h("i", { style: `width:${pct}%` }))) : null,
+      others ? h("span", { class: "aa-small", text: `Everyone: ${others}` }) : null);
+    const body = [top];
+    if (!st.labeler) { body.push(h("p", { class: "hint", text: "Choose your name to see your diagnoses." })); return h("div", {}, body); }
+    if (!m) { if (st.msg) body.push(h("p", { class: "aa-err", text: st.msg })); return h("div", {}, body); }
+    pickProblem();
+    const ps = problems(), cur = ps.find((p) => p.id === st.prob);
+    body.push(howTo(), finishBox());
+    body.push(h("nav", { class: "aa-probs", "aria-label": "Problems" }, ps.map((p, i) => h("button", { type: "button",
+      class: `aa-pchip${p.id === st.prob ? " cur" : ""}${p.done === p.items.length ? " full" : ""}`, title: p.id,
+      onclick: () => { st.prob = p.id; render(); const t = document.querySelector(".aa-work"); if (t) t.scrollIntoView({ block: "start", behavior: "smooth" }); } },
+      h("span", { text: `${i + 1}. ${p.brief ? p.brief.name : p.id}` }), h("b", { text: `${p.done}/${p.items.length}` })))));
+    if (cur) {
+      const idx = ps.indexOf(cur), next = ps.slice(idx + 1).concat(ps.slice(0, idx)).find((p) => p.done < p.items.length);
+      body.push(h("div", { class: "aa-work" }, briefPanel(cur),
+        h("div", { class: "aa-items" }, cur.items.map(itemCard),
+          h("div", { class: "aa-nextbar" },
+            cur.done === cur.items.length ? h("span", { class: "aa-small", text: "All diagnoses of this problem are saved." }) : h("span", { class: "aa-small", text: `${cur.items.length - cur.done} left in this problem.` }),
+            next ? h("button", { type: "button", class: "secondary", onclick: () => { st.prob = next.id; render(); const t = document.querySelector(".aa-work"); if (t) t.scrollIntoView({ block: "start", behavior: "smooth" }); }, text: `Next problem: ${next.brief ? next.brief.name : next.id} →` }) : null))));
+    }
     return h("div", {}, body);
   }
 
@@ -370,9 +410,9 @@
   }
 
   function render() {
-    root.replaceChildren(h("section", { class: "card" }, h("h2", { text: "Assigned audit" }),
-      h("p", { class: "hint", text: "A blind sample drawn by the owner. You see the problem, what the card says a correct diagnosis must say, and the diagnosis; never the configuration or the judge's verdict." }),
-      labelerPanel(), ownerPanel()));
+    root.replaceChildren(h("section", { class: "card aa" }, h("h2", { text: "Hand label: was the agent's diagnosis right?" }),
+      h("p", { class: "hint", text: "A blind sample drawn by the owner. For each diagnosis you see the problem and its answer key, never the configuration or either judge's verdict." }),
+      labelerPanel()), ownerPanel());
   }
   const previous = TAB_LOADERS.audit;
   TAB_LOADERS.audit = () => { if (previous) previous(); load(true); };

@@ -1700,6 +1700,8 @@ def audit_mine(audit_id: str, labeler: str):
         lab = mine_labels.get(it["item_id"])
         items.append({"item_id": it["item_id"], "problem_id": r.get("problem_id") or it.get("problem_id"), "diagnosis_text": r.get("diagnosis_text") or "(run not found on this machine)",
                       "expected": runner.card_section(card, 4) or runner.reference_answer(r.get("problem_id") or it.get("problem_id") or ""),
+                      "reference": runner.reference_text(r.get("problem_id") or it.get("problem_id") or ""),
+                      "brief": runner.problem_brief(r.get("problem_id") or it.get("problem_id") or ""),
                       "done": bool(lab),
                       "locked": bool(lab and fin and (lab.get("updated_at") or "") <= fin),
                       "mine": ({k: lab.get(k) for k in ("d1", "d2", "d3", "overall_correct", "confidence", "reason")} if lab else None)})

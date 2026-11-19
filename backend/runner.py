@@ -1825,16 +1825,43 @@ def read_card(problem_id: str) -> str | None:
     return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
 
 
-def reference_answer(problem_id: str) -> str | None:
-    """SREGym's own reference answer for a problem, from experiments/*reference-answers.json in the ReliOps clone
-    (written by scripts/dump_root_causes.py). Used as the answer key when a problem has no card."""
-    for p in sorted((reliops_dir() / "experiments").glob("*reference-answers.json")):
+AUDIT_KEYS = Path(__file__).resolve().parent / "audit_keys"
+
+
+def _key_files(pattern: str) -> list[Path]:
+    """Answer-key files shipped with the Lab (backend/audit_keys) first, then the ReliOps clone's experiments/."""
+    return sorted(AUDIT_KEYS.glob(pattern)) + sorted((reliops_dir() / "experiments").glob(pattern))
+
+
+def reference_text(problem_id: str) -> str | None:
+    """SREGym's own reference answer (`root_cause`) for a problem, the text both judges compare against
+    (from *reference-answers.json, written by ReliOps scripts/dump_root_causes.py)."""
+    for p in _key_files("*reference-answers.json"):
         try:
             ans = json.loads(p.read_text(encoding="utf-8")).get("answers") or {}
         except (OSError, ValueError):
             continue
         if problem_id in ans:
-            return "SREGym reference answer (the text both judges compare against):\n" + str(ans[problem_id])
+            return str(ans[problem_id])
+    return None
+
+
+def reference_answer(problem_id: str) -> str | None:
+    """The reference answer with a heading line; used as the answer key when a problem has no card."""
+    t = reference_text(problem_id)
+    return None if t is None else "SREGym reference answer (the text both judges compare against):\n" + t
+
+
+def problem_brief(problem_id: str) -> dict | None:
+    """Plain-language brief of a problem for hand labellers (name, app, what, like, place, cause, notblame), from
+    *problem-briefs.json. Written from the reference answer; the reference wins where they seem to differ."""
+    for p in _key_files("*problem-briefs.json"):
+        try:
+            b = json.loads(p.read_text(encoding="utf-8")).get("briefs") or {}
+        except (OSError, ValueError):
+            continue
+        if problem_id in b:
+            return b[problem_id]
     return None
 
 
