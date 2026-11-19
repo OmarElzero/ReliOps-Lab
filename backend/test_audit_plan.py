@@ -192,7 +192,7 @@ class ApiTests(TmpRepoCase):
         mine = c.get("/api/audit/mine", params={"audit_id": "final-audit", "labeler": "noura"}).json()
         self.assertGreater(mine["total"], 0)
         it = mine["items"][0]
-        self.assertEqual(set(it), {"item_id", "problem_id", "diagnosis_text", "expected", "done", "locked", "mine"})  # blind
+        self.assertEqual(set(it), {"item_id", "problem_id", "diagnosis_text", "expected", "reference", "brief", "done", "locked", "mine"})  # blind: no configuration, no verdict
         self.assertEqual(c.get("/api/audit/mine", params={"audit_id": "final-audit", "labeler": "Someone"}).status_code, 403)
         ok = c.post("/api/audit/label", json={"audit_id": "final-audit", "item_id": it["item_id"], "labeler": "Noura", "d1": True, "d2": True, "d3": True, "confidence": 3})
         self.assertTrue(ok.json()["overall_correct"])
