@@ -39,7 +39,9 @@ AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AW
                   # agent/react_v3_r5 = reliops_v5 only (ReliOps plan 27)
                   "D1_PREDICT", "FIX_FAMILIES", "ADAPTIVE_WAIT",
                   # agent/react_v4 = reliops_v6 only (ReliOps plan 28)
-                  "DX_GATE")
+                  "DX_GATE",
+                  # reliops_v6 plan 28 variants DG2-DG8 (ReliOps plan 29), each needs DX_GATE
+                  "COMPARE", "PROC_STEPS", "CASE_BOARD", "STUBS", "CHALLENGER", "OPENING", "DX_VOTE")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
@@ -74,6 +76,13 @@ AGENT_SWITCH_HELP = {
     "FIX_FAMILIES": "C-037 (reliops_v5, needs TRANSACTIONAL_FIX): every restore names the routed procedure's ordered fix families; try the next one",
     "ADAPTIVE_WAIT": "C-038 (reliops_v5, with TRANSACTIONAL_FIX): wait for rollouts to settle (30-180 s) before a proof read or driver verdict",
     "DX_GATE": "C-039 (reliops_v6): numbered observations; the diagnosis is a JSON object the driver checks against them (quotes, location, one alternative ruled out, every anomaly addressed, rule-out reads run) before it is submitted",
+    "COMPARE": "C-040 (reliops_v6, needs DX_GATE): after the gate passes, the blamed object is compared with the other objects of its kind; differing shared fields are shown",
+    "PROC_STEPS": "C-041 (reliops_v6, needs DX_GATE and ROUTING): a loaded procedure is released one step at a time, after each step's reads",
+    "CASE_BOARD": "C-042 (reliops_v6, needs DX_GATE): a board of anomalies, kinds read and missing rule-out reads after every observation",
+    "STUBS": "C-043 (reliops_v6, needs DX_GATE): observations older than the last 6 sent as one-line stubs; reopen(step) shows one again",
+    "CHALLENGER": "C-044 (reliops_v6, needs DX_GATE): a blind second opinion (no diagnosis shown) names a cause and one read; the driver runs it",
+    "OPENING": "C-045 (reliops_v6, needs DX_GATE): the same generic reads (pods, events, main kinds) before the first model turn",
+    "DX_VOTE": "C-046 (reliops_v6, needs DX_GATE): two more diagnosis drafts; if they blame different objects, one describe each and a pick",
 }
 SWITCH_AGENT = "reliops_v2"                       # the default agent with switches (UI)
 SWITCH_AGENTS = ("reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6")   # every agent that reads REACT_V1_* switches (v3: ReliOps plan 22; v5: plan 27)
