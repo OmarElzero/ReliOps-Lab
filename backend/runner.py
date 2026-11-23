@@ -37,7 +37,9 @@ AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AW
                   # agent/react_v3 only (ReliOps plan 22); reliops_v2 ignores them
                   "EVIDENCE_FIRST", "TRANSACTIONAL_FIX", "T1_DRIVER", "FINAL_MODEL", "DIAG_VOTE",
                   # agent/react_v3_r5 = reliops_v5 only (ReliOps plan 27)
-                  "D1_PREDICT", "FIX_FAMILIES", "ADAPTIVE_WAIT")
+                  "D1_PREDICT", "FIX_FAMILIES", "ADAPTIVE_WAIT",
+                  # agent/react_v4 = reliops_v6 only (ReliOps plan 28)
+                  "DX_GATE")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
@@ -71,10 +73,11 @@ AGENT_SWITCH_HELP = {
     "D1_PREDICT": "C-036 (reliops_v5): before the diagnosis is submitted, one prediction is checked by a read the driver runs; keep or revise",
     "FIX_FAMILIES": "C-037 (reliops_v5, needs TRANSACTIONAL_FIX): every restore names the routed procedure's ordered fix families; try the next one",
     "ADAPTIVE_WAIT": "C-038 (reliops_v5, with TRANSACTIONAL_FIX): wait for rollouts to settle (30-180 s) before a proof read or driver verdict",
+    "DX_GATE": "C-039 (reliops_v6): numbered observations; the diagnosis is a JSON object the driver checks against them (quotes, location, one alternative ruled out, every anomaly addressed, rule-out reads run) before it is submitted",
 }
 SWITCH_AGENT = "reliops_v2"                       # the default agent with switches (UI)
-SWITCH_AGENTS = ("reliops_v2", "reliops_v3", "reliops_v5")   # every agent that reads REACT_V1_* switches (v3: ReliOps plan 22; v5: plan 27)
-OUR_AGENTS = ("reliops_v1", "reliops_v2", "reliops_v3", "reliops_v5")
+SWITCH_AGENTS = ("reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6")   # every agent that reads REACT_V1_* switches (v3: ReliOps plan 22; v5: plan 27)
+OUR_AGENTS = ("reliops_v1", "reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6")
 
 
 def clean_switches(raw) -> list[str]:
@@ -620,7 +623,7 @@ def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops
         out.append(f"[check] GEMINI_API_KEY contains a space, a quote or a '#' (it starts with {gk[:4]}... and has {len(gk)} characters). "
                    f"A key never contains those, so the line in the .env probably carries extra text. Google will reject it.")
     try:
-        pkg = {"reliops_v2": "react_v2", "reliops_v3": "react_v3", "reliops_v5": "react_v3_r5"}.get(agent, "react_v1")
+        pkg = {"reliops_v2": "react_v2", "reliops_v3": "react_v3", "reliops_v5": "react_v3_r5", "reliops_v6": "react_v4"}.get(agent, "react_v1")
         driver = (reliops or reliops_dir()) / "agent" / pkg / "driver.py"
         if agent in OUR_AGENTS and not rebuilding and driver.exists() and shutil.which("docker"):
             r = subprocess.run(["docker", "image", "inspect", "-f", "{{.Created}}", "sregym-agent-base:latest"],
