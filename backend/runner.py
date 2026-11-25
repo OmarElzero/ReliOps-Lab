@@ -22,6 +22,7 @@ import ssl
 import sys
 import threading
 import time
+import urllib.parse
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -485,18 +486,21 @@ def network_problems(hosts: list[str], timeout: float = 6.0) -> list[str]:
     """Hosts this machine cannot reach right now, as ["github.com (name lookup failed: ...)"]. A run needs github.com (Helm
     charts) and the model API; starting a 5 to 8 minute deploy while either is unreachable only produces an empty run."""
     bad = []
-    for host in hosts:
+    for entry in hosts:
+        host, _, port_s = entry.partition(":")
+        port = int(port_s) if port_s else 443
         try:
-            ip = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)[0][4][0]
+            ip = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)[0][4][0]
         except OSError as e:
-            bad.append(f"{host} (name lookup failed: {e})")
+            bad.append(f"{entry} (name lookup failed: {e})")
             continue
         try:
-            with socket.create_connection((ip, 443), timeout=timeout) as raw:
-                with ssl.create_default_context().wrap_socket(raw, server_hostname=host):
-                    pass
+            with socket.create_connection((ip, port), timeout=timeout) as raw:
+                if port == 443:                       # a plain local gateway (http) has no TLS to check
+                    with ssl.create_default_context().wrap_socket(raw, server_hostname=host):
+                        pass
         except (OSError, ssl.SSLError) as e:
-            bad.append(f"{host} (connection failed: {type(e).__name__}: {str(e)[:80]})")
+            bad.append(f"{entry} (connection failed: {type(e).__name__}: {str(e)[:80]})")
     return bad
 
 
@@ -504,7 +508,10 @@ def network_hosts(env_vars: dict[str, str], model: str) -> list[str]:
     hosts = ["github.com"]
     base = (env_vars.get("AGENT_API_BASE") or "").strip()
     if base:
-        hosts.append(re.sub(r"^https?://", "", base).split("/")[0].split(":")[0])
+        # keep a port that is not 443 (e.g. the paced key proxy on 127.0.0.1:8790): checking 127.0.0.1:443 waited forever
+        u = urllib.parse.urlsplit(base if "://" in base else "https://" + base)
+        port = u.port or (80 if u.scheme == "http" else 443)
+        hosts.append(u.hostname if port == 443 else f"{u.hostname}:{port}")
     elif model.startswith("gemini/"):
         hosts.append("generativelanguage.googleapis.com")
     return hosts

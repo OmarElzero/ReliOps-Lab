@@ -1596,7 +1596,9 @@ class NetworkTests(unittest.TestCase):
 
     def test_hosts_follow_the_model_and_any_gateway(self):
         self.assertEqual(self.r.network_hosts({}, "gemini/x"), ["github.com", "generativelanguage.googleapis.com"])
-        self.assertEqual(self.r.network_hosts({"AGENT_API_BASE": "https://gw.example.com:8443/v1"}, "gemini/x"), ["github.com", "gw.example.com"])
+        self.assertEqual(self.r.network_hosts({"AGENT_API_BASE": "https://gw.example.com:8443/v1"}, "gemini/x"), ["github.com", "gw.example.com:8443"])
+        self.assertEqual(self.r.network_hosts({"AGENT_API_BASE": "http://127.0.0.1:8790/v1beta"}, "gemini/x"), ["github.com", "127.0.0.1:8790"])
+        self.assertEqual(self.r.network_hosts({"AGENT_API_BASE": "https://gw.example.com/v1"}, "gemini/x"), ["github.com", "gw.example.com"])
         self.assertEqual(self.r.max_network_wait_min({"RELIOPS_NET_WAIT_MIN": "0"}), 0.0)
         self.assertEqual(self.r.max_network_wait_min({}), 30.0)
 
