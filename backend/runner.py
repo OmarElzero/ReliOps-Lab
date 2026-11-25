@@ -41,7 +41,9 @@ AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AW
                   # agent/react_v4 = reliops_v6 only (ReliOps plan 28)
                   "DX_GATE",
                   # reliops_v6 plan 28 variants DG2-DG8 (ReliOps plan 29), each needs DX_GATE
-                  "COMPARE", "PROC_STEPS", "CASE_BOARD", "STUBS", "CHALLENGER", "OPENING", "DX_VOTE")
+                  "COMPARE", "PROC_STEPS", "CASE_BOARD", "STUBS", "CHALLENGER", "OPENING", "DX_VOTE",
+                  # agent/react_v7 = reliops_v7 only (ReliOps plan 31)
+                  "WIDE_SCOPE", "FIX_RULES")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
@@ -83,10 +85,12 @@ AGENT_SWITCH_HELP = {
     "CHALLENGER": "C-044 (reliops_v6, needs DX_GATE): a blind second opinion (no diagnosis shown) names a cause and one read; the driver runs it",
     "OPENING": "C-045 (reliops_v6, needs DX_GATE): the same generic reads (pods, events, main kinds) before the first model turn",
     "DX_VOTE": "C-046 (reliops_v6, needs DX_GATE): two more diagnosis drafts; if they blame different objects, one describe each and a pick",
+    "WIDE_SCOPE": "C-049 (reliops_v7): before the first diagnosis turn the driver reads what lies outside the namespace (webhooks, RBAC bindings, cluster DNS, nodes, namespace policies) and shows one block",
+    "FIX_RULES": "C-050 (reliops_v7): general fix rules at the start of the mitigation stage (namespace-wide rules, Job sidecars, stuck rollouts)",
 }
 SWITCH_AGENT = "reliops_v2"                       # the default agent with switches (UI)
-SWITCH_AGENTS = ("reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6")   # every agent that reads REACT_V1_* switches (v3: ReliOps plan 22; v5: plan 27)
-OUR_AGENTS = ("reliops_v1", "reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6")
+SWITCH_AGENTS = ("reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6", "reliops_v7")   # every agent that reads REACT_V1_* switches (v3: ReliOps plan 22; v5: plan 27)
+OUR_AGENTS = ("reliops_v1", "reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6", "reliops_v7")
 
 
 def clean_switches(raw) -> list[str]:
@@ -632,7 +636,7 @@ def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops
         out.append(f"[check] GEMINI_API_KEY contains a space, a quote or a '#' (it starts with {gk[:4]}... and has {len(gk)} characters). "
                    f"A key never contains those, so the line in the .env probably carries extra text. Google will reject it.")
     try:
-        pkg = {"reliops_v2": "react_v2", "reliops_v3": "react_v3", "reliops_v5": "react_v3_r5", "reliops_v6": "react_v4"}.get(agent, "react_v1")
+        pkg = {"reliops_v2": "react_v2", "reliops_v3": "react_v3", "reliops_v5": "react_v3_r5", "reliops_v6": "react_v4", "reliops_v7": "react_v7"}.get(agent, "react_v1")
         driver = (reliops or reliops_dir()) / "agent" / pkg / "driver.py"
         if agent in OUR_AGENTS and not rebuilding and driver.exists() and shutil.which("docker"):
             r = subprocess.run(["docker", "image", "inspect", "-f", "{{.Created}}", "sregym-agent-base:latest"],
