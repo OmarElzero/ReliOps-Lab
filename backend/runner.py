@@ -27,7 +27,7 @@ from pathlib import Path
 
 RELIOPS_REPO_URL = "https://github.com/OmarElzero/ReliOps"
 DEFAULT_WORKDIR = Path(os.environ.get("RELIOPS_LAB_WORKDIR", Path.home() / "reliops-lab-workdir"))
-RELIOPS_BRANCH = os.environ.get("RELIOPS_BRANCH", "claude/determined-einstein-mjmr56")
+RELIOPS_BRANCH = os.environ.get("RELIOPS_BRANCH", "main")   # ReliOps has one branch, main, since 25 Nov 2026
 
 # The opt-in switches of agent/react_v2 (agent/react_v2/features.py). Each is passed to the agent as REACT_V1_<NAME>=on;
 # every switch not chosen for a step is passed as "off", so a stray line in a .env cannot turn one on.
