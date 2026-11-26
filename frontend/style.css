@@ -146,6 +146,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .results-table tbody tr:last-child td { border-bottom: none; }
 .results-table tbody tr:hover { background: var(--sunken); }
 .results-table th { position: sticky; top: 0; background: var(--surface-2); color: var(--muted); font-weight: 650; font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
+.results-table th.sortable { cursor: pointer; user-select: none; }
+.results-table th.sortable:hover { color: var(--text); }
 .results-table td.r-pass { color: var(--ok); font-weight: 600; }
 .results-table td.r-fail { color: var(--bad); font-weight: 600; }
 .results-table td.r-unknown { color: var(--muted); }

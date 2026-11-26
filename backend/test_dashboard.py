@@ -197,6 +197,15 @@ class DashboardApiTests(TmpRepoCase):
         self.assertEqual([(p["name"], p["runs"]) for p in d["people"]], [("omar", 5)])
         self.assertEqual(self.dash(run_by=["nobody"])["people"], [])
 
+    def test_people_ranked_by_known_runs(self):
+        # a person with more runs but most of them incomplete ranks below one with more known (finished) runs
+        d = self.dash()
+        for p in d["people"]:
+            self.assertIn("incomplete_share", p)
+            self.assertAlmostEqual(p["incomplete_share"], round(p["incomplete"] / p["runs"], 3))
+        src = open(dashboard.__file__).read()
+        self.assertIn('people.sort(key=lambda p: (-p["n"], -p["runs"], p["name"]))', src)
+
     def test_one_run_has_full_record(self):
         r = self.client.get("/api/run/r1").json()
         self.assertEqual((r["problem_id"], r["purpose"], r["category"]), ("d1", "dev", "Net"))

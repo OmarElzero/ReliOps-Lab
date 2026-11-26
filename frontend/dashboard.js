@@ -298,20 +298,54 @@
     }
   }
 
+  // People table: ranked by known runs (finished with a verdict) by default; every column but Purposes sorts on a click.
+  // Pass / known is shown but is not a measure of the person: it depends on the agent versions and problems they ran.
+  let PEOPLE_SORT = { key: "known", desc: true };
+  const PEOPLE_COLS = [
+    ["Person", "name", (p) => p.name.toLowerCase()],
+    ["Known", "known", (p) => p.n],
+    ["Pass / known", "pass", (p) => (p.n ? p.pass / p.n : -1)],
+    ["Incomplete", "incomplete", (p) => p.incomplete_share ?? (p.runs ? p.incomplete / p.runs : 0)],
+    ["All runs", "runs", (p) => p.runs],
+    ["Problems", "problems", (p) => p.problems],
+    ["Configurations", "configs", (p) => p.configs],
+    ["Purposes", null, null],
+    ["Active", "last", (p) => p.last || ""],
+  ];
+
   function renderPeople() {
     const box = $("dash-people");
     box.innerHTML = "";
     if (!DATA.people.length) { box.appendChild(el("p", "No runs match these filters.", "hint")); return; }
     const t = el("table", undefined, "results-table");
     const h = el("tr");
-    ["Person", "Runs", "Pass / known", "Incomplete", "Problems", "Configurations", "Purposes", "Active"].forEach((x) => h.appendChild(el("th", x)));
+    PEOPLE_COLS.forEach(([label, key]) => {
+      const mark = key && PEOPLE_SORT.key === key ? (PEOPLE_SORT.desc ? " ▼" : " ▲") : "";
+      const th = el("th", label + mark);
+      if (key) {
+        th.className = "sortable";
+        th.title = "sort by this column";
+        th.addEventListener("click", () => {
+          PEOPLE_SORT = PEOPLE_SORT.key === key ? { key, desc: !PEOPLE_SORT.desc } : { key, desc: key !== "name" };
+          renderPeople();
+        });
+      }
+      h.appendChild(th);
+    });
     t.appendChild(h);
-    DATA.people.forEach((p) => {
+    const get = PEOPLE_COLS.find((c) => c[1] === PEOPLE_SORT.key)[2];
+    const rows = [...DATA.people].sort((a, b) => {
+      const x = get(a), y = get(b);
+      const d = x < y ? -1 : x > y ? 1 : 0;
+      return (PEOPLE_SORT.desc ? -d : d) || b.n - a.n || a.name.localeCompare(b.name);
+    });
+    rows.forEach((p) => {
       const tr = el("tr");
       const name = el("td", undefined, "r-problem");
       name.appendChild(linkButton(p.name, () => addFilter("run_by", p.name), "show only this person's runs"));
       tr.appendChild(name);
-      [String(p.runs), `${p.pass} / ${p.n}`, String(p.incomplete), String(p.problems), String(p.configs),
+      const share = p.runs ? Math.round((100 * p.incomplete) / p.runs) : 0;
+      [String(p.n), `${p.pass} / ${p.n}`, `${p.incomplete} (${share}%)`, String(p.runs), String(p.problems), String(p.configs),
         Object.entries(p.purposes).map(([k, v]) => `${k} ${v}`).join(", "),
         p.first === p.last ? (p.first || "—") : `${p.first} to ${p.last}`].forEach((x) => tr.appendChild(el("td", x)));
       t.appendChild(tr);

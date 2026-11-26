@@ -209,7 +209,11 @@ def build(all_runs: list[dict], f: dict, metric: str, manifests: list[dict], lab
                        "problems": len({r.get("problem_id") for r in rs}), "configs": len({stats.config_key(r) for r in rs}),
                        "purposes": dict(Counter(r.get("purpose") for r in rs)), "first": days[0] if days else None,
                        "last": days[-1] if days else None})
-    people.sort(key=lambda p: (-p["runs"], p["name"]))
+    # ranked by known runs (finished with a verdict), not by all runs: a run lost to a key or a cluster is not work that
+    # reached the results, and a burst of such losses used to push a person up the table (team lead, 26 Nov 2026)
+    for p in people:
+        p["incomplete_share"] = round(p["incomplete"] / p["runs"], 3) if p["runs"] else 0.0
+    people.sort(key=lambda p: (-p["n"], -p["runs"], p["name"]))
 
     # every experiment (queue start) with each agent version's results side by side: a history of past queues and campaigns
     by_exp: dict[str, list[dict]] = defaultdict(list)
