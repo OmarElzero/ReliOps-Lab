@@ -46,7 +46,9 @@ AGENT_SWITCHES = ("TOKEN_LOG", "EMPTY_SUBMIT_GUARD", "OPTIONAL_ARGS", "BUDGET_AW
                   # agent/react_v7 = reliops_v7 only (ReliOps plan 31)
                   "WIDE_SCOPE", "FIX_RULES",
                   # agent/react_v8 = reliops_v8 only (ReliOps plan 32)
-                  "ADMISSION_DIFF", "ADMISSION_DRYRUN", "EFFECTS_SWEEP", "SWEEP", "SWEEP_UNRANKED", "OBS_CUT")
+                  "ADMISSION_DIFF", "ADMISSION_DRYRUN", "EFFECTS_SWEEP", "SWEEP", "SWEEP_UNRANKED", "OBS_CUT",
+                  # agent/react_v9 = reliops_v9 only (ReliOps plan 33)
+                  "FINISH_GUARD", "FORMAT_REPAIR")
 AGENT_SWITCH_HELP = {
     "TOKEN_LOG": "F12: write token totals and cost into the transcript (logging only)",
     "EMPTY_SUBMIT_GUARD": "G0: send an empty diagnosis back (twice at most)",
@@ -95,11 +97,13 @@ AGENT_SWITCH_HELP = {
     "EFFECTS_SWEEP": "C-054 (reliops_v8): Warning events of other namespaces and unfinished deletions with finalizers, shown before the first turn",
     "SWEEP": "C-055 (reliops_v8): the driver reads all nine categories, scores them in code and shows the top three; a no-fault diagnosis is sent back once if any category fired",
     "SWEEP_UNRANKED": "C-056 (reliops_v8, needs SWEEP): the same sweep, fired categories listed alphabetically without scores (control)",
+    "FINISH_GUARD": "C-058 (reliops_v9): one notice near the action or time limit; after the limit no driver check holds a submit back, and the driver submits for the model if it still does not",
+    "FORMAT_REPAIR": "C-059 (reliops_v9): near-miss replies read as the action, error messages name the broken rule, failed replies dropped from what the model sees",
     "OBS_CUT": "C-057 (reliops_v8): observations over 8,000 characters keep their first 6,000 and last 2,000 with a marker",
 }
 SWITCH_AGENT = "reliops_v2"                       # the default agent with switches (UI)
-SWITCH_AGENTS = ("reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6", "reliops_v7", "reliops_v8")   # every agent that reads REACT_V1_* switches (v3: ReliOps plan 22; v5: plan 27)
-OUR_AGENTS = ("reliops_v1", "reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6", "reliops_v7", "reliops_v8")
+SWITCH_AGENTS = ("reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6", "reliops_v7", "reliops_v8", "reliops_v9")   # every agent that reads REACT_V1_* switches (v3: ReliOps plan 22; v5: plan 27)
+OUR_AGENTS = ("reliops_v1", "reliops_v2", "reliops_v3", "reliops_v5", "reliops_v6", "reliops_v7", "reliops_v8", "reliops_v9")
 
 
 def clean_switches(raw) -> list[str]:
@@ -651,7 +655,7 @@ def preflight_warnings(env_vars: dict[str, str], model: str, agent: str, reliops
         out.append(f"[check] GEMINI_API_KEY contains a space, a quote or a '#' (it starts with {gk[:4]}... and has {len(gk)} characters). "
                    f"A key never contains those, so the line in the .env probably carries extra text. Google will reject it.")
     try:
-        pkg = {"reliops_v2": "react_v2", "reliops_v3": "react_v3", "reliops_v5": "react_v3_r5", "reliops_v6": "react_v4", "reliops_v7": "react_v7", "reliops_v8": "react_v8"}.get(agent, "react_v1")
+        pkg = {"reliops_v2": "react_v2", "reliops_v3": "react_v3", "reliops_v5": "react_v3_r5", "reliops_v6": "react_v4", "reliops_v7": "react_v7", "reliops_v8": "react_v8", "reliops_v9": "react_v9"}.get(agent, "react_v1")
         driver = (reliops or reliops_dir()) / "agent" / pkg / "driver.py"
         if agent in OUR_AGENTS and not rebuilding and driver.exists() and shutil.which("docker"):
             r = subprocess.run(["docker", "image", "inspect", "-f", "{{.Created}}", "sregym-agent-base:latest"],
